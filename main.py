@@ -43,6 +43,7 @@ class AlignedRequest(BaseModel):
     column_keys: list[str]
     ref_table: str = "gps_data"
     tolerance: float = 0.5
+    filter: dict | None = None
 
 
 class CorrelationRequest(BaseModel):
@@ -63,6 +64,11 @@ class CompareRequest(BaseModel):
 class PresetCreate(BaseModel):
     name: str
     columns: list[str]
+
+
+class FilterPresetCreate(BaseModel):
+    name: str
+    config: dict
 
 
 # ─── Flight Routes ─────────────────────────────────────────
@@ -145,7 +151,8 @@ def get_columns(flight_id: int):
 def get_aligned(flight_id: int, req: AlignedRequest):
     """Get time-aligned multi-column data."""
     result = analysis.get_aligned_data(
-        flight_id, req.column_keys, req.ref_table, req.tolerance
+        flight_id, req.column_keys, req.ref_table, req.tolerance,
+        filter_spec=req.filter
     )
     return result
 
@@ -229,6 +236,45 @@ def delete_preset(preset_id: int):
     """Delete a preset."""
     conn = get_db()
     conn.execute("DELETE FROM presets WHERE id=?", (preset_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ─── Filter Preset Routes ──────────────────────────────────
+
+@app.get("/api/filter-presets")
+def list_filter_presets():
+    """List all saved filter presets."""
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM filter_presets ORDER BY name").fetchall()
+    conn.close()
+    return {"presets": [{"id": r['id'], "name": r['name'], "config": json.loads(r['config_json'])} for r in rows]}
+
+
+@app.post("/api/filter-presets")
+def create_filter_preset(req: FilterPresetCreate):
+    """Save a filter configuration preset."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO filter_presets (name, config_json) VALUES (?, ?)",
+            (req.name, json.dumps(req.config))
+        )
+        conn.commit()
+        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        return {"id": pid, "name": req.name, "config": req.config}
+    except Exception as e:
+        conn.close()
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/filter-presets/{preset_id}")
+def delete_filter_preset(preset_id: int):
+    """Delete a filter preset."""
+    conn = get_db()
+    conn.execute("DELETE FROM filter_presets WHERE id=?", (preset_id,))
     conn.commit()
     conn.close()
     return {"ok": True}

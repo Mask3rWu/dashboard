@@ -8,6 +8,11 @@ __pycache__/
 .venv/
 venv/
 
+# PyInstaller
+*.spec
+build/
+dist/
+
 # Frontend build
 frontend/dist/
 frontend/node_modules/

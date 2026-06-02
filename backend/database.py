@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS presets (
     columns_json    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS filter_presets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    config_json     TEXT NOT NULL
+);
+
 -- GPS Data (1Hz, dual-antenna)
 CREATE TABLE IF NOT EXISTS gps_data (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

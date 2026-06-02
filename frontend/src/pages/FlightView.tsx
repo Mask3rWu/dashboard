@@ -3,9 +3,12 @@ import * as echarts from 'echarts';
 import {
   getFlight, getAlignedData, getAlerts, getStats, getCorrelation, getAnomaly,
   listPresets, createPreset, deletePreset,
+  listFilterPresets, createFilterPreset, deleteFilterPreset,
   type Flight, type ColumnGroup,
   type AlignedData, type AlertItem, type FlightStats, type Preset,
+  type FilterSpec, type FilterPreset,
 } from '../api';
+import FilterBar from '../components/FilterBar';
 
 interface Props {
   flights: Flight[];
@@ -59,6 +62,8 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [showMapLegend, setShowMapLegend] = useState(true);
+  const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
+  const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
 
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInst = useRef<echarts.ECharts | null>(null);
@@ -73,11 +78,13 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
       getAlerts(selectedFlightId),
       getStats(selectedFlightId),
       listPresets(),
-    ]).then(([flightData, alertData, statsData, presetData]) => {
+      listFilterPresets(),
+    ]).then(([flightData, alertData, statsData, presetData, fpData]) => {
       setColumnGroups(flightData.columns);
       setAlerts(alertData.alerts);
       setStats(statsData);
       setPresets(presetData.presets);
+      setFilterPresets(fpData.presets);
       const defaults = [
         'pos_data.lat', 'pos_data.lng', 'gps_data.nava_alt',
         'engine_data.rpm', 'drone_state_data.battery_pct',
@@ -95,8 +102,8 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
   // ─── Fetch aligned data ────────────────────────────────
   useEffect(() => {
     if (!selectedFlightId || selectedColumns.length === 0) return;
-    getAlignedData(selectedFlightId, selectedColumns, refTable).then(setAligned);
-  }, [selectedFlightId, selectedColumns, refTable]);
+    getAlignedData(selectedFlightId, selectedColumns, refTable, 0.5, filterSpec ?? undefined).then(setAligned);
+  }, [selectedFlightId, selectedColumns, refTable, filterSpec]);
 
   // ─── Chart ─────────────────────────────────────────────
   useEffect(() => {
@@ -186,6 +193,14 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
     const leftPad = isNorm ? 60 : 80 + (leftUnits > 0 ? (leftUnits - 1) * AXIS_WIDTH : 0);
     const rightPad = isNorm ? 40 : 80 + (rightUnits > 0 ? (rightUnits - 1) * AXIS_WIDTH : 0);
 
+    const segments = aligned.segments || [];
+    const hasFilter = segments.length > 0;
+
+    // Background bar data for dataZoom-area overlay (1 = matched)
+    const dzIndicatorData = hasFilter
+      ? times.map((_, i) => (aligned.mask?.[i] ? 1 : 0))
+      : [];
+
     const option: echarts.EChartsOption = {
       color: seriesList.map((_, i) => unitColor(seriesYIndex[i])),
       tooltip: {
@@ -195,9 +210,13 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
         textStyle: { color: '#374151', fontSize: 12 },
         formatter: (params: any) => {
           if (!Array.isArray(params)) return '';
-          const time = params[0]?.name || '';
+          // Filter out helper series (dataZoom overlay)
+          const mainParams = params.filter((p: any) =>
+            p.seriesName !== '__dz_indicator__');
+          if (mainParams.length === 0) return '';
+          const time = mainParams[0]?.name || '';
           let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
-          params.forEach((p: any) => {
+          mainParams.forEach((p: any) => {
             if (p.value?.[1] != null) {
               html += `<div>${p.marker} ${p.seriesName}: <strong>${Number(p.value[1]).toFixed(2)}</strong></div>`;
             }
@@ -210,31 +229,81 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
         textStyle: { color: '#6b7280', fontSize: 11 },
         data: seriesList.map(([, s]) => isNorm ? s.label : `${s.label} (${s.unit || '-'})`),
       },
-      grid: { left: leftPad, right: rightPad, top: 40, bottom: 60 },
-      xAxis: {
-        type: 'category',
-        data: times,
+      // Grid[0]=main chart, Grid[1]=thin overlay at exact dataZoom position
+      grid: hasFilter ? [
+        { left: leftPad, right: rightPad, top: 40, bottom: 60 },
+        { left: leftPad, right: rightPad, bottom: 6, height: 18 },
+      ] : { left: leftPad, right: rightPad, top: 40, bottom: 60 },
+      xAxis: hasFilter ? [
+        {
+          type: 'category', data: times, gridIndex: 0,
+          axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
+          axisLine: { lineStyle: { color: '#e5e7eb' } },
+        },
+        {
+          type: 'category', data: times, gridIndex: 1,
+          axisLabel: { show: false }, axisTick: { show: false },
+          axisLine: { show: false }, splitLine: { show: false },
+        },
+      ] : {
+        type: 'category', data: times,
         axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
         axisLine: { lineStyle: { color: '#e5e7eb' } },
       },
-      yAxis: yAxes,
+      yAxis: hasFilter ? [
+        ...(Array.isArray(yAxes) ? (yAxes as any[]).map((a: any) => ({ ...a, gridIndex: 0 })) : [{ ...yAxes as any, gridIndex: 0 }]),
+        { type: 'value', gridIndex: 1, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
+      ] : yAxes,
       dataZoom: [
-        { type: 'slider', start: 0, end: 100, height: 20, bottom: 10 },
+        { type: 'slider', start: 0, end: 100, height: 18, bottom: 6,
+          backgroundColor: 'rgba(249,250,251,0.55)',
+        },
         { type: 'inside' },
       ],
-      series: seriesList.map(([, s], i) => {
-        const values = getValues(s.values);
-        const gi = seriesYIndex[i];
-        return {
-          name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
-          type: 'line',
-          yAxisIndex: seriesYIndex[i],
-          data: times.map((t, j) => [t, values[j]]),
-          smooth: true,
-          showSymbol: false,
-          lineStyle: { width: 1.5, color: unitColor(gi) },
-        };
-      }),
+      series: [
+        // ── Line series with per-series markArea for background bands ──
+        ...seriesList.map(([, s], i) => {
+          const values = getValues(s.values);
+          const gi = seriesYIndex[i];
+          const seriesObj: any = {
+            name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
+            type: 'line',
+            yAxisIndex: seriesYIndex[i],
+            xAxisIndex: 0,
+            data: times.map((t, j) => [t, values[j]]),
+            smooth: true,
+            showSymbol: false,
+            z: 1,
+            lineStyle: { width: 1.5, color: unitColor(gi) },
+          };
+          // markArea on every series: each colors its own axis region
+          if (hasFilter) {
+            seriesObj.markArea = {
+              silent: true,
+              label: { show: false },
+              itemStyle: { color: 'rgba(147, 197, 253, 0.18)' },
+              data: segments.map((seg) => [
+                { coord: [times[seg.start], 'min'] },
+                { coord: [times[Math.min(seg.end, times.length - 1)], 'max'] },
+              ]),
+            };
+          }
+          return seriesObj;
+        }),
+        // ── DataZoom overlay bar — colors matching regions inside slider area ──
+        ...(hasFilter ? [{
+          name: '__dz_indicator__',
+          type: 'bar',
+          xAxisIndex: 1,
+          yAxisIndex: Array.isArray(yAxes) ? (yAxes as any[]).length : 1,
+          data: dzIndicatorData,
+          itemStyle: { color: '#3b82f6', borderColor: '#3b82f6', opacity: 0.5 },
+          barWidth: '100%',
+          tooltip: { show: false },
+          silent: true,
+          z: 0,
+        }] : []),
+      ],
       ...(aligned.alerts.length > 0 ? {
         markLine: {
           silent: true,
@@ -394,6 +463,28 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
           <option value="pos_data">基准:位置</option>
         </select>
       </div>
+
+      {/* ── Filter bar ──────────────────────────────────── */}
+      <FilterBar
+        columnGroups={columnGroups.map((g) => ({
+          ...g,
+          columns: g.columns.filter((c) => selectedColumns.includes(c.key)),
+        })).filter((g) => g.columns.length > 0)}
+        filterSpec={filterSpec}
+        onChange={setFilterSpec}
+        filterPresets={filterPresets}
+        onSavePreset={async (name) => {
+          if (!filterSpec) return;
+          await createFilterPreset(name, filterSpec);
+          const data = await listFilterPresets();
+          setFilterPresets(data.presets);
+        }}
+        onLoadPreset={(preset) => setFilterSpec(preset.config)}
+        onDeletePreset={async (id) => {
+          await deleteFilterPreset(id);
+          setFilterPresets((prev) => prev.filter((p) => p.id !== id));
+        }}
+      />
 
       {/* ── Stats bar ──────────────────────────────────── */}
       {stats && viewMode === 'chart' && (

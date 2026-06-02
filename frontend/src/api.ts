@@ -47,6 +47,27 @@ export interface AlignedData {
     values: (number | null)[];
   }>;
   alerts: AlertItem[];
+  mask?: boolean[];
+  segments?: { start: number; end: number }[];
+}
+
+export interface FilterCondition {
+  column: string;
+  op: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'between';
+  value: number | null;
+  min_val: number | null;
+  max_val: number | null;
+}
+
+export interface FilterSpec {
+  logic: 'and' | 'or';
+  conditions: FilterCondition[];
+}
+
+export interface FilterPreset {
+  id: number;
+  name: string;
+  config: FilterSpec;
 }
 
 export interface AlertItem {
@@ -94,10 +115,10 @@ export const importFolder = (sourcePath: string) =>
 
 // Data
 export const getColumns = (flightId: number) => request<{ columns: ColumnGroup[] }>(`/flights/${flightId}/columns`);
-export const getAlignedData = (flightId: number, columnKeys: string[], refTable = 'gps_data', tolerance = 0.5) =>
+export const getAlignedData = (flightId: number, columnKeys: string[], refTable = 'gps_data', tolerance = 0.5, filter?: FilterSpec) =>
   request<AlignedData>(`/flights/${flightId}/aligned`, {
     method: 'POST',
-    body: JSON.stringify({ column_keys: columnKeys, ref_table: refTable, tolerance }),
+    body: JSON.stringify({ column_keys: columnKeys, ref_table: refTable, tolerance, filter: filter || undefined }),
   });
 export const getAlerts = (flightId: number) => request<{ alerts: AlertItem[] }>(`/flights/${flightId}/alerts`);
 export const getStats = (flightId: number) => request<FlightStats>(`/flights/${flightId}/stats`);
@@ -123,3 +144,9 @@ export const listPresets = () => request<{ presets: Preset[] }>('/presets');
 export const createPreset = (name: string, columns: string[]) =>
   request<Preset>('/presets', { method: 'POST', body: JSON.stringify({ name, columns }) });
 export const deletePreset = (id: number) => request('/presets/' + id, { method: 'DELETE' });
+
+// Filter Presets
+export const listFilterPresets = () => request<{ presets: FilterPreset[] }>('/filter-presets');
+export const createFilterPreset = (name: string, config: FilterSpec) =>
+  request<FilterPreset>('/filter-presets', { method: 'POST', body: JSON.stringify({ name, config }) });
+export const deleteFilterPreset = (id: number) => request('/filter-presets/' + id, { method: 'DELETE' });

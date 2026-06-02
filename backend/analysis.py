@@ -178,13 +178,15 @@ def get_columns_for_flight(flight_id):
     return result
 
 
-def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5):
+def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5, filter_spec=None):
     """Align selected columns to a reference time series.
 
     Args:
         flight_id: Flight ID
         column_keys: List of "table.column" strings
         ref_table: Reference table for time base
+        tolerance: Max time difference for nearest-neighbor matching
+        filter_spec: Optional filter with {logic, conditions} to apply after alignment
         tolerance: Max time difference for nearest-neighbor match (seconds)
 
     Returns:
@@ -283,12 +285,92 @@ def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5
     } for r in alert_rows]
 
     conn.close()
-    return {
+
+    result = {
         'times': times,
         'ref_secs': ref_secs,
         'series': series,
         'alerts': alerts,
     }
+
+    if filter_spec:
+        result = apply_filter(result, filter_spec)
+
+    return result
+
+
+def apply_filter(aligned, filter_spec):
+    """Compute filter mask and segments from aligned data.
+
+    Does NOT modify series values — only adds mask[] and segments[] for
+    the frontend to highlight matching regions.
+    """
+    n = len(aligned['times'])
+    if n == 0:
+        return aligned
+
+    conditions = filter_spec.get('conditions', []) if isinstance(filter_spec, dict) else filter_spec.conditions
+    logic = (filter_spec.get('logic', 'and') if isinstance(filter_spec, dict) else getattr(filter_spec, 'logic', 'and'))
+
+    masks = []
+    for cond in conditions:
+        if isinstance(cond, dict):
+            col, op = cond.get('column'), cond.get('op')
+            val, min_v, max_v = cond.get('value'), cond.get('min_val'), cond.get('max_val')
+        else:
+            col, op = cond.column, cond.op
+            val, min_v, max_v = cond.value, cond.min_val, cond.max_val
+
+        series_entry = aligned['series'].get(col)
+        if not series_entry:
+            continue
+
+        values = series_entry['values']
+        mask = [False] * n
+        for i, v in enumerate(values):
+            if v is None:
+                continue
+            if op == 'gt':
+                mask[i] = v > val
+            elif op == 'gte':
+                mask[i] = v >= val
+            elif op == 'lt':
+                mask[i] = v < val
+            elif op == 'lte':
+                mask[i] = v <= val
+            elif op == 'eq':
+                mask[i] = abs(v - val) < 1e-9
+            elif op == 'between':
+                mask[i] = (min_v is None or v >= min_v) and (max_v is None or v <= max_v)
+        masks.append(mask)
+
+    if not masks:
+        return aligned
+
+    combined = masks[0][:]
+    if logic == 'and':
+        for m in masks[1:]:
+            for i in range(n):
+                combined[i] = combined[i] and m[i]
+    else:
+        for m in masks[1:]:
+            for i in range(n):
+                combined[i] = combined[i] or m[i]
+
+    segments = []
+    start = None
+    for i in range(n):
+        if combined[i] and start is None:
+            start = i
+        elif not combined[i] and start is not None:
+            segments.append({'start': start, 'end': i})
+            start = None
+    if start is not None:
+        segments.append({'start': start, 'end': n})
+
+    aligned['mask'] = combined
+    aligned['segments'] = segments
+    return aligned
 
 
 def get_flight_stats(flight_id):
