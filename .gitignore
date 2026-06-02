@@ -1,0 +1,22 @@
+# Data
+20250323153351_535/
+*.rar
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Frontend build
+frontend/dist/
+frontend/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
