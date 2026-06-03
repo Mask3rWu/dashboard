@@ -4,6 +4,7 @@ import {
   getFlight, getAlignedData, getAlerts, getStats, getCorrelation, getAnomaly,
   listPresets, createPreset, deletePreset,
   listFilterPresets, createFilterPreset, deleteFilterPreset,
+  updateFlight, deleteFlight,
   type Flight, type ColumnGroup,
   type AlignedData, type AlertItem, type FlightStats, type Preset,
   type FilterSpec, type FilterPreset,
@@ -14,6 +15,7 @@ interface Props {
   flights: Flight[];
   selectedFlightId: number | null;
   onSelectFlight: (id: number) => void;
+  onFlightsChanged: () => void;
 }
 
 type ViewMode = 'chart' | 'map' | 'alerts' | 'correlation' | 'anomaly';
@@ -44,7 +46,7 @@ function explainAlert(desc: string): string {
   return '飞行状态告警，需结合前后数据综合判断';
 }
 
-export default function FlightView({ flights, selectedFlightId, onSelectFlight }: Props) {
+export default function FlightView({ flights, selectedFlightId, onSelectFlight, onFlightsChanged }: Props) {
   // ─── State ─────────────────────────────────────────────
   const [columnGroups, setColumnGroups] = useState<ColumnGroup[]>([]);
   const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
@@ -64,6 +66,12 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
   const [showMapLegend, setShowMapLegend] = useState(true);
   const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
   const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
+
+  // ─── Flight management state ───────────────────────────
+  const [flightSearch, setFlightSearch] = useState('');
+  const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
+  const [editName, setEditName] = useState('');
+  const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
 
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInst = useRef<echarts.ECharts | null>(null);
@@ -149,7 +157,11 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
     });
     const unitGroups: UnitGroup[] = Array.from(unitMap.entries()).map(([unit, items]) => ({ unit, items }));
 
-    // Assign a color per unit group
+    // Color assignment:
+    //   - Per-series: each line gets a unique color so they're distinguishable
+    //   - Per-unit-group: y-axis name/line uses the unit group's color so you can
+    //     tell which axis a line belongs to (axis color = legend marker for that unit)
+    const seriesColor = (si: number) => colors[si % colors.length];
     const unitColor = (gi: number) => colors[gi % colors.length];
 
     // Build yAxis and yAxisIndex map: each unit group gets one axis
@@ -202,7 +214,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
       : [];
 
     const option: echarts.EChartsOption = {
-      color: seriesList.map((_, i) => unitColor(seriesYIndex[i])),
+      color: seriesList.map((_, i) => seriesColor(i)),
       tooltip: {
         trigger: 'axis',
         backgroundColor: '#fff',
@@ -265,7 +277,6 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
         // ── Line series ──
         ...seriesList.map(([, s], i) => {
           const values = getValues(s.values);
-          const gi = seriesYIndex[i];
           return {
             name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
             type: 'line',
@@ -275,7 +286,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
             smooth: true,
             showSymbol: false,
             z: 1,
-            lineStyle: { width: 1.5, color: unitColor(gi) },
+            lineStyle: { width: 1.5, color: seriesColor(i) },
           };
         }),
         // ── Full-height background bar (grid 0) — highlights matching regions ──
@@ -398,6 +409,35 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
     return acc;
   }, {} as Record<string, AlertItem[]>);
 
+  // ─── Flight management helpers ─────────────────────────
+  const filteredFlights = flights.filter((f) => {
+    if (!flightSearch.trim()) return true;
+    const s = flightSearch.toLowerCase();
+    return f.name.toLowerCase().includes(s) || f.drone_id.toLowerCase().includes(s);
+  });
+
+  const handleRename = async (id: number) => {
+    if (!editName.trim()) { setEditingFlightId(null); return; }
+    await updateFlight(id, editName.trim());
+    setEditingFlightId(null);
+    onFlightsChanged();
+  };
+
+  const handleDeleteFlight = async (id: number) => {
+    await deleteFlight(id);
+    if (selectedFlightId === id) {
+      const remaining = flights.filter((f) => f.id !== id);
+      onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
+    }
+    setDeletingFlightId(null);
+    onFlightsChanged();
+  };
+
+  const startRename = (f: Flight) => {
+    setEditingFlightId(f.id);
+    setEditName(f.name);
+  };
+
   // ─── Render ────────────────────────────────────────────
   const TAB_DEFS: { key: ViewMode; label: string }[] = [
     { key: 'chart', label: '时序图' },
@@ -410,18 +450,106 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
   return (
     <div className="h-full flex flex-col">
       {/* ── Toolbar ────────────────────────────────────── */}
-      <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-200 bg-gray-50/80 shrink-0">
-        <select
-          value={selectedFlightId ?? ''}
-          onChange={(e) => onSelectFlight(Number(e.target.value))}
-          className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-        >
-          {flights.map((f) => (
-            <option key={f.id} value={f.id}>
-              UAV{f.drone_id} - {f.name} ({f.flight_date})
-            </option>
-          ))}
-        </select>
+      <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-200 bg-gray-50/80 shrink-0 flex-wrap">
+        {/* Flight search + selector */}
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={flightSearch}
+            onChange={(e) => setFlightSearch(e.target.value)}
+            placeholder="搜索架次..."
+            className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-36"
+          />
+          <select
+            value={selectedFlightId ?? ''}
+            onChange={(e) => onSelectFlight(Number(e.target.value))}
+            className="bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          >
+            {filteredFlights.length === 0 && (
+              <option value="" disabled>无匹配结果</option>
+            )}
+            {filteredFlights.map((f) => (
+              <option key={f.id} value={f.id}>
+                UAV{f.drone_id} - {f.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Rename button */}
+          {selectedFlightId && editingFlightId !== selectedFlightId && (
+            <button
+              onClick={() => {
+                const f = flights.find((fl) => fl.id === selectedFlightId);
+                if (f) startRename(f);
+              }}
+              className="text-gray-400 hover:text-blue-500 text-xs px-1.5 py-1 rounded hover:bg-gray-100 shrink-0"
+              title="重命名"
+            >
+              ✏️
+            </button>
+          )}
+
+          {/* Delete button */}
+          {selectedFlightId && deletingFlightId !== selectedFlightId && (
+            <button
+              onClick={() => setDeletingFlightId(selectedFlightId)}
+              className="text-gray-400 hover:text-red-500 px-1.5 py-1 rounded hover:bg-red-50 shrink-0 flex items-center"
+              title="删除"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {/* Inline rename input */}
+        {editingFlightId && (
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleRename(editingFlightId);
+                if (e.key === 'Escape') setEditingFlightId(null);
+              }}
+              className="bg-white border border-blue-400 rounded px-2 py-1 text-xs text-gray-800 focus:outline-none focus:border-blue-500 w-40"
+              autoFocus
+            />
+            <button
+              onClick={() => handleRename(editingFlightId)}
+              className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-500"
+            >
+              保存
+            </button>
+            <button
+              onClick={() => setEditingFlightId(null)}
+              className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+            >
+              取消
+            </button>
+          </div>
+        )}
+
+        {/* Inline delete confirmation */}
+        {deletingFlightId && (
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">确认删除?</span>
+            <button
+              onClick={() => handleDeleteFlight(deletingFlightId)}
+              className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500"
+            >
+              是
+            </button>
+            <button
+              onClick={() => setDeletingFlightId(null)}
+              className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+            >
+              否
+            </button>
+          </div>
+        )}
 
         <div className="h-5 w-px bg-gray-300" />
 

@@ -46,6 +46,10 @@ class ImportSessionRequest(BaseModel):
     mode: str = 'overwrite'  # 'overwrite' or 'as_new'
 
 
+class UpdateFlightRequest(BaseModel):
+    name: str
+
+
 class AlignedRequest(BaseModel):
     column_keys: list[str]
     ref_table: str = "gps_data"
@@ -132,6 +136,22 @@ def delete_flight(flight_id: int):
     """Delete a flight and all its data."""
     conn = get_db()
     conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.patch("/api/flights/{flight_id}")
+def update_flight(flight_id: int, req: UpdateFlightRequest):
+    """Update flight metadata (e.g. rename)."""
+    if not req.name.strip():
+        raise HTTPException(400, "Name cannot be empty")
+    conn = get_db()
+    row = conn.execute("SELECT id FROM flights WHERE id=?", (flight_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Flight not found")
+    conn.execute("UPDATE flights SET name=? WHERE id=?", (req.name.strip(), flight_id))
     conn.commit()
     conn.close()
     return {"ok": True}

@@ -11,6 +11,7 @@ export default function ComparePage({ flights }: Props) {
   const [selectedColumn, setSelectedColumn] = useState('');
   const [columnGroups, setColumnGroups] = useState<ColumnGroup[]>([]);
   const [allColumns, setAllColumns] = useState<{ key: string; label: string; unit: string }[]>([]);
+  const [flightSearch, setFlightSearch] = useState('');
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
 
@@ -83,13 +84,34 @@ export default function ComparePage({ flights }: Props) {
 
   const selectedColumnObj = allColumns.find((c) => c.key === selectedColumn);
 
+  const filteredFlights = flights.filter((f) => {
+    if (!flightSearch.trim()) return true;
+    const s = flightSearch.toLowerCase();
+    return f.name.toLowerCase().includes(s) || f.drone_id.toLowerCase().includes(s);
+  });
+
   return (
     <div className="h-full flex flex-col p-6">
       <h2 className="text-lg font-semibold text-gray-900 mb-4">多飞行对比</h2>
 
       {/* Flight selector */}
+      <div className="flex items-center gap-2 mb-3">
+        <input
+          type="text"
+          value={flightSearch}
+          onChange={(e) => setFlightSearch(e.target.value)}
+          placeholder="搜索架次..."
+          className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-44"
+        />
+        <span className="text-xs text-gray-400">
+          {selectedFlights.length}/{filteredFlights.length} 已选
+        </span>
+      </div>
       <div className="flex flex-wrap gap-2 mb-4">
-        {flights.map((f) => (
+        {filteredFlights.length === 0 ? (
+          <span className="text-xs text-gray-400">无匹配结果</span>
+        ) : (
+          filteredFlights.map((f) => (
           <button
             key={f.id}
             onClick={() => toggleFlight(f.id)}
@@ -101,7 +123,7 @@ export default function ComparePage({ flights }: Props) {
           >
             UAV{f.drone_id} - {f.name}
           </button>
-        ))}
+        )))}
       </div>
 
       {/* Column selector */}

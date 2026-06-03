@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import {
-  scanFolder, importSession, listFlights, deleteFlight, browseFolder,
+  scanFolder, importSession, listFlights, deleteFlight, updateFlight, browseFolder,
   type Flight, type ScanResult, type SessionPreview,
 } from '../api';
 
@@ -38,6 +38,12 @@ export default function ImportPage({ onImported }: Props) {
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [sessionStates, setSessionStates] = useState<Map<string, SessionState>>(new Map());
   const [flights, setFlights] = useState<Flight[]>([]);
+
+  // ─── Flight management state ───────────────────────────
+  const [flightSearch, setFlightSearch] = useState('');
+  const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
+  const [editName, setEditName] = useState('');
+  const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
 
   // ─── Folder browse ──────────────────────────────────────
 
@@ -124,10 +130,30 @@ export default function ImportPage({ onImported }: Props) {
 
   const handleDelete = async (id: number) => {
     await deleteFlight(id);
+    setDeletingFlightId(null);
     loadFlights();
     onImported();
     refreshScan();
   };
+
+  const handleRename = async (id: number) => {
+    if (!editName.trim()) { setEditingFlightId(null); return; }
+    await updateFlight(id, editName.trim());
+    setEditingFlightId(null);
+    loadFlights();
+    onImported();
+  };
+
+  const startRename = (f: Flight) => {
+    setEditingFlightId(f.id);
+    setEditName(f.name);
+  };
+
+  const filteredFlights = flights.filter((f) => {
+    if (!flightSearch.trim()) return true;
+    const s = flightSearch.toLowerCase();
+    return f.name.toLowerCase().includes(s) || f.drone_id.toLowerCase().includes(s);
+  });
 
   // ─── Render helpers ─────────────────────────────────────
 
@@ -356,37 +382,87 @@ export default function ImportPage({ onImported }: Props) {
       <section>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold text-gray-900">已导入飞行</h2>
-          <button onClick={loadFlights} className="text-xs text-blue-600 hover:text-blue-500">
-            刷新
-          </button>
+          <div className="flex items-center gap-3">
+            <input
+              type="text"
+              value={flightSearch}
+              onChange={(e) => setFlightSearch(e.target.value)}
+              placeholder="搜索架次..."
+              className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-44"
+            />
+            <button onClick={loadFlights} className="text-xs text-blue-600 hover:text-blue-500">
+              刷新
+            </button>
+          </div>
         </div>
-        {flights.length === 0 ? (
+        {filteredFlights.length === 0 && flights.length > 0 ? (
+          <p className="text-sm text-gray-400">无匹配结果</p>
+        ) : flights.length === 0 ? (
           <p className="text-sm text-gray-400">暂无已导入的飞行数据</p>
         ) : (
           <div className="space-y-2">
-            {flights.map((f) => (
+            {filteredFlights.map((f) => (
               <div key={f.id} className="flex items-center justify-between bg-white rounded-lg px-4 py-3 border border-gray-200">
                 <div className="flex items-center gap-4">
                   <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
                     UAV{f.drone_id}
                   </span>
-                  <span className="text-sm font-medium text-gray-800">{f.name}</span>
+
+                  {/* Inline rename or display name */}
+                  {editingFlightId === f.id ? (
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRename(f.id);
+                          if (e.key === 'Escape') setEditingFlightId(null);
+                        }}
+                        className="bg-white border border-blue-400 rounded px-2 py-0.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500 w-40"
+                        autoFocus
+                      />
+                      <button onClick={() => handleRename(f.id)} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">保存</button>
+                      <button onClick={() => setEditingFlightId(null)} className="text-xs px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">取消</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1 group">
+                      <span className="text-sm font-medium text-gray-800">{f.name}</span>
+                      <button
+                        onClick={() => startRename(f)}
+                        className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+                        title="重命名"
+                      >
+                        ✏️
+                      </button>
+                    </div>
+                  )}
+
                   {f.session_key && (
                     <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>
                   )}
-                  <span className="text-xs text-gray-400">{f.flight_date}</span>
                   {f.duration_sec && (
                     <span className="text-xs text-gray-400">
                       {Math.round(f.duration_sec / 60)}分钟
                     </span>
                   )}
                 </div>
-                <button
-                  onClick={() => handleDelete(f.id)}
-                  className="text-xs text-red-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50"
-                >
-                  删除
-                </button>
+
+                {/* Delete with confirmation */}
+                {deletingFlightId === f.id ? (
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-gray-500">确认删除?</span>
+                    <button onClick={() => handleDelete(f.id)} className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500">是</button>
+                    <button onClick={() => setDeletingFlightId(null)} className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">否</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setDeletingFlightId(f.id)}
+                    className="text-xs text-red-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50"
+                  >
+                    删除
+                  </button>
+                )}
               </div>
             ))}
           </div>

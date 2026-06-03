@@ -132,6 +132,8 @@ export interface Preset {
 export const listFlights = () => request<{ flights: Flight[] }>('/flights');
 export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup[] }>(`/flights/${id}`);
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
+export const updateFlight = (id: number, name: string) =>
+  request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const scanFolder = (sourcePath: string) =>
   request<ScanResult>(
     '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }

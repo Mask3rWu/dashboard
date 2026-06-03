@@ -70,6 +70,7 @@ export default function App() {
                 flights={flights}
                 selectedFlightId={selectedFlightId}
                 onSelectFlight={setSelectedFlightId}
+                onFlightsChanged={loadFlights}
               />
             )}
             {tab === 'compare' && <ComparePage flights={flights} />}
