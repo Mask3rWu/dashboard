@@ -82,6 +82,79 @@ def parse_session_key(filename):
     return ''
 
 
+def _extract_timestamp_from_key(session_key):
+    """Extract seconds-since-midnight from the HHMMSS prefix of a session key.
+
+    Returns None if the key doesn't start with 6 digits.
+    """
+    ts = session_key[:6]
+    if len(ts) == 6 and ts.isdigit():
+        return int(ts[:2]) * 3600 + int(ts[2:4]) * 60 + int(ts[4:6])
+    return None
+
+
+def _build_drone_clusters(drone_files, max_diff_sec=3):
+    """Group files for a single drone into time-proximity clusters.
+
+    Files whose session_key timestamps differ by ≤ max_diff_sec seconds
+    are merged into the same cluster (transitive). The canonical session_key
+    for a merged cluster prefers keys with a sequence number (containing '_'),
+    then the key with the most files.
+
+    Args:
+        drone_files: list of file info dicts from scan_folder()
+        max_diff_sec: max seconds between timestamps to consider same batch
+
+    Returns:
+        list of (canonical_session_key, [file_info, ...]) sorted by timestamp
+    """
+    from collections import defaultdict
+
+    # Group by exact session_key
+    by_key = defaultdict(list)
+    for f in drone_files:
+        by_key[f['session_key']].append(f)
+
+    if not by_key:
+        return []
+
+    # Attach timestamps and sort (None goes last)
+    items = []
+    for key, files in by_key.items():
+        ts = _extract_timestamp_from_key(key)
+        items.append((ts, key, files))
+
+    items.sort(key=lambda x: (x[0] is None, x[0] or 0))
+
+    clusters = []  # list of (canonical_key, files, max_ts)
+
+    for ts, key, files in items:
+        if ts is None:
+            # No parseable timestamp — keep as its own cluster
+            clusters.append((key, files, None))
+            continue
+
+        # Check if this belongs to the most recent cluster
+        if clusters and clusters[-1][2] is not None:
+            last_max_ts = clusters[-1][2]
+            if ts - last_max_ts <= max_diff_sec:
+                canon_key, merged_files, _ = clusters[-1]
+                # Choose canonical key: prefer one with seq number, then more files
+                if '_' in key and '_' not in canon_key:
+                    canon_key = key
+                elif not ('_' in canon_key and '_' not in key):
+                    # Both have '_' or both don't — pick the richer key
+                    if len(files) > len(merged_files):
+                        canon_key = key
+                clusters[-1] = (canon_key, merged_files + files, max(last_max_ts, ts))
+                continue
+
+        # Start a new cluster
+        clusters.append((key, files, ts))
+
+    return [(key, files) for key, files, _ in clusters]
+
+
 def scan_folder(root_path):
     """Discover drone/data-type files."""
     results = []
@@ -389,6 +462,10 @@ IMPORTERS = {
 def scan_folder_sessions(root_path, conn=None):
     """Scan a folder and return session-grouped preview with import status.
 
+    Files within the same drone are clustered by time proximity (≤ 3 s
+    between timestamps → same session). The canonical session_key for a
+    merged cluster prefers the key with a sequence number and most files.
+
     Returns:
         {source_path, folder_name, sessions: [{drone_id, session_key,
           data_types, file_count, import_status, existing_flight_id?,
@@ -404,37 +481,43 @@ def scan_folder_sessions(root_path, conn=None):
             'error': 'No drone data files found',
         }
 
-    # Group by (drone_id, session_key)
+    # Group files by drone, then cluster within each drone by time
     from collections import defaultdict
-    by_session = defaultdict(lambda: defaultdict(int))
+    by_drone = defaultdict(list)
     for f in files:
-        key = (f['drone_id'], f['session_key'])
-        by_session[key][f['data_type_key']] += 1
+        by_drone[f['drone_id']].append(f)
 
-    # Check import status for each session
     close_conn = False
     if conn is None:
         conn = get_db()
         close_conn = True
 
     sessions = []
-    for (drone_id, session_key), types in sorted(by_session.items()):
-        existing = conn.execute(
-            "SELECT id, name FROM flights WHERE source_path=? AND drone_id=? AND session_key=?",
-            (root_path, drone_id, session_key)
-        ).fetchone()
+    for drone_id in sorted(by_drone.keys()):
+        clusters = _build_drone_clusters(by_drone[drone_id])
 
-        entry = {
-            'drone_id': drone_id,
-            'session_key': session_key,
-            'data_types': dict(types),
-            'file_count': sum(types.values()),
-            'import_status': 'imported' if existing else 'new',
-        }
-        if existing:
-            entry['existing_flight_id'] = existing['id']
-            entry['existing_flight_name'] = existing['name']
-        sessions.append(entry)
+        for session_key, cluster_files in clusters:
+            # Count data types across merged files
+            data_types = defaultdict(int)
+            for f in cluster_files:
+                data_types[f['data_type_key']] += 1
+
+            existing = conn.execute(
+                "SELECT id, name FROM flights WHERE source_path=? AND drone_id=? AND session_key=?",
+                (root_path, drone_id, session_key)
+            ).fetchone()
+
+            entry = {
+                'drone_id': drone_id,
+                'session_key': session_key,
+                'data_types': dict(data_types),
+                'file_count': len(cluster_files),
+                'import_status': 'imported' if existing else 'new',
+            }
+            if existing:
+                entry['existing_flight_id'] = existing['id']
+                entry['existing_flight_name'] = existing['name']
+            sessions.append(entry)
 
     if close_conn:
         conn.close()
@@ -449,21 +532,48 @@ def scan_folder_sessions(root_path, conn=None):
 def import_session(source_path, drone_id, session_key, mode='overwrite'):
     """Import a single flight session.
 
+    Uses time-proximity clustering: the target session_key is resolved to
+    its cluster (all files whose timestamp is within 3 s), and the entire
+    cluster is imported together. The canonical session_key is used for
+    the database record.
+
     Args:
         source_path: Root folder path
         drone_id: Drone ID (e.g., '21')
-        session_key: Session key (e.g., '153351_535')
+        session_key: Target session key (e.g., '153351_535') — may be
+                      an exact key or a previously merged canonical key
         mode: 'overwrite' (replace existing) or 'as_new' (add suffix, create new)
 
     Returns:
         {flight_id, drone_id, session_key, name, rows, details}
     """
     files = scan_folder(source_path)
-    matching = [f for f in files
-                if f['drone_id'] == drone_id and f['session_key'] == session_key]
+    drone_files = [f for f in files if f['drone_id'] == drone_id]
+
+    if not drone_files:
+        return {'error': f'No files found for drone {drone_id}'}
+
+    # Cluster by time proximity and find the cluster containing the target key
+    clusters = _build_drone_clusters(drone_files)
+    matching = None
+    canonical_key = session_key
+
+    for canon_key, cluster_files in clusters:
+        found = (canon_key == session_key)
+        if not found:
+            for f in cluster_files:
+                if f['session_key'] == session_key:
+                    found = True
+                    break
+        if found:
+            matching = cluster_files
+            canonical_key = canon_key
+            break
 
     if not matching:
         return {'error': f'No files found for drone {drone_id} session {session_key}'}
+
+    session_key = canonical_key
 
     conn = get_db()
     folder_name = os.path.basename(source_path.rstrip('/\\'))
