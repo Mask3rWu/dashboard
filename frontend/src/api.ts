@@ -18,11 +18,39 @@ export interface Flight {
   drone_id: string;
   drone_model: string;
   source_path: string;
+  session_key: string;
   flight_date: string;
   start_time: string;
   end_time: string;
   duration_sec: number;
   import_time: string;
+}
+
+export interface SessionPreview {
+  drone_id: string;
+  session_key: string;
+  data_types: Record<string, number>;
+  file_count: number;
+  import_status: 'new' | 'imported';
+  existing_flight_id?: number;
+  existing_flight_name?: string;
+}
+
+export interface ScanResult {
+  source_path: string;
+  folder_name: string;
+  sessions: SessionPreview[];
+  error?: string;
+}
+
+export interface ImportSessionResult {
+  flight_id: number;
+  drone_id: string;
+  session_key: string;
+  name: string;
+  rows: number;
+  details: Record<string, number | string>;
+  error?: string;
 }
 
 export interface ColumnGroup {
@@ -105,13 +133,21 @@ export const listFlights = () => request<{ flights: Flight[] }>('/flights');
 export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup[] }>(`/flights/${id}`);
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const scanFolder = (sourcePath: string) =>
-  request<{ files?: { drone_id: string; file_count: number; data_types: Record<string, number> }[]; error?: string }>(
+  request<ScanResult>(
     '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }
   );
-export const importFolder = (sourcePath: string) =>
-  request<{ imported?: { flight_id: number; drone_id: string; name: string; rows: number; details: Record<string, number> }[]; error?: string }>(
-    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }
+export const importSession = (sourcePath: string, droneId: string, sessionKey: string, mode: 'overwrite' | 'as_new' = 'overwrite') =>
+  request<ImportSessionResult>(
+    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, drone_id: droneId, session_key: sessionKey, mode }) }
   );
+export const importFolder = (sourcePath: string) =>
+  request<{ imported?: ImportSessionResult[]; error?: string }>(
+    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, drone_id: '', session_key: '', mode: 'overwrite' }) }
+  );
+
+// Folder browser
+export const browseFolder = () =>
+  request<{ path: string; cancelled?: boolean }>('/folders/browse');
 
 // Data
 export const getColumns = (flightId: number) => request<{ columns: ColumnGroup[] }>(`/flights/${flightId}/columns`);

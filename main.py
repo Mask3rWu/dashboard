@@ -19,7 +19,7 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from backend.database import init_db, get_db
-from backend.parser import import_flight, scan_folder
+from backend.parser import import_flight, import_session, scan_folder, scan_folder_sessions
 from backend import analysis
 
 # ─── App Setup ─────────────────────────────────────────────
@@ -37,6 +37,13 @@ app.add_middleware(
 
 class ImportRequest(BaseModel):
     source_path: str
+
+
+class ImportSessionRequest(BaseModel):
+    source_path: str
+    drone_id: str = ''       # empty = bulk import all sessions (backward compat)
+    session_key: str = ''    # empty = import all sessions for drone
+    mode: str = 'overwrite'  # 'overwrite' or 'as_new'
 
 
 class AlignedRequest(BaseModel):
@@ -69,6 +76,29 @@ class PresetCreate(BaseModel):
 class FilterPresetCreate(BaseModel):
     name: str
     config: dict
+
+
+# ─── Folder Browser ────────────────────────────────────────
+
+@app.get("/api/folders/browse")
+def browse_folder():
+    """Open native folder picker dialog via tkinter (bundled with Python)."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        selected_path = filedialog.askdirectory(
+            title='选择飞行数据文件夹',
+            mustexist=True,
+        )
+        root.destroy()
+        if selected_path and os.path.isdir(selected_path):
+            return {'path': selected_path}
+        return {'path': '', 'cancelled': True}
+    except Exception as e:
+        raise HTTPException(500, f"Folder browser failed: {e}")
 
 
 # ─── Flight Routes ─────────────────────────────────────────
@@ -109,31 +139,26 @@ def delete_flight(flight_id: int):
 
 @app.post("/api/flights/scan")
 def scan_folder_api(req: ImportRequest):
-    """Scan a folder without importing. Preview what will be imported."""
-    files = scan_folder(req.source_path)
-    if not files:
-        return {"error": "No drone data files found", "files": []}
-    # Group by drone_id
-    from collections import defaultdict
-    by_drone = defaultdict(lambda: defaultdict(int))
-    for f in files:
-        by_drone[f['drone_id']][f['data_type_key']] += 1
-    preview = []
-    for drone_id, types in by_drone.items():
-        preview.append({
-            'drone_id': drone_id,
-            'file_count': sum(types.values()),
-            'data_types': dict(types),
-        })
-    return {"files": preview}
+    """Scan a folder for flight sessions. Returns session-grouped preview with import status."""
+    conn = get_db()
+    result = scan_folder_sessions(req.source_path, conn=conn)
+    conn.close()
+    return result
 
 
 @app.post("/api/flights/import")
-def import_flight_api(req: ImportRequest):
-    """Import a flight data folder."""
+def import_flight_api(req: ImportSessionRequest):
+    """Import a flight session (or all sessions if session_key is empty)."""
     try:
-        result = import_flight(req.source_path)
-        return result
+        if req.session_key:
+            result = import_session(
+                req.source_path, req.drone_id, req.session_key, req.mode
+            )
+            return result
+        else:
+            # Backward compatible: import all sessions
+            result = import_flight(req.source_path)
+            return result
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))

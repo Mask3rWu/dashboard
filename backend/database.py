@@ -23,13 +23,14 @@ CREATE TABLE IF NOT EXISTS flights (
     drone_id        TEXT NOT NULL,
     drone_model     TEXT DEFAULT 'CR500A',
     source_path     TEXT NOT NULL,
+    session_key     TEXT NOT NULL DEFAULT '',
     flight_date     TEXT,
     start_time      TEXT,
     end_time        TEXT,
     duration_sec    REAL,
     total_rows      INTEGER DEFAULT 0,
     import_time     TEXT DEFAULT (datetime('now','localtime')),
-    UNIQUE(source_path, drone_id)
+    UNIQUE(source_path, drone_id, session_key)
 );
 
 CREATE TABLE IF NOT EXISTS presets (
@@ -272,9 +273,109 @@ def get_db():
     return conn
 
 
+def _migrate_schema(conn):
+    """Idempotent migrations for upgrading schema in-place.
+
+    Adds session_key column and upgrades UNIQUE constraint from
+    (source_path, drone_id) to (source_path, drone_id, session_key).
+    Uses table rebuild. FK constraints are preserved because
+    init_db() creates all tables with PRAGMA foreign_keys=OFF.
+    """
+    conn.row_factory = sqlite3.Row
+
+    # 1. Add session_key column if missing
+    cols = [r['name'] for r in conn.execute("PRAGMA table_info(flights)").fetchall()]
+    if 'session_key' not in cols:
+        conn.execute("ALTER TABLE flights ADD COLUMN session_key TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+    # 2. Check if old 2-column UNIQUE is still active
+    needs_rebuild = False
+    indexes = conn.execute("PRAGMA index_list(flights)").fetchall()
+    for idx in indexes:
+        if idx['origin'] == 'u':
+            idx_info = conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()
+            idx_cols = sorted([r['name'] for r in idx_info])
+            if idx_cols == ['drone_id', 'source_path']:
+                needs_rebuild = True
+                break
+
+    if needs_rebuild:
+        # Detect which columns exist in old table for safe migration
+        old_cols = set(r['name'] for r in conn.execute("PRAGMA table_info(flights)").fetchall())
+        DATA_TABLES = [
+            'gps_data', 'imu_data', 'drone_state_data', 'pos_data',
+            'engine_data', 'powerbox_data', 'dual_antenna_data', 'flight_alerts',
+        ]
+
+        def _col(name, default='NULL'):
+            return name if name in old_cols else default
+
+        # 1. Build new flights table
+        conn.execute("""
+            CREATE TABLE flights_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT NOT NULL,
+                drone_id        TEXT NOT NULL,
+                drone_model     TEXT DEFAULT 'CR500A',
+                source_path     TEXT NOT NULL,
+                session_key     TEXT NOT NULL DEFAULT '',
+                flight_date     TEXT,
+                start_time      TEXT,
+                end_time        TEXT,
+                duration_sec    REAL,
+                total_rows      INTEGER DEFAULT 0,
+                import_time     TEXT DEFAULT (datetime('now','localtime')),
+                UNIQUE(source_path, drone_id, session_key)
+            )
+        """)
+        select_parts = [
+            'id', 'name', 'drone_id',
+            _col('drone_model', "COALESCE((SELECT drone_model FROM flights LIMIT 1), 'CR500A')"),
+            'source_path',
+            "''",
+            _col('flight_date'),
+            _col('start_time'),
+            _col('end_time'),
+            _col('duration_sec'),
+            _col('total_rows', '0'),
+            _col('import_time', "datetime('now','localtime')"),
+        ]
+        conn.execute(f"INSERT INTO flights_new SELECT {', '.join(select_parts)} FROM flights")
+        conn.execute("DROP TABLE flights")
+        conn.execute("ALTER TABLE flights_new RENAME TO flights")
+
+        # 2. Recreate each child data table to fix FK references
+        for tbl in DATA_TABLES:
+            # Check if table exists
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()
+            if not exists:
+                continue
+            # Get original CREATE SQL, replace to point to flights_new (now renamed to flights)
+            old_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()[0]
+            new_sql = old_sql.replace(tbl, tbl + '_new')
+            conn.execute(new_sql)
+            conn.execute(f"INSERT INTO {tbl}_new SELECT * FROM {tbl}")
+            conn.execute(f"DROP TABLE {tbl}")
+            conn.execute(f"ALTER TABLE {tbl}_new RENAME TO {tbl}")
+            # Recreate time index
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{tbl}_ft ON {tbl}(flight_id, time_sec)"
+            )
+
+        conn.commit()
+
+
 def init_db():
     """Create all tables. Idempotent."""
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys=OFF")
     conn.executescript(SCHEMA)
+    _migrate_schema(conn)
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.commit()
     conn.close()

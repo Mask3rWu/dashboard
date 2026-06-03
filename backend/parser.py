@@ -65,6 +65,23 @@ def _str(v):
     return v if v else None
 
 
+def parse_session_key(filename):
+    """Extract session key ({Timestamp}_{Sequence}) from filename.
+
+    Input:  "21GPSData_153351_535.txt" -> Output: "153351_535"
+    Input:  "21FlightAlertInfo_153350.txt" -> Output: "153350"
+
+    Returns empty string if no known data type pattern is found.
+    """
+    base = filename.rsplit('.txt', 1)[0]  # remove extension
+    for pattern, _type_key, _table in FILE_PATTERNS:
+        marker = pattern + '_'
+        idx = base.find(marker)
+        if idx >= 0:
+            return base[idx + len(marker):]
+    return ''
+
+
 def scan_folder(root_path):
     """Discover drone/data-type files."""
     results = []
@@ -87,6 +104,7 @@ def scan_folder(root_path):
                             'drone_id': drone_id, 'data_type_key': type_key,
                             'db_table': table, 'filepath': filepath,
                             'is_alert': False, 'filename': fname,
+                            'session_key': parse_session_key(fname),
                         })
                         break
         alert_dir = os.path.join(drone_dir, 'FlightAlertInfo')
@@ -98,6 +116,7 @@ def scan_folder(root_path):
                         'db_table': 'flight_alerts',
                         'filepath': os.path.join(alert_dir, fname),
                         'is_alert': True, 'filename': fname,
+                        'session_key': parse_session_key(fname),
                     })
     return results
 
@@ -367,57 +386,182 @@ IMPORTERS = {
 }
 
 
-def import_flight(source_path):
-    """Import an entire flight folder."""
-    files = scan_folder(source_path)
+def scan_folder_sessions(root_path, conn=None):
+    """Scan a folder and return session-grouped preview with import status.
+
+    Returns:
+        {source_path, folder_name, sessions: [{drone_id, session_key,
+          data_types, file_count, import_status, existing_flight_id?,
+          existing_flight_name?}]}
+    """
+    files = scan_folder(root_path)
+    folder_name = os.path.basename(root_path.rstrip('/\\'))
     if not files:
-        return {'error': 'No drone data files found in folder'}
+        return {
+            'source_path': root_path,
+            'folder_name': folder_name,
+            'sessions': [],
+            'error': 'No drone data files found',
+        }
+
+    # Group by (drone_id, session_key)
+    from collections import defaultdict
+    by_session = defaultdict(lambda: defaultdict(int))
+    for f in files:
+        key = (f['drone_id'], f['session_key'])
+        by_session[key][f['data_type_key']] += 1
+
+    # Check import status for each session
+    close_conn = False
+    if conn is None:
+        conn = get_db()
+        close_conn = True
+
+    sessions = []
+    for (drone_id, session_key), types in sorted(by_session.items()):
+        existing = conn.execute(
+            "SELECT id, name FROM flights WHERE source_path=? AND drone_id=? AND session_key=?",
+            (root_path, drone_id, session_key)
+        ).fetchone()
+
+        entry = {
+            'drone_id': drone_id,
+            'session_key': session_key,
+            'data_types': dict(types),
+            'file_count': sum(types.values()),
+            'import_status': 'imported' if existing else 'new',
+        }
+        if existing:
+            entry['existing_flight_id'] = existing['id']
+            entry['existing_flight_name'] = existing['name']
+        sessions.append(entry)
+
+    if close_conn:
+        conn.close()
+
+    return {
+        'source_path': root_path,
+        'folder_name': folder_name,
+        'sessions': sessions,
+    }
+
+
+def import_session(source_path, drone_id, session_key, mode='overwrite'):
+    """Import a single flight session.
+
+    Args:
+        source_path: Root folder path
+        drone_id: Drone ID (e.g., '21')
+        session_key: Session key (e.g., '153351_535')
+        mode: 'overwrite' (replace existing) or 'as_new' (add suffix, create new)
+
+    Returns:
+        {flight_id, drone_id, session_key, name, rows, details}
+    """
+    files = scan_folder(source_path)
+    matching = [f for f in files
+                if f['drone_id'] == drone_id and f['session_key'] == session_key]
+
+    if not matching:
+        return {'error': f'No files found for drone {drone_id} session {session_key}'}
 
     conn = get_db()
-    from collections import defaultdict
-    by_drone = defaultdict(list)
-    for f in files:
-        by_drone[f['drone_id']].append(f)
+    folder_name = os.path.basename(source_path.rstrip('/\\'))
 
-    imported = []
-    for drone_id, drone_files in by_drone.items():
-        folder_name = os.path.basename(source_path.rstrip('/\\'))
-        flight_date = None
-        if len(folder_name) >= 8:
-            ds = folder_name[:8]
+    # Handle existing flight based on mode
+    if mode == 'overwrite':
+        cur = conn.execute(
+            "SELECT id FROM flights WHERE source_path=? AND drone_id=? AND session_key=?",
+            (source_path, drone_id, session_key)
+        )
+        existing = cur.fetchone()
+        if existing:
+            conn.execute("DELETE FROM flights WHERE id=?", (existing['id'],))
+            conn.commit()
+    elif mode == 'as_new':
+        existing = conn.execute(
+            "SELECT id FROM flights WHERE source_path=? AND drone_id=? AND session_key=?",
+            (source_path, drone_id, session_key)
+        ).fetchone()
+        if existing:
+            # Generate a unique suffix
+            base_key = session_key
+            suffix = 2
+            while True:
+                new_key = f"{base_key}_{suffix}"
+                check = conn.execute(
+                    "SELECT id FROM flights WHERE source_path=? AND drone_id=? AND session_key=?",
+                    (source_path, drone_id, new_key)
+                ).fetchone()
+                if not check:
+                    break
+                suffix += 1
+            session_key = new_key
+            folder_name = f"{os.path.basename(source_path.rstrip('/\\'))}_{suffix}"
+
+    # Determine flight_date from folder name
+    flight_date = None
+    raw_name = os.path.basename(source_path.rstrip('/\\'))
+    if len(raw_name) >= 8:
+        ds = raw_name[:8]
+        if ds.isdigit():
             flight_date = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
 
-        cur = conn.execute("SELECT id FROM flights WHERE source_path=? AND drone_id=?", (source_path, drone_id))
-        if cur.fetchone():
-            conn.execute("DELETE FROM flights WHERE source_path=? AND drone_id=?", (source_path, drone_id))
-            conn.commit()
+    # Insert flight record
+    conn.execute(
+        """INSERT INTO flights (name, drone_id, drone_model, source_path, session_key, flight_date)
+           VALUES (?, ?, 'CR500A', ?, ?, ?)""",
+        (folder_name, drone_id, source_path, session_key, flight_date)
+    )
+    flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        conn.execute(
-            "INSERT INTO flights (name, drone_id, drone_model, source_path, flight_date) VALUES (?, ?, 'CR500A', ?, ?)",
-            (folder_name, drone_id, source_path, flight_date)
-        )
-        flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # Import each data file
+    total_rows = 0
+    details = {}
+    for f_info in matching:
+        importer = IMPORTERS.get(f_info['data_type_key'])
+        if importer:
+            try:
+                count = importer(conn, flight_id, f_info['filepath'])
+                details[f_info['data_type_key']] = count
+                total_rows += count
+            except Exception as e:
+                details[f_info['data_type_key']] = f"Error: {e}"
+                logger.error(f"Import error {f_info['filepath']}: {e}")
 
-        total_rows = 0
-        details = {}
-        for f in drone_files:
-            importer = IMPORTERS.get(f['data_type_key'])
-            if importer:
-                try:
-                    count = importer(conn, flight_id, f['filepath'])
-                    details[f['data_type_key']] = count
-                    total_rows += count
-                except Exception as e:
-                    details[f['data_type_key']] = f"Error: {e}"
-                    logger.error(f"Import error {f['filepath']}: {e}")
-
-        _update_flight_meta(conn, flight_id, total_rows)
-        imported.append({
-            'flight_id': flight_id, 'drone_id': drone_id,
-            'name': folder_name, 'rows': total_rows, 'details': details,
-        })
-
+    _update_flight_meta(conn, flight_id, total_rows)
     conn.close()
+
+    return {
+        'flight_id': flight_id,
+        'drone_id': drone_id,
+        'session_key': session_key,
+        'name': folder_name,
+        'rows': total_rows,
+        'details': details,
+    }
+
+
+def import_flight(source_path):
+    """Import all sessions in a folder (backward-compatible bulk import)."""
+    conn = get_db()
+    preview = scan_folder_sessions(source_path, conn=conn)
+    conn.close()
+
+    if not preview.get('sessions'):
+        return {'error': preview.get('error', 'No drone data files found in folder')}
+
+    imported = []
+    for sess in preview['sessions']:
+        result = import_session(
+            source_path, sess['drone_id'], sess['session_key'],
+            mode='overwrite'
+        )
+        if 'error' not in result:
+            imported.append(result)
+
+    if not imported:
+        return {'error': 'No sessions could be imported'}
     return {'imported': imported}
 
 
