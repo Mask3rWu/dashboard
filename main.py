@@ -18,6 +18,10 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Ensure BASE_DIR and backend are importable
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from backend.database import init_db, get_db
 from backend.parser import import_flight, import_session, scan_folder, scan_folder_sessions
 from backend import analysis
@@ -337,17 +341,44 @@ if os.path.isdir(FRONTEND_DIR):
 def run_server(port=18520):
     """Start uvicorn in a daemon thread."""
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    except Exception as e:
+        print(f"[ERROR] Server failed to start: {e}")
+        traceback.print_exc()
+
+
+def _wait_for_server(port, timeout=10):
+    """Wait until the server is actually listening."""
+    import socket
+    start = _time.time()
+    while _time.time() - start < timeout:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.3)
+            s.close()
+            return True
+        except (OSError, ConnectionRefusedError):
+            _time.sleep(0.2)
+    return False
 
 
 def main():
+    print("Starting Flight Analyzer...")
     init_db()
     port = 18520
 
     # Start server thread
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
     server_thread.start()
-    _time.sleep(0.5)
+
+    # Wait for server to be ready
+    if not _wait_for_server(port, timeout=15):
+        print(f"[ERROR] Server did not start on port {port} within timeout.")
+        print("Check that the backend modules can be imported correctly.")
+        input("Press Enter to exit...")
+        return
+
+    print(f"Server ready at http://127.0.0.1:{port}")
 
     # If frontend is built, open pywebview; else open browser
     if os.path.isdir(FRONTEND_DIR):
