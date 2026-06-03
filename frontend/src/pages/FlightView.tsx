@@ -212,7 +212,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
           if (!Array.isArray(params)) return '';
           // Filter out helper series (dataZoom overlay)
           const mainParams = params.filter((p: any) =>
-            p.seriesName !== '__dz_indicator__');
+            p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__');
           if (mainParams.length === 0) return '';
           const time = mainParams[0]?.name || '';
           let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
@@ -253,6 +253,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
       yAxis: hasFilter ? [
         ...(Array.isArray(yAxes) ? (yAxes as any[]).map((a: any) => ({ ...a, gridIndex: 0 })) : [{ ...yAxes as any, gridIndex: 0 }]),
         { type: 'value', gridIndex: 1, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
+        { type: 'value', gridIndex: 0, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
       ] : yAxes,
       dataZoom: [
         { type: 'slider', start: 0, end: 100, height: 18, bottom: 6,
@@ -261,11 +262,11 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
         { type: 'inside' },
       ],
       series: [
-        // ── Line series with per-series markArea for background bands ──
+        // ── Line series ──
         ...seriesList.map(([, s], i) => {
           const values = getValues(s.values);
           const gi = seriesYIndex[i];
-          const seriesObj: any = {
+          return {
             name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
             type: 'line',
             yAxisIndex: seriesYIndex[i],
@@ -276,21 +277,22 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight }
             z: 1,
             lineStyle: { width: 1.5, color: unitColor(gi) },
           };
-          // markArea on every series: each colors its own axis region
-          if (hasFilter) {
-            seriesObj.markArea = {
-              silent: true,
-              label: { show: false },
-              itemStyle: { color: 'rgba(147, 197, 253, 0.18)' },
-              data: segments.map((seg) => [
-                { coord: [times[seg.start], 'min'] },
-                { coord: [times[Math.min(seg.end, times.length - 1)], 'max'] },
-              ]),
-            };
-          }
-          return seriesObj;
         }),
-        // ── DataZoom overlay bar — colors matching regions inside slider area ──
+        // ── Full-height background bar (grid 0) — highlights matching regions ──
+        ...(hasFilter ? [{
+          name: '__filter_bg__',
+          type: 'bar',
+          xAxisIndex: 0,
+          yAxisIndex: (Array.isArray(yAxes) ? (yAxes as any[]).length : 1) + 1,
+          data: dzIndicatorData,
+          itemStyle: { color: 'rgba(147, 197, 253, 0.22)' },
+          barWidth: '100%',
+          barCategoryGap: '0%',
+          tooltip: { show: false },
+          silent: true,
+          z: -1,
+        }] : []),
+        // ── DataZoom overlay bar (grid 1) — colors matching regions in slider ──
         ...(hasFilter ? [{
           name: '__dz_indicator__',
           type: 'bar',

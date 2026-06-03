@@ -38,7 +38,7 @@ export default function App() {
     <div className="h-screen flex flex-col bg-white text-gray-900">
       <header className="flex items-center justify-between shrink-0 border-b border-gray-200 px-6 h-14 bg-gray-50">
         <div className="flex items-center gap-6">
-          <h1 className="text-lg font-bold text-blue-600 tracking-wide">CR500A Flight Analyzer</h1>
+          <h1 className="text-lg font-bold text-blue-600 tracking-wide">Flight Analyzer</h1>
           <nav className="flex gap-1">
             {tabs.map((t) => (
               <button

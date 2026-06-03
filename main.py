@@ -309,7 +309,7 @@ def main():
         try:
             import webview
             webview.create_window(
-                "CR500A Flight Analyzer",
+                "Flight Analyzer",
                 f"http://127.0.0.1:{port}",
                 width=1400, height=900,
                 min_size=(1024, 680),
