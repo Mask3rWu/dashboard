@@ -55,7 +55,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
   const [stats, setStats] = useState<FlightStats | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [normalize, setNormalize] = useState(false);
-  const [refTable, setRefTable] = useState('gps_data');
+  const [refTable, setRefTable] = useState('gps');
   const [, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
   const [anomalyCol, setAnomalyCol] = useState('');
@@ -94,8 +94,8 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       setPresets(presetData.presets);
       setFilterPresets(fpData.presets);
       const defaults = [
-        'pos_data.lat', 'pos_data.lng', 'gps_data.nava_alt',
-        'engine_data.rpm', 'drone_state_data.battery_pct',
+        'pos.lat', 'pos.lng', 'gps.nava_alt',
+        'engine.engine_rpm', 'drone_state.battery_pct',
       ];
       const available = defaults.filter((d) =>
         flightData.columns.some((g) => g.columns.some((c) => c.key === d))
@@ -413,7 +413,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
   const filteredFlights = flights.filter((f) => {
     if (!flightSearch.trim()) return true;
     const s = flightSearch.toLowerCase();
-    return f.name.toLowerCase().includes(s) || f.drone_id.toLowerCase().includes(s);
+    return f.name.toLowerCase().includes(s) || (f.aircraft_serial || f.drone_id || '').toLowerCase().includes(s);
   });
 
   const handleRename = async (id: number) => {
@@ -470,7 +470,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
             )}
             {filteredFlights.map((f) => (
               <option key={f.id} value={f.id}>
-                UAV{f.drone_id} - {f.name}
+                {f.model_name || ''}/{f.aircraft_serial || f.drone_id || '?'} - {f.name}
               </option>
             ))}
           </select>
@@ -586,11 +586,11 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
           value={refTable}
           onChange={(e) => setRefTable(e.target.value)}
           className="bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-500"
-          title="选择时间基准数据源，其他数据按最近时间点对齐到此时间轴"
+          title="选择时间基准数据源"
         >
-          <option value="gps_data">基准:GPS</option>
-          <option value="drone_state_data">基准:飞控</option>
-          <option value="pos_data">基准:位置</option>
+          <option value="gps">基准:GPS</option>
+          <option value="drone_state">基准:飞控</option>
+          <option value="pos">基准:位置</option>
         </select>
       </div>
 
@@ -962,9 +962,9 @@ function TrajectoryMap({ aligned, alerts }: { aligned: AlignedData; alerts: Aler
   useEffect(() => {
     if (!containerRef.current || !aligned) return;
 
-    const latSeries = aligned.series['pos_data.lat'] || aligned.series['gps_data.nava_lat'];
-    const lngSeries = aligned.series['pos_data.lng'] || aligned.series['gps_data.nava_lng'];
-    const altSeries = aligned.series['gps_data.nava_alt'] || aligned.series['pos_data.rel_alt'];
+    const latSeries = aligned.series['pos.lat'] || aligned.series['gps.nava_lat'];
+    const lngSeries = aligned.series['pos.lng'] || aligned.series['gps.nava_lng'];
+    const altSeries = aligned.series['gps.nava_alt'] || aligned.series['pos.rel_alt'];
 
     if (!latSeries || !lngSeries) return;
 

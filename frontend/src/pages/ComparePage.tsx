@@ -39,7 +39,7 @@ export default function ComparePage({ flights }: Props) {
     renderChart(data.series);
   };
 
-  const renderChart = (series: { name: string; times_pct: number[]; values: number[]; label: string; unit: string }[]) => {
+  const renderChart = (series: { name: string; times_sec: number[]; values: number[]; label: string; unit: string }[]) => {
     if (!chartRef.current) return;
     if (chartInstance.current) { chartInstance.current.dispose(); }
     chartInstance.current = echarts.init(chartRef.current);
@@ -58,7 +58,7 @@ export default function ComparePage({ flights }: Props) {
       grid: { left: 60, right: 40, top: 40, bottom: 50 },
       xAxis: {
         type: 'value',
-        name: '飞行进度 (%)',
+        name: '时间 (秒)',
         nameTextStyle: { color: '#6b7280' },
         axisLabel: { color: '#9ca3af' },
         splitLine: { lineStyle: { color: '#f3f4f6' } },
@@ -74,7 +74,7 @@ export default function ComparePage({ flights }: Props) {
       series: series.map((s) => ({
         name: s.name,
         type: 'line',
-        data: s.times_pct.map((t, i) => [t, s.values[i]]),
+        data: s.times_sec.map((t, i) => [t, s.values[i]]),
         smooth: true,
         showSymbol: false,
       })),
@@ -87,7 +87,7 @@ export default function ComparePage({ flights }: Props) {
   const filteredFlights = flights.filter((f) => {
     if (!flightSearch.trim()) return true;
     const s = flightSearch.toLowerCase();
-    return f.name.toLowerCase().includes(s) || f.drone_id.toLowerCase().includes(s);
+    return f.name.toLowerCase().includes(s) || (f.aircraft_serial || f.drone_id || '').toLowerCase().includes(s);
   });
 
   return (
@@ -121,7 +121,7 @@ export default function ComparePage({ flights }: Props) {
                 : 'bg-white border border-gray-300 text-gray-500 hover:bg-gray-100'
             }`}
           >
-            UAV{f.drone_id} - {f.name}
+            UAV{f.aircraft_serial || f.drone_id} - {f.name}
           </button>
         )))}
       </div>
