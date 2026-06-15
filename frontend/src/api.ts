@@ -12,11 +12,33 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface AircraftModel {
+  id: number;
+  name: string;
+  format_category: 'A' | 'B' | 'C';
+  description: string;
+  created_at: string;
+  aircraft_count?: number;
+}
+
+export interface Aircraft {
+  id: number;
+  model_id: number;
+  serial_number: string;
+  name: string;
+  created_at: string;
+  flight_count?: number;
+}
+
 export interface Flight {
   id: number;
   name: string;
-  drone_id: string;
-  drone_model: string;
+  aircraft_id: number;
+  aircraft_serial: string;
+  aircraft_name: string;
+  model_id: number;
+  model_name: string;
+  format_category: string;
   source_path: string;
   session_key: string;
   flight_date: string;
@@ -24,28 +46,37 @@ export interface Flight {
   end_time: string;
   duration_sec: number;
   import_time: string;
+  // Legacy fields (present in migrated data)
+  drone_id?: string;
+  drone_model?: string;
 }
 
 export interface SessionPreview {
-  drone_id: string;
+  aircraft_serial: string;
   session_key: string;
   data_types: Record<string, number>;
   file_count: number;
   import_status: 'new' | 'imported';
   existing_flight_id?: number;
   existing_flight_name?: string;
+  aircraft_id?: number;
 }
 
 export interface ScanResult {
   source_path: string;
   folder_name: string;
+  format_category: string | null;
+  format_detected?: boolean;
+  suggested_model_id?: number;
+  suggested_model_name?: string;
+  matching_models?: { id: number; name: string }[];
   sessions: SessionPreview[];
   error?: string;
 }
 
 export interface ImportSessionResult {
   flight_id: number;
-  drone_id: string;
+  aircraft_id: number;
   session_key: string;
   name: string;
   rows: number;
@@ -128,32 +159,49 @@ export interface Preset {
   columns: string[];
 }
 
+// Models
+export const listModels = () => request<{ models: AircraftModel[] }>('/models');
+export const createModel = (name: string, formatCategory: string, description?: string) =>
+  request<AircraftModel>('/models', { method: 'POST', body: JSON.stringify({ name, format_category: formatCategory, description: description || '' }) });
+export const updateModel = (id: number, name: string) =>
+  request('/models/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
+export const deleteModel = (id: number) => request('/models/' + id, { method: 'DELETE' });
+
+// Aircraft
+export const listAircraft = (modelId: number) =>
+  request<{ aircraft: Aircraft[] }>(`/models/${modelId}/aircraft`);
+export const createAircraft = (modelId: number, serialNumber: string, name?: string) =>
+  request<Aircraft>(`/models/${modelId}/aircraft`, { method: 'POST', body: JSON.stringify({ serial_number: serialNumber, name: name || '' }) });
+export const updateAircraft = (id: number, serialNumber: string) =>
+  request('/aircraft/' + id, { method: 'PATCH', body: JSON.stringify({ serial_number: serialNumber }) });
+export const deleteAircraft = (id: number) => request('/aircraft/' + id, { method: 'DELETE' });
+
 // Flights
 export const listFlights = () => request<{ flights: Flight[] }>('/flights');
 export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup[] }>(`/flights/${id}`);
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>
   request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
-export const scanFolder = (sourcePath: string) =>
+export const scanFolder = (sourcePath: string, formatCategory?: string) =>
   request<ScanResult>(
-    '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }
+    '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, format_category: formatCategory || null }) }
   );
-export const importSession = (sourcePath: string, droneId: string, sessionKey: string, mode: 'overwrite' | 'as_new' = 'overwrite') =>
+export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string, mode: 'overwrite' | 'as_new' = 'overwrite') =>
   request<ImportSessionResult>(
-    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, drone_id: droneId, session_key: sessionKey, mode }) }
-  );
-export const importFolder = (sourcePath: string) =>
-  request<{ imported?: ImportSessionResult[]; error?: string }>(
-    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, drone_id: '', session_key: '', mode: 'overwrite' }) }
+    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, aircraft_id: aircraftId, session_key: sessionKey, mode }) }
   );
 
 // Folder browser
 export const browseFolder = () =>
   request<{ path: string; cancelled?: boolean }>('/folders/browse');
 
+// Column Registry
+export const getRegistryColumns = (modelId: number) =>
+  request<{ columns: ColumnGroup[] }>(`/registry/columns?model_id=${modelId}`);
+
 // Data
 export const getColumns = (flightId: number) => request<{ columns: ColumnGroup[] }>(`/flights/${flightId}/columns`);
-export const getAlignedData = (flightId: number, columnKeys: string[], refTable = 'gps_data', tolerance = 0.5, filter?: FilterSpec) =>
+export const getAlignedData = (flightId: number, columnKeys: string[], refTable = 'gps', tolerance = 0.5, filter?: FilterSpec) =>
   request<AlignedData>(`/flights/${flightId}/aligned`, {
     method: 'POST',
     body: JSON.stringify({ column_keys: columnKeys, ref_table: refTable, tolerance, filter: filter || undefined }),
@@ -173,7 +221,7 @@ export const getAnomaly = (flightId: number, columnKey: string, windowSize = 30,
     }
   );
 export const getCompare = (flightIds: number[], columnKey: string) =>
-  request<{ series: { flight_id: number; name: string; times_pct: number[]; values: number[]; label: string; unit: string }[] }>(
+  request<{ series: { flight_id: number; name: string; times_sec: number[]; values: number[]; label: string; unit: string }[] }>(
     '/compare', { method: 'POST', body: JSON.stringify({ flight_ids: flightIds, column_key: columnKey }) }
   );
 
