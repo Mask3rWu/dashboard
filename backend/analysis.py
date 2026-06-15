@@ -1,211 +1,143 @@
-"""Time alignment, statistics, correlation, and anomaly detection."""
+"""Time alignment, statistics, correlation, and anomaly detection.
+
+Refactored to use column_registry and data_table_registry instead
+of hardcoded DATA_TABLES.
+"""
 
 import math
+from collections import defaultdict, OrderedDict
 from backend.database import get_db
-
-# All data tables and their known numeric columns with display labels
-DATA_TABLES = {
-    'gps_data': {
-        'label': 'GPS数据',
-        'columns': {
-            'north_vel': '北向速度', 'east_vel': '东向速度', 'down_vel': '地向速度',
-            'nava_lat': '纬度(A)', 'nava_lng': '经度(A)', 'nava_alt': '高度(A)',
-            'navb_lat': '纬度(B)', 'navb_lng': '经度(B)', 'navb_alt': '高度(B)',
-            'gpsb_vel_n': 'GPSB北速', 'gpsb_vel_e': 'GPSB东速', 'gpsb_vel_d': 'GPSB地速',
-            'pos_accuracy': '位置精度', 'vel_accuracy': '速度精度',
-            'pressure': '气压', 'pressure_alt': '气压高度',
-            'heading': '航向角', 'baseline_len': '天线基线长度', 'update_freq': '更新频率',
-        },
-        'units': {
-            'north_vel': 'm/s', 'east_vel': 'm/s', 'down_vel': 'm/s',
-            'nava_lat': '°', 'nava_lng': '°', 'nava_alt': 'm',
-            'navb_lat': '°', 'navb_lng': '°', 'navb_alt': 'm',
-            'gpsb_vel_n': 'm/s', 'gpsb_vel_e': 'm/s', 'gpsb_vel_d': 'm/s',
-            'pos_accuracy': '', 'vel_accuracy': '',
-            'pressure': 'Pa', 'pressure_alt': 'm',
-            'heading': '°', 'baseline_len': 'mm', 'update_freq': 'Hz',
-        }
-    },
-    'imu_data': {
-        'label': 'IMU数据',
-        'columns': {
-            'nava_roll': '横滚(A)', 'nava_pitch': '俯仰(A)', 'nava_yaw': '偏航(A)',
-            'vx': 'Vx', 'vy': 'Vy', 'vz': 'Vz',
-            'ax': 'Ax', 'ay': 'Ay', 'az': 'Az',
-            'navb_roll': '横滚(B)', 'navb_pitch': '俯仰(B)', 'navb_yaw': '偏航(B)',
-            'navb_vx': 'Vx(B)', 'navb_vy': 'Vy(B)', 'navb_vz': 'Vz(B)',
-            'navb_ax': 'Ax(B)', 'navb_ay': 'Ay(B)', 'navb_az': 'Az(B)',
-            'ax_extremum': 'Ax极值', 'ay_extremum': 'Ay极值', 'az_extremum': 'Az极值',
-        },
-        'units': {
-            'nava_roll': '°', 'nava_pitch': '°', 'nava_yaw': '°',
-            'vx': 'm/s', 'vy': 'm/s', 'vz': 'm/s',
-            'ax': 'm/s²', 'ay': 'm/s²', 'az': 'm/s²',
-            'navb_roll': '°', 'navb_pitch': '°', 'navb_yaw': '°',
-            'navb_vx': 'm/s', 'navb_vy': 'm/s', 'navb_vz': 'm/s',
-            'navb_ax': 'm/s²', 'navb_ay': 'm/s²', 'navb_az': 'm/s²',
-            'ax_extremum': 'm/s²', 'ay_extremum': 'm/s²', 'az_extremum': 'm/s²',
-        }
-    },
-    'drone_state_data': {
-        'label': '飞控状态',
-        'columns': {
-            'roll': '横滚角', 'pitch': '俯仰角', 'yaw': '航向角',
-            'fwd_vel': '前向速度', 'side_vel': '侧向速度', 'down_vel': '地向速度',
-            'fwd_target_vel': '目标前速', 'side_target_vel': '目标侧速', 'down_target_vel': '目标地速',
-            'target_yaw': '目标偏航', 'target_pitch': '目标俯仰',
-            'yaw_rate': '偏航角速度', 'target_yaw_rate': '目标偏航速', 'target_alt': '目标高度',
-            'battery_pct': '电量', 'servo_battery': '舵机电量',
-            'link_quality': '链路质量', 'link_switches': '链路切换次数',
-            'flight_time': '飞行时长', 'remaining_time': '剩余时间',
-        },
-        'units': {
-            'roll': '°', 'pitch': '°', 'yaw': '°',
-            'fwd_vel': 'm/s', 'side_vel': 'm/s', 'down_vel': 'm/s',
-            'fwd_target_vel': 'm/s', 'side_target_vel': 'm/s', 'down_target_vel': 'm/s',
-            'target_yaw': '°', 'target_pitch': '°',
-            'yaw_rate': '°/s', 'target_yaw_rate': '°/s', 'target_alt': 'm',
-            'battery_pct': '%', 'servo_battery': '%',
-            'link_quality': '%', 'link_switches': '次',
-            'flight_time': 'min', 'remaining_time': 'min',
-        }
-    },
-    'pos_data': {
-        'label': '位置数据',
-        'columns': {
-            'north_pos': '北向位置', 'east_pos': '东向位置',
-            'rel_alt': '相对高度', 'lng': '经度', 'lat': '纬度', 'alt_amsl': '海拔高度',
-            'home_dist': 'Home距离', 'fcs_voltage': '飞控电压',
-            'target_route': '目标航线', 'cross_track_err': '偏航距',
-            'gps_time_h': 'GPS时', 'gps_time_m': 'GPS分', 'gps_time_s': 'GPS秒',
-            'pdop': 'PDOP',
-        },
-        'units': {
-            'north_pos': 'm', 'east_pos': 'm',
-            'rel_alt': 'm', 'lng': '°', 'lat': '°', 'alt_amsl': 'm',
-            'home_dist': '', 'fcs_voltage': 'V',
-            'target_route': '', 'cross_track_err': '',
-            'gps_time_h': 'h', 'gps_time_m': 'm', 'gps_time_s': 's',
-            'pdop': '',
-        }
-    },
-    'engine_data': {
-        'label': '发动机数据',
-        'columns': {
-            'cyl_head_temp': '缸头温度', 'exhaust_temp_1': '排气温度1', 'exhaust_temp_2': '排气温度2',
-            'engine_temp': '发动机温度',
-            'intake_temp_1': '进气温度1', 'intake_temp_2': '进气温度2',
-            'intake_temp_3': '进气温度3', 'intake_temp_4': '进气温度4',
-            'rpm': '发动机转速', 'throttle': '节气门开度',
-            'manifold_press': '进气歧管压力', 'fuel_remaining': '剩余燃油',
-            'battery_voltage': '电池电压', 'tcu_temp': 'TCU温度', 'tcu_manifold': 'TCU歧管压力',
-        },
-        'units': {
-            'cyl_head_temp': '°C', 'exhaust_temp_1': '°C', 'exhaust_temp_2': '°C',
-            'engine_temp': '°C',
-            'intake_temp_1': '°C', 'intake_temp_2': '°C',
-            'intake_temp_3': '°C', 'intake_temp_4': '°C',
-            'rpm': 'RPM', 'throttle': '%',
-            'manifold_press': 'mbar', 'fuel_remaining': 'L',
-            'battery_voltage': 'V', 'tcu_temp': '°C', 'tcu_manifold': 'mbar',
-        }
-    },
-    'powerbox_data': {
-        'label': '电源数据',
-        'columns': {
-            'fcs_voltage': '飞控电压', 'servo_voltage': '舵机电压',
-            'rcvr_voltage': '接收机电压', 'battery_voltage': '电池电压',
-            'fcs_current': '飞控电流', 'servo_current': '舵机电流',
-            'rcvr_current': '接收机电流', 'battery_current': '电池电流',
-            'v12': '12V电压', 'v28': '28V电压', 'servo_current_alt': '舵机电流(备)',
-        },
-        'units': {
-            'fcs_voltage': 'V', 'servo_voltage': 'V',
-            'rcvr_voltage': 'V', 'battery_voltage': 'V',
-            'fcs_current': 'mA', 'servo_current': 'mA',
-            'rcvr_current': 'mA', 'battery_current': 'mA',
-            'v12': 'V', 'v28': 'V', 'servo_current_alt': 'mA',
-        }
-    },
-    'dual_antenna_data': {
-        'label': '双天线差分',
-        'columns': {
-            'pdop_diff': 'PDOP差分', 'hdop_diff': 'HDOP差分', 'sat_num_diff': '卫星数',
-            'pos_update_rate': '位置更新率', 'vel_update_rate': '速度更新率', 'state_update_rate': '状态更新率',
-            'pressure': '气压', 'pressure_2': '气压2', 'vel': '速度',
-            'pressure_rate': '气压更新率', 'pressure2_rate': '气压2更新率',
-            'pressure_temp': '气压温度', 'pressure2_temp': '气压2温度',
-        },
-        'units': {
-            'pdop_diff': '', 'hdop_diff': '', 'sat_num_diff': '',
-            'pos_update_rate': 'Hz', 'vel_update_rate': 'Hz', 'state_update_rate': 'Hz',
-            'pressure': 'Pa', 'pressure_2': 'Pa', 'vel': 'm/s',
-            'pressure_rate': 'Hz', 'pressure2_rate': 'Hz',
-            'pressure_temp': '°C', 'pressure2_temp': '°C',
-        }
-    },
-}
+from backend.format_configs import get_table_name, get_columns_for_flight
 
 
-def get_columns_for_flight(flight_id):
-    """Return all available columns for a flight, grouped by data type."""
+# ── Registry helpers ──
+
+def _get_model_id(conn, flight_id):
+    """Get model_id for a flight."""
+    row = conn.execute(
+        "SELECT a.model_id FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.id = ?",
+        (flight_id,)
+    ).fetchone()
+    return row['model_id'] if row else None
+
+
+def _resolve_table_col(conn, model_id, col_key):
+    """Resolve "data_type_key.column_name" → (table_name, column_name).
+
+    Falls back to direct table.column format for backward compatibility.
+    """
+    if '.' not in col_key:
+        return None, None
+
+    dt_key, col_name = col_key.split('.', 1)
+
+    # Try registry
+    table = get_table_name(conn, model_id, dt_key)
+    if table:
+        # Verify column exists in registry
+        reg = conn.execute(
+            "SELECT column_name FROM column_registry WHERE model_id=? AND data_type_key=? AND column_name=?",
+            (model_id, dt_key, col_name)
+        ).fetchone()
+        if reg:
+            return table, col_name
+
+    # Fallback: col_key might be "table_name.column" (old format)
+    # Try to find matching table
+    row = conn.execute(
+        "SELECT table_name FROM data_table_registry WHERE model_id=? AND table_name=?",
+        (model_id, dt_key)
+    ).fetchone()
+    if row:
+        return dt_key, col_name
+
+    return None, None
+
+
+def _get_column_info(conn, model_id, dt_key, col_name):
+    """Get display label and unit for a column from the registry."""
+    row = conn.execute(
+        "SELECT display_label, unit FROM column_registry "
+        "WHERE model_id=? AND data_type_key=? AND column_name=?",
+        (model_id, dt_key, col_name)
+    ).fetchone()
+    if row:
+        return row['display_label'], row['unit'] or ''
+    return col_name, ''
+
+
+# ── Column listing ──
+
+def get_columns_for_flight_api(flight_id):
+    """Return available columns for a flight, grouped by data type.
+
+    Delegates to format_configs.get_columns_for_flight.
+    """
     conn = get_db()
-    result = []
-    for table_name, meta in DATA_TABLES.items():
-        # Check if this table has data for this flight
-        cur = conn.execute(
-            f"SELECT COUNT(*) as cnt FROM {table_name} WHERE flight_id=? LIMIT 1",
-            (flight_id,)
-        )
-        row = cur.fetchone()
-        if not row or row['cnt'] == 0:
-            continue
-        columns = []
-        for col_key, col_label in meta['columns'].items():
-            unit = meta['units'].get(col_key, '')
-            columns.append({
-                'key': f"{table_name}.{col_key}",
-                'label': col_label,
-                'unit': unit,
-            })
-        if columns:
-            result.append({
-                'table': table_name,
-                'label': meta['label'],
-                'columns': columns,
-            })
+    result = get_columns_for_flight(conn, flight_id)
     conn.close()
     return result
 
 
-def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5, filter_spec=None):
+# ── Aligned data ──
+
+def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filter_spec=None):
     """Align selected columns to a reference time series.
 
     Args:
         flight_id: Flight ID
-        column_keys: List of "table.column" strings
-        ref_table: Reference table for time base
+        column_keys: List of "data_type_key.column_name" strings
+        ref_table: Reference data_type_key for time base ("gps" default)
         tolerance: Max time difference for nearest-neighbor matching
-        filter_spec: Optional filter with {logic, conditions} to apply after alignment
-        tolerance: Max time difference for nearest-neighbor match (seconds)
+        filter_spec: Optional filter with {logic, conditions}
 
     Returns:
-        {times: [...], series: {key: {label, unit, values: [...]}}, alerts: [...]}
+        {times, ref_secs, series: {key: {label, unit, table, values}}, alerts}
     """
     conn = get_db()
+    model_id = _get_model_id(conn, flight_id)
+    if model_id is None:
+        conn.close()
+        return {'times': [], 'series': {}, 'alerts': [], 'error': 'Flight not found'}
+
+    # Determine reference table
+    if ref_table is None:
+        ref_table = 'gps'
+    ref_table_name = get_table_name(conn, model_id, ref_table)
+    if ref_table_name is None:
+        ref_table_name = get_table_name(conn, model_id, 'gps')
+    if ref_table_name is None:
+        conn.close()
+        return {'times': [], 'series': {}, 'alerts': [], 'error': 'No reference table found'}
 
     # Get reference times
     ref_rows = conn.execute(
-        f"SELECT time_str, time_sec FROM {ref_table} WHERE flight_id=? ORDER BY time_sec",
+        f"SELECT time_str, time_sec FROM {ref_table_name} WHERE flight_id=? ORDER BY time_sec",
         (flight_id,)
     ).fetchall()
 
     if not ref_rows:
-        # Try gps_data as fallback
-        ref_rows = conn.execute(
-            "SELECT time_str, time_sec FROM gps_data WHERE flight_id=? ORDER BY time_sec",
-            (flight_id,)
+        # Try gps as fallback
+        gps_table = get_table_name(conn, model_id, 'gps')
+        if gps_table and gps_table != ref_table_name:
+            ref_rows = conn.execute(
+                f"SELECT time_str, time_sec FROM {gps_table} WHERE flight_id=? ORDER BY time_sec",
+                (flight_id,)
+            ).fetchall()
+
+    if not ref_rows:
+        # Try any available table
+        tables = conn.execute(
+            "SELECT table_name FROM data_table_registry WHERE model_id=?",
+            (model_id,)
         ).fetchall()
+        for t in tables:
+            ref_rows = conn.execute(
+                f"SELECT time_str, time_sec FROM {t['table_name']} WHERE flight_id=? ORDER BY time_sec LIMIT 1",
+                (flight_id,)
+            ).fetchall()
+            if ref_rows:
+                break
 
     if not ref_rows:
         conn.close()
@@ -214,28 +146,29 @@ def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5
     times = [r['time_str'] for r in ref_rows]
     ref_secs = [r['time_sec'] for r in ref_rows]
 
-    # Group column_keys by table
-    from collections import defaultdict
-    by_table = defaultdict(list)
+    # Group column_keys by data_type_key
+    by_dt = defaultdict(list)
     for key in column_keys:
         if '.' in key:
-            table, col = key.split('.', 1)
-            by_table[table].append(col)
+            dt_key, col_name = key.split('.', 1)
+            by_dt[dt_key].append(col_name)
 
-    # Fetch data for each table and align
+    # Fetch and align data for each data type
     series = {}
-    for table, cols in by_table.items():
-        # Get meta for labeling
-        meta = DATA_TABLES.get(table, {})
-        col_labels = meta.get('columns', {})
-        col_units = meta.get('units', {})
+    for dt_key, cols in by_dt.items():
+        table_name = get_table_name(conn, model_id, dt_key)
+        if not table_name:
+            continue
 
         # Fetch all data for this table
         col_str = ', '.join(cols + ['time_sec'])
-        db_rows = conn.execute(
-            f"SELECT {col_str} FROM {table} WHERE flight_id=? ORDER BY time_sec",
-            (flight_id,)
-        ).fetchall()
+        try:
+            db_rows = conn.execute(
+                f"SELECT {col_str} FROM {table_name} WHERE flight_id=? ORDER BY time_sec",
+                (flight_id,)
+            ).fetchall()
+        except Exception:
+            continue
 
         if not db_rows:
             continue
@@ -248,14 +181,12 @@ def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5
 
         # Align to reference times
         for col in cols:
-            full_key = f"{table}.{col}"
-            label = col_labels.get(col, col)
-            unit = col_units.get(col, '')
+            full_key = f"{dt_key}.{col}"
+            label, unit = _get_column_info(conn, model_id, dt_key, col)
             values = []
 
             ti = 0
             for ref_t in ref_secs:
-                # Advance to nearest point: skip duplicates and move to closer match
                 while ti < len(table_data) - 1 and (
                     abs(table_data[ti + 1][0] - ref_t) < abs(table_data[ti][0] - ref_t) or
                     table_data[ti + 1][0] == table_data[ti][0]
@@ -269,20 +200,24 @@ def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5
             series[full_key] = {
                 'label': label,
                 'unit': unit,
-                'table': table,
+                'table': table_name,
                 'values': values,
             }
 
     # Get alerts
-    alert_rows = conn.execute(
-        "SELECT time_str, time_sec, alert_desc, extra_value FROM flight_alerts "
-        "WHERE flight_id=? ORDER BY time_sec",
-        (flight_id,)
-    ).fetchall()
-    alerts = [{
-        'time_str': r['time_str'], 'time_sec': r['time_sec'],
-        'desc': r['alert_desc'], 'extra': r['extra_value'],
-    } for r in alert_rows]
+    alert_table = get_table_name(conn, model_id, 'alert')
+    alerts = []
+    if alert_table:
+        # Check if table has uav_id column (Format A)
+        alert_cols = [r['name'] for r in conn.execute(f"PRAGMA table_info({alert_table})").fetchall()]
+        alert_rows = conn.execute(
+            f"SELECT time_str, time_sec, alert_desc, extra_value FROM {alert_table} WHERE flight_id=? ORDER BY time_sec",
+            (flight_id,)
+        ).fetchall()
+        alerts = [{
+            'time_str': r['time_str'], 'time_sec': r['time_sec'],
+            'desc': r['alert_desc'], 'extra': r['extra_value'],
+        } for r in alert_rows]
 
     conn.close()
 
@@ -300,16 +235,12 @@ def get_aligned_data(flight_id, column_keys, ref_table='gps_data', tolerance=0.5
 
 
 def apply_filter(aligned, filter_spec):
-    """Compute filter mask and segments from aligned data.
-
-    Does NOT modify series values — only adds mask[] and segments[] for
-    the frontend to highlight matching regions.
-    """
+    """Compute filter mask and segments from aligned data."""
     n = len(aligned['times'])
     if n == 0:
         return aligned
 
-    conditions = filter_spec.get('conditions', []) if isinstance(filter_spec, dict) else filter_spec.conditions
+    conditions = filter_spec.get('conditions', []) if isinstance(filter_spec, dict) else getattr(filter_spec, 'conditions', [])
     logic = (filter_spec.get('logic', 'and') if isinstance(filter_spec, dict) else getattr(filter_spec, 'logic', 'and'))
 
     masks = []
@@ -373,68 +304,143 @@ def apply_filter(aligned, filter_spec):
     return aligned
 
 
+# ── Flight stats ──
+
 def get_flight_stats(flight_id):
     """Compute summary statistics for a flight."""
     conn = get_db()
+    model_id = _get_model_id(conn, flight_id)
 
     flight = conn.execute("SELECT * FROM flights WHERE id=?", (flight_id,)).fetchone()
     if not flight:
         conn.close()
         return {}
 
+    # Get aircraft and model info
+    ac = conn.execute(
+        "SELECT a.serial_number, am.name as model_name FROM aircraft a "
+        "JOIN aircraft_models am ON am.id = a.model_id WHERE a.id=?",
+        (flight['aircraft_id'],)
+    ).fetchone()
+
     stats = {
         'duration_sec': flight['duration_sec'],
         'start_time': flight['start_time'],
         'end_time': flight['end_time'],
-        'drone_id': flight['drone_id'],
+        'drone_id': ac['serial_number'] if ac else '',
         'name': flight['name'],
     }
 
-    # Max altitude from gps
-    row = conn.execute(
-        "SELECT MAX(nava_alt) as max_alt, MAX(heading) as max_heading FROM gps_data WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
-    stats['max_altitude'] = row['max_alt']
+    if model_id is None:
+        conn.close()
+        return stats
+
+    # Max altitude from gps or pos
+    gps_table = get_table_name(conn, model_id, 'gps')
+    pos_table = get_table_name(conn, model_id, 'pos')
+    drone_table = get_table_name(conn, model_id, 'drone_state')
+    engine_table = get_table_name(conn, model_id, 'engine')
+
+    # Try gps for altitude
+    max_alt = None
+    if gps_table:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(nava_alt) as max_alt FROM {gps_table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+            max_alt = row['max_alt']
+        except Exception:
+            pass
+
+    if max_alt is None and pos_table:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(rel_alt) as max_alt FROM {pos_table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+            max_alt = row['max_alt']
+        except Exception:
+            pass
+    stats['max_altitude'] = max_alt
 
     # Max speed from drone_state
-    row = conn.execute(
-        "SELECT MAX(ABS(fwd_vel)) as max_fwd FROM drone_state_data WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
-    stats['max_speed'] = row['max_fwd']
+    max_speed = None
+    if drone_table:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(ABS(fwd_vel)) as max_fwd FROM {drone_table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+            max_speed = row['max_fwd']
+        except Exception:
+            pass
+    stats['max_speed'] = max_speed
 
     # Engine stats
-    row = conn.execute(
-        "SELECT AVG(rpm) as avg_rpm, MAX(rpm) as max_rpm, "
-        "MIN(fuel_remaining) as min_fuel, MAX(fuel_remaining) as max_fuel "
-        "FROM engine_data WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
-    stats['avg_rpm'] = round(row['avg_rpm'], 1) if row['avg_rpm'] else 0
-    stats['max_rpm'] = row['max_rpm'] or 0
-    stats['fuel_start'] = row['max_fuel']
-    stats['fuel_end'] = row['min_fuel']
+    if engine_table:
+        try:
+            row = conn.execute(
+                f"SELECT AVG(engine_rpm) as avg_rpm, MAX(engine_rpm) as max_rpm "
+                f"FROM {engine_table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+            stats['avg_rpm'] = round(row['avg_rpm'], 1) if row and row['avg_rpm'] else 0
+            stats['max_rpm'] = row['max_rpm'] if row else 0
+        except Exception:
+            stats['avg_rpm'] = 0
+            stats['max_rpm'] = 0
+
+        try:
+            row = conn.execute(
+                f"SELECT MIN(fuel_remaining) as min_fuel, MAX(fuel_remaining) as max_fuel "
+                f"FROM {engine_table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+            stats['fuel_start'] = row['max_fuel'] if row else None
+            stats['fuel_end'] = row['min_fuel'] if row else None
+        except Exception:
+            stats['fuel_start'] = None
+            stats['fuel_end'] = None
+    else:
+        stats['avg_rpm'] = 0
+        stats['max_rpm'] = 0
+        stats['fuel_start'] = None
+        stats['fuel_end'] = None
 
     # Battery
-    row = conn.execute(
-        "SELECT MIN(battery_pct) as min_bat, MAX(battery_pct) as max_bat "
-        "FROM drone_state_data WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
-    stats['battery_start'] = row['max_bat']
-    stats['battery_end'] = row['min_bat']
+    if drone_table:
+        try:
+            row = conn.execute(
+                f"SELECT MIN(battery_pct) as min_bat, MAX(battery_pct) as max_bat "
+                f"FROM {drone_table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+            stats['battery_start'] = row['max_bat'] if row else None
+            stats['battery_end'] = row['min_bat'] if row else None
+        except Exception:
+            stats['battery_start'] = None
+            stats['battery_end'] = None
+    else:
+        stats['battery_start'] = None
+        stats['battery_end'] = None
 
     # Alert count
-    row = conn.execute(
-        "SELECT COUNT(*) as cnt FROM flight_alerts WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
-    stats['alert_count'] = row['cnt']
+    alert_table = get_table_name(conn, model_id, 'alert')
+    if alert_table:
+        row = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM {alert_table} WHERE flight_id=?",
+            (flight_id,)
+        ).fetchone()
+        stats['alert_count'] = row['cnt'] if row else 0
+    else:
+        stats['alert_count'] = 0
 
     conn.close()
     return stats
 
+
+# ── Correlation ──
 
 def get_correlation(flight_id, column_keys):
     """Compute Pearson correlation matrix for selected columns."""
@@ -443,16 +449,13 @@ def get_correlation(flight_id, column_keys):
     if len(series) < 2:
         return {'columns': [], 'matrix': [], 'labels': []}
 
-    # Extract values, filter rows where any column is None
     keys = [k for k in column_keys if k in series]
     labels = [series[k]['label'] for k in keys]
     n = len(keys)
 
-    # Build aligned data matrix
     values_by_key = {k: series[k]['values'] for k in keys}
     n_points = len(aligned.get('times', []))
 
-    # Filter to complete rows
     complete_rows = []
     for i in range(n_points):
         row = [values_by_key[k][i] for k in keys]
@@ -460,9 +463,8 @@ def get_correlation(flight_id, column_keys):
             complete_rows.append(row)
 
     if len(complete_rows) < 3:
-        return {'columns': keys, 'labels': labels, 'matrix': [[1.0]*n for _ in range(n)]}
+        return {'columns': keys, 'labels': labels, 'matrix': [[1.0] * n for _ in range(n)]}
 
-    # Compute correlation
     m = len(complete_rows)
     means = [sum(row[j] for row in complete_rows) / m for j in range(n)]
 
@@ -473,10 +475,9 @@ def get_correlation(flight_id, column_keys):
             if i == j:
                 row_vals.append(1.0)
             else:
-                # Pearson r
                 num = sum((complete_rows[k][i] - means[i]) * (complete_rows[k][j] - means[j]) for k in range(m))
-                den_i = math.sqrt(sum((complete_rows[k][i] - means[i])**2 for k in range(m)))
-                den_j = math.sqrt(sum((complete_rows[k][j] - means[j])**2 for k in range(m)))
+                den_i = math.sqrt(sum((complete_rows[k][i] - means[i]) ** 2 for k in range(m)))
+                den_j = math.sqrt(sum((complete_rows[k][j] - means[j]) ** 2 for k in range(m)))
                 if den_i == 0 or den_j == 0:
                     row_vals.append(0.0)
                 else:
@@ -486,24 +487,16 @@ def get_correlation(flight_id, column_keys):
     return {'columns': keys, 'labels': labels, 'matrix': matrix}
 
 
+# ── Anomaly detection ──
+
 def get_anomalies(flight_id, column_key, window_size=30, sigma=3.0):
-    """Detect anomalies using sliding window z-score.
-
-    Args:
-        flight_id: Flight ID
-        column_key: "table.column"
-        window_size: Number of surrounding points for baseline
-        sigma: Z-score threshold
-
-    Returns:
-        {times, values, anomaly_indices, upper_bound, lower_bound}
-    """
+    """Detect anomalies using sliding window z-score."""
     aligned = get_aligned_data(flight_id, [column_key])
-    series = aligned.get('series', {}).get(column_key)
-    if not series:
+    entry = aligned.get('series', {}).get(column_key)
+    if not entry:
         return {'times': [], 'values': [], 'anomaly_indices': [], 'upper_bound': [], 'lower_bound': []}
 
-    values = series['values']
+    values = entry['values']
     times = aligned.get('times', [])
     n = len(values)
 
@@ -521,7 +514,7 @@ def get_anomalies(flight_id, column_key, window_size=30, sigma=3.0):
         if len(window) < max(5, half):
             continue
         mean = sum(window) / len(window)
-        std = math.sqrt(sum((v - mean)**2 for v in window) / len(window))
+        std = math.sqrt(sum((v - mean) ** 2 for v in window) / len(window))
         if std == 0:
             continue
         upper = mean + sigma * std
@@ -537,41 +530,42 @@ def get_anomalies(flight_id, column_key, window_size=30, sigma=3.0):
         'anomaly_indices': anomaly_indices,
         'upper_bound': upper_bounds,
         'lower_bound': lower_bounds,
-        'label': series['label'],
-        'unit': series['unit'],
+        'label': entry['label'],
+        'unit': entry['unit'],
     }
 
 
+# ── Cross-flight comparison ──
+
 def get_compare(flight_ids, column_key):
-    """Get aligned data for one column across multiple flights.
-    Returns data normalized to 0-100% flight time for overlay comparison.
-    """
+    """Get aligned data for one column across multiple flights."""
     results = []
     for fid in flight_ids:
         conn = get_db()
-        flight = conn.execute("SELECT name, drone_id, duration_sec FROM flights WHERE id=?", (fid,)).fetchone()
+        flight = conn.execute(
+            "SELECT f.name, a.serial_number, f.duration_sec "
+            "FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.id=?",
+            (fid,)
+        ).fetchone()
         if not flight:
             conn.close()
             continue
 
         aligned = get_aligned_data(fid, [column_key])
-        series = aligned.get('series', {}).get(column_key)
-        if not series:
+        entry = aligned.get('series', {}).get(column_key)
+        if not entry:
             conn.close()
             continue
 
-        # Normalize time to 0-100%
-        duration = flight['duration_sec'] or 1
         ref_secs = aligned.get('ref_secs', [])
-        pct_times = [(s / duration) * 100 for s in ref_secs]
 
         results.append({
             'flight_id': fid,
-            'name': f"{flight['name']} UAV{flight['drone_id']}",
-            'times_pct': pct_times,
-            'values': series['values'],
-            'label': series['label'],
-            'unit': series['unit'],
+            'name': f"{flight['name']} UAV{flight['serial_number']}",
+            'times_sec': ref_secs,
+            'values': entry['values'],
+            'label': entry['label'],
+            'unit': entry['unit'],
         })
         conn.close()
 
