@@ -522,24 +522,44 @@ def scan_folder_sessions(source_path, conn=None):
         sess['import_status'] = 'new'
         serial = sess['aircraft_serial']
 
-        # Find matching aircraft
         if fmt:
-            ac = conn.execute(
-                """SELECT a.id, a.serial_number, am.name as model_name
-                   FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
-                   WHERE am.format_category=? AND a.serial_number=?""",
-                (fmt, serial)
-            ).fetchone()
-            if ac:
+            # Format A: serial comes from directory name → look up aircraft by serial
+            if serial:
+                ac = conn.execute(
+                    """SELECT a.id, a.serial_number, am.name as model_name
+                       FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
+                       WHERE am.format_category=? AND a.serial_number=?""",
+                    (fmt, serial)
+                ).fetchone()
+                if ac:
+                    existing = conn.execute(
+                        "SELECT id, name FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
+                        (ac['id'], source_path, sess['session_key'])
+                    ).fetchone()
+                    if existing:
+                        sess['import_status'] = 'imported'
+                        sess['existing_flight_id'] = existing['id']
+                        sess['existing_flight_name'] = existing['name']
+                        sess['aircraft_id'] = ac['id']
+
+            # Format B/C: serial is empty → check flights table by (source_path, session_key) directly
+            else:
                 existing = conn.execute(
-                    "SELECT id, name FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-                    (ac['id'], source_path, sess['session_key'])
+                    """SELECT f.id, f.name, f.aircraft_id, a.serial_number as aircraft_serial
+                       FROM flights f
+                       LEFT JOIN aircraft a ON a.id = f.aircraft_id
+                       WHERE f.source_path=? AND f.session_key=?""",
+                    (source_path, sess['session_key'])
                 ).fetchone()
                 if existing:
                     sess['import_status'] = 'imported'
                     sess['existing_flight_id'] = existing['id']
                     sess['existing_flight_name'] = existing['name']
-                    sess['aircraft_id'] = ac['id']
+                    sess['aircraft_id'] = existing['aircraft_id']
+                    # Set the aircraft serial from the existing flight so the
+                    # frontend shows which aircraft this session belongs to
+                    if existing['aircraft_serial']:
+                        sess['aircraft_serial'] = existing['aircraft_serial']
 
     if close_conn:
         conn.close()
