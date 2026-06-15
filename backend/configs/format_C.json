@@ -1,0 +1,1654 @@
+{
+  "format": "C",
+  "description": "旧版格式 - 无表头,无UAVSendID,扁平目录,列顺序按Excel定义",
+  "has_header": false,
+  "has_uav_send_id": false,
+  "encoding": "gbk",
+  "data_types": {
+    "drone_state": {
+      "display_label": "飞控状态",
+      "file_patterns": [
+        "DroneStateData"
+      ],
+      "columns": [
+        {
+          "name": "uplink_type",
+          "label": "General.UpCommType",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "downlink_type",
+          "label": "General.DownCommType",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "roll",
+          "label": "Roll",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "pitch",
+          "label": "Pitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "yaw",
+          "label": "Yaw",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "fwd_vel",
+          "label": "ProV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "side_vel",
+          "label": "LateralV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "down_vel",
+          "label": "VerticalV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "fwd_target_vel",
+          "label": "TargetProV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "side_target_vel",
+          "label": "TargetLateralV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "down_target_vel",
+          "label": "TargetVerticalV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "targetroll",
+          "label": "TargetRoll",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "target_pitch",
+          "label": "TargetPitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "yaw_rate",
+          "label": "TurnV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "target_yaw_rate",
+          "label": "TargetTurnV",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "target_alt",
+          "label": "TargetRelH",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "aileron",
+          "label": "Aileron",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "elevator",
+          "label": "Elevator",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "accelerator",
+          "label": "Accelerator",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "direction",
+          "label": "Direction",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "collective_pitch",
+          "label": "CollectivePitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "link_switches",
+          "label": "SwitchPWM",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "engine_rpm",
+          "label": "EngineRPM1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        },
+        {
+          "name": "target_rpm",
+          "label": "TargetRPM",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 24
+        },
+        {
+          "name": "flight_time",
+          "label": "CurrentFlightTime",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 25
+        },
+        {
+          "name": "total_work_time",
+          "label": "TotalWorkTime",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 26
+        }
+      ]
+    },
+    "pos": {
+      "display_label": "位置数据",
+      "file_patterns": [
+        "PosData"
+      ],
+      "columns": [
+        {
+          "name": "north_pos",
+          "label": "PosN",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "east_pos",
+          "label": "PosE",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "rel_alt",
+          "label": "PosD",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "lng",
+          "label": "Lng",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "lat",
+          "label": "Lat",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "alt_amsl",
+          "label": "Alt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "home_dist",
+          "label": "DistToHome",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "fcs_voltage",
+          "label": "BatCPU",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "is_nava_online",
+          "label": "IsNavAOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "is_navb_online",
+          "label": "IsNavBOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "is_rc_online",
+          "label": "IsRCOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "is_rc_ok",
+          "label": "IsRCOK",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "is_gcs_online",
+          "label": "IsGCSOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "is_powerbox_online",
+          "label": "IsPowerBoxOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "is_ecu_online",
+          "label": "IsECUOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "is_tcu_online",
+          "label": "IsTCUOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "is_bdu_online",
+          "label": "IsBDUOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "is_engine_flameout",
+          "label": "IsEngineFlameOut",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "is_servo1_online",
+          "label": "IsServo1Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "is_servo2_online",
+          "label": "IsServo2Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "is_servo3_online",
+          "label": "IsServo3Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "is_servo4_online",
+          "label": "IsServo4Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "is_servo5_online",
+          "label": "IsServo5Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        },
+        {
+          "name": "is_servo6_online",
+          "label": "IsServo6Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 24
+        },
+        {
+          "name": "is_acc_servo_online",
+          "label": "IsAccServoOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 25
+        },
+        {
+          "name": "is_choker_servo_online",
+          "label": "IsChokerServoOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 26
+        },
+        {
+          "name": "flight_mode",
+          "label": "FlyState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 27
+        },
+        {
+          "name": "recorder_state",
+          "label": "DataRecorder",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 28
+        },
+        {
+          "name": "target_route",
+          "label": "TargetWp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 29
+        },
+        {
+          "name": "yawdist",
+          "label": "YawDist",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 30
+        },
+        {
+          "name": "disttotarget",
+          "label": "DistToTarget",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 31
+        },
+        {
+          "name": "naviinuse",
+          "label": "NaviInUse",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 32
+        },
+        {
+          "name": "naviagpsnum",
+          "label": "NaviAGPSNum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 33
+        },
+        {
+          "name": "navibfrontgpsnum",
+          "label": "NaviBFrontGPSNum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 34
+        },
+        {
+          "name": "navibbackgpsnum",
+          "label": "NaviBBackGPSNum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 35
+        },
+        {
+          "name": "naviagps",
+          "label": "NaviAGPS",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 36
+        },
+        {
+          "name": "isnaviaok",
+          "label": "IsNaviAOK",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 37
+        },
+        {
+          "name": "naviagpsstate",
+          "label": "NaviAGPSState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 38
+        },
+        {
+          "name": "naviafault",
+          "label": "NaviAFault",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 39
+        },
+        {
+          "name": "navibfault",
+          "label": "NaviBFault",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 40
+        },
+        {
+          "name": "navibgpsstate",
+          "label": "NaviBGPSState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 41
+        },
+        {
+          "name": "gpstimeh",
+          "label": "GPSTimeH",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 42
+        },
+        {
+          "name": "gpstimem",
+          "label": "GPSTimeM",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 43
+        },
+        {
+          "name": "gpstimes",
+          "label": "GPSTimeS",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 44
+        },
+        {
+          "name": "pdop",
+          "label": "PDOP",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 45
+        },
+        {
+          "name": "airspeed",
+          "label": "Airspeed",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 46
+        },
+        {
+          "name": "prewarningdroneposflag",
+          "label": "PreWarningDronePosFlag",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 47
+        },
+        {
+          "name": "prewarningcountryboundaryflag",
+          "label": "PreWarningCountryBoundaryFlag",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 48
+        },
+        {
+          "name": "prewarningcountryboundarydist",
+          "label": "PreWarningCountryBoundaryDist",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 49
+        },
+        {
+          "name": "millimeterwavedis",
+          "label": "MillimeterWaveDis",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 50
+        }
+      ]
+    },
+    "imu": {
+      "display_label": "IMU数据",
+      "file_patterns": [
+        "IMUData"
+      ],
+      "columns": [
+        {
+          "name": "nava_roll",
+          "label": "NavA_Roll",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "nava_pitch",
+          "label": "NavA_Pitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "nava_yaw",
+          "label": "NavA_Yaw",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "vx",
+          "label": "Vx",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "vy",
+          "label": "Vy",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "vz",
+          "label": "Vz",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "ax",
+          "label": "Ax",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "ay",
+          "label": "Ay",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "az",
+          "label": "Az",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "navb_roll",
+          "label": "NavB_Roll",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "navb_pitch",
+          "label": "NavB_Pitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "navb_yaw",
+          "label": "NavB_Yaw",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "navb_vx",
+          "label": "NavB_Vx",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "navb_vy",
+          "label": "NavB_Vy",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "navb_vz",
+          "label": "NavB_Vz",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "navb_ax",
+          "label": "NavB_Ax",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "navb_ay",
+          "label": "NavB_Ay",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "navb_az",
+          "label": "NavB_Az",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "ax_extremum",
+          "label": "AxExtremum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "ay_extremum",
+          "label": "AyExtremum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "az_extremum",
+          "label": "AzExtremum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        }
+      ]
+    },
+    "gps": {
+      "display_label": "GPS数据",
+      "file_patterns": [
+        "GPSData"
+      ],
+      "columns": [
+        {
+          "name": "north_vel",
+          "label": "GPSVelN",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "east_vel",
+          "label": "GPSVelE",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "down_vel",
+          "label": "GPSVelD",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "nava_lat",
+          "label": "NavA_Lat",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "nava_lng",
+          "label": "NavA_Lng",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "nava_alt",
+          "label": "NavA_Alt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "gpsb_vel_n",
+          "label": "GPSBVelN",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "gpsb_vel_e",
+          "label": "GPSBVelE",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "gpsb_vel_d",
+          "label": "GPSBVelD",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "navb_lat",
+          "label": "NavB_Lat",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "navb_lng",
+          "label": "NavB_Lng",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "navb_alt",
+          "label": "NavB_Alt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "pos_accuracy",
+          "label": "Hacc",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "vel_accuracy",
+          "label": "Sacc",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "pressure",
+          "label": "Pressure",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "pressure_alt",
+          "label": "BarometerAlt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "heading",
+          "label": "GPSAz",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "heading_accuracy",
+          "label": "GPSAzAcc",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "baseline_len",
+          "label": "BaselineLength",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "update_freq",
+          "label": "AzFrequency",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        }
+      ]
+    },
+    "controller": {
+      "display_label": "舵机控制",
+      "file_patterns": [
+        "ControllerData"
+      ],
+      "columns": [
+        {
+          "name": "linear_servo1_cmd",
+          "label": "LinearServo1_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "linear_servo2_cmd",
+          "label": "LinearServo2_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "linear_servo3_cmd",
+          "label": "LinearServo3_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "linear_servo4_cmd",
+          "label": "LinearServo4_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "linear_servo5_cmd",
+          "label": "LinearServo5_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "linear_servo6_cmd",
+          "label": "LinearServo6_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "acc_servo_cmd",
+          "label": "AccServo_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "choker_servo_cmd",
+          "label": "ChokerServo_Cmd",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "linear_servo1",
+          "label": "LinearServo1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "linear_servo2",
+          "label": "LinearServo2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "linear_servo3",
+          "label": "LinearServo3",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "linear_servo4",
+          "label": "LinearServo4",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "linear_servo5",
+          "label": "LinearServo5",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "linear_servo6",
+          "label": "LinearServo6",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "acc_servo",
+          "label": "AccServo",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "choker_servo",
+          "label": "ChokerServo",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        }
+      ]
+    },
+    "engine": {
+      "display_label": "发动机数据",
+      "file_patterns": [
+        "EngineData"
+      ],
+      "columns": [
+        {
+          "name": "cyl_temp_1",
+          "label": "engine.CylinderTemp1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "cyl_temp_2",
+          "label": "engine.CylinderTemp2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "cyl_temp_3",
+          "label": "engine.CylinderTemp3",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "cyl_temp_4",
+          "label": "engine.CylinderTemp4",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "oil_temp",
+          "label": "engine.OilTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "engine_bay_temp",
+          "label": "engine.EngineNacelleTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "env_temp",
+          "label": "engine.EnvTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "gearbox_temp",
+          "label": "engine.GearboxTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "collection_board_temp",
+          "label": "engine.CollectionBoardTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "exhaust_temp_1",
+          "label": "engine.ThermocoupleTemp1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "exhaust_temp_2",
+          "label": "engine.ThermocoupleTemp2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "exhaust_temp_3",
+          "label": "engine.ThermocoupleTemp3",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "exhaust_temp_4",
+          "label": "engine.ThermocoupleTemp4",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "oil_press",
+          "label": "engine.OilPress",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "fuel_volume",
+          "label": "engine.OiltankVolume",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "oil_level",
+          "label": "engine.OilLiquidLevel",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "fuel_press",
+          "label": "engine.FuelPress",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "fault_code_1",
+          "label": "engine.FaultCode1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "fault_code_2",
+          "label": "engine.FaultCode2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "fault_code_3",
+          "label": "engine.FaultCode3",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "fault_code_4",
+          "label": "engine.FaultCode4",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "start_num",
+          "label": "engine.StartNum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "engine_rpm",
+          "label": "engine.EngineRPM",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        },
+        {
+          "name": "throttle",
+          "label": "engine.ThrottleOpenness",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 24
+        },
+        {
+          "name": "manifold_press",
+          "label": "engine.AirboxPress",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 25
+        },
+        {
+          "name": "wastegate_pos",
+          "label": "engine.WastegasgatePos",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 26
+        },
+        {
+          "name": "airbox_temp",
+          "label": "engine.AirboxTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 27
+        },
+        {
+          "name": "atmos_press",
+          "label": "engine.AtmosPress",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 28
+        },
+        {
+          "name": "airbox_target_press_base",
+          "label": "engine.Airbox_TargetPress_Base",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 29
+        },
+        {
+          "name": "engine_airbox_targetpress_limit",
+          "label": "engine.Airbox_TargetPress_Limit",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 30
+        },
+        {
+          "name": "engine_airbox_targetpress_fix",
+          "label": "engine.Airbox_TargetPress_Fix",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 31
+        },
+        {
+          "name": "engine_airbox_targetpress_tempfix",
+          "label": "engine.Airbox_TargetPress_TempFix",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 32
+        },
+        {
+          "name": "engine_airbox_targetpress_deflagfix",
+          "label": "engine.Airbox_TargetPress_DeflagFix",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 33
+        },
+        {
+          "name": "engine_airbox_targetpress_deflagad",
+          "label": "engine.Airbox_TargetPress_DeflagAD",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 34
+        },
+        {
+          "name": "engine_airbox_targetpress_diff",
+          "label": "engine.Airbox_TargetPress_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 35
+        },
+        {
+          "name": "engine_servoctl_duty",
+          "label": "engine.ServoCTL_Duty",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 36
+        },
+        {
+          "name": "engine_airbox_targetpress_rpmfix",
+          "label": "engine.Airbox_TargetPress_RPMFix",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 37
+        },
+        {
+          "name": "engine_servo_theorytarget",
+          "label": "engine.Servo_TheoryTarget",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 38
+        },
+        {
+          "name": "engine_airbox_servooff",
+          "label": "engine.Airbox_ServoOff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 39
+        },
+        {
+          "name": "engine_servo_targetpos",
+          "label": "engine.Servo_TargetPos",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 40
+        },
+        {
+          "name": "engine_servo_posdiff",
+          "label": "engine.Servo_PosDiff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 41
+        },
+        {
+          "name": "engine_airbox_time",
+          "label": "engine.Airbox_Time",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 42
+        },
+        {
+          "name": "engine_airbox_maxtime",
+          "label": "engine.Airbox_MaxTime",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 43
+        }
+      ]
+    },
+    "powerbox": {
+      "display_label": "电源数据",
+      "file_patterns": [
+        "PowerBoxData"
+      ],
+      "columns": [
+        {
+          "name": "fcs_voltage",
+          "label": "powerbox.CPUBatVolt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "servo_voltage",
+          "label": "powerbox.ServoBatVolt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "rcvr_voltage",
+          "label": "powerbox.PodBatVolt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "battery_voltage",
+          "label": "powerbox.LauncherBatVolt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "fcs_current",
+          "label": "powerbox.CPUCurrent",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "servo_current",
+          "label": "powerbox.ServoCurrent",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "rcvr_current",
+          "label": "powerbox.PodCurrent",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "battery_current",
+          "label": "powerbox.LauncherCurrent",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "v12",
+          "label": "powerbox.Powerbox_12V",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "v28",
+          "label": "powerbox.Powerbox_28V",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "fan_current",
+          "label": "powerbox.FanCurrent",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "fcs_volt_state",
+          "label": "powerbox.CPUVoltState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "servo_volt_state",
+          "label": "powerbox.ServoVoltState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "rcvr_volt_state",
+          "label": "powerbox.PodVoltState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "battery_volt_state",
+          "label": "powerbox.LauncherVoltState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "v12_state",
+          "label": "powerbox.BatVoltState12V",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "v28_state",
+          "label": "powerbox.BatVoltState28V",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "fcs_current_state",
+          "label": "powerbox.CPUCurrentState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "servo_current_state",
+          "label": "powerbox.ServoCurrentState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "rcvr_current_state",
+          "label": "powerbox.PodCurrentState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "battery_current_state",
+          "label": "powerbox.LauncherCurrentState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        },
+        {
+          "name": "fan_current_state",
+          "label": "powerbox.FanCurrentState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": null,
+          "nullable": true
+        }
+      ]
+    },
+    "dual_antenna": {
+      "display_label": "双天线差分",
+      "file_patterns": [
+        "DualAntennaData"
+      ],
+      "columns": [
+        {
+          "name": "gps_pos_type",
+          "label": "GPSPosType",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "radio_pos_flag",
+          "label": "RadioPosFlag",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "pa_alt_flag",
+          "label": "PaAltFlag",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "mag_heading_flag",
+          "label": "MagHeadingFlag",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "gps_data_flag",
+          "label": "GPSDataFlag",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "pdop_diff",
+          "label": "PDOP_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "hdop_diff",
+          "label": "HDOP_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "sat_num_diff",
+          "label": "SatNum_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "pos_update_rate",
+          "label": "PosUpdateFreq",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "vel_update_rate",
+          "label": "VelUpdateFreq",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "state_update_rate",
+          "label": "DopUpdateFreq",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "pressure",
+          "label": "DynamicPress",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "pressure_2",
+          "label": "StaticPress",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "vel",
+          "label": "Airspeed_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "pressure_rate",
+          "label": "DynamicPressUpdateFreq",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "pressure2_rate",
+          "label": "StaticPressUpdateFreq",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "pressure_temp",
+          "label": "DynamicPressTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "pressure2_temp",
+          "label": "StaticPressTemp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "pressure_2_alt",
+          "label": "StaticPress2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "pressure2_rate_alt",
+          "label": "StaticPress2UpdateFreq",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "pressure2_temp_alt",
+          "label": "StaticPress2Temp",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "pressure_alt_sensor",
+          "label": "PaAltSensorNo",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "pressure_alt_comp",
+          "label": "StaticPressSensorNo",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        }
+      ]
+    },
+    "alert": {
+      "display_label": "飞行告警",
+      "file_patterns": [
+        "FlightAlertInfo"
+      ],
+      "is_alert": true,
+      "columns": [
+        {
+          "name": "alert_desc",
+          "label": "告警描述",
+          "unit": "",
+          "type": "TEXT",
+          "ordinal": 1
+        },
+        {
+          "name": "extra_value",
+          "label": "附加数值",
+          "unit": "",
+          "type": "TEXT",
+          "ordinal": 2
+        }
+      ]
+    }
+  }
+}

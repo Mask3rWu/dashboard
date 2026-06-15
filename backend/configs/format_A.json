@@ -1,0 +1,1320 @@
+{
+  "format": "A",
+  "description": "参考格式 - 带UAVSendID,有表头,目录结构为 飞机ID/ParserData/",
+  "has_header": true,
+  "has_uav_send_id": true,
+  "encoding": "gbk",
+  "data_types": {
+    "drone_state": {
+      "display_label": "飞控状态",
+      "file_patterns": [
+        "DroneStateData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "uplink_type",
+          "label": "UpLinkCommType",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "downlink_type",
+          "label": "DownLinkCommType",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "roll",
+          "label": "横滚角",
+          "unit": "°",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "pitch",
+          "label": "俯仰角",
+          "unit": "°",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "yaw",
+          "label": "航向角",
+          "unit": "°",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "fwd_vel",
+          "label": "前向速度",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "side_vel",
+          "label": "侧向速度",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "down_vel",
+          "label": "垂向速度",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "fwd_target_vel",
+          "label": "前向目标速度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "side_target_vel",
+          "label": "侧向目标速度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "down_target_vel",
+          "label": "垂向目标速度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "col_13_目标滚转角",
+          "label": "目标滚转角",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "target_pitch",
+          "label": "目标俯仰角",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "yaw_rate",
+          "label": "转向速度",
+          "unit": "°/s",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "target_yaw_rate",
+          "label": "目标转向速度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "target_alt",
+          "label": "目标高度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "col_18_横滚",
+          "label": "横滚",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "col_19_俯仰",
+          "label": "俯仰",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "accelerator",
+          "label": "油门",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "direction",
+          "label": "方向",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "collective_pitch",
+          "label": "总距",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "col_23_切换开关脉宽",
+          "label": "切换开关脉宽",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        },
+        {
+          "name": "engine_rpm",
+          "label": "发动机转速",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 24
+        },
+        {
+          "name": "target_rpm",
+          "label": "目标转速",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 25
+        },
+        {
+          "name": "col_26_航时",
+          "label": "航时",
+          "unit": "min",
+          "type": "REAL",
+          "ordinal": 26
+        },
+        {
+          "name": "col_27_工作时长",
+          "label": "工作时长",
+          "unit": "min",
+          "type": "REAL",
+          "ordinal": 27
+        }
+      ]
+    },
+    "dual_antenna": {
+      "display_label": "双天线差分",
+      "file_patterns": [
+        "DualAntennaData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "gps_pos_type",
+          "label": "GPSPosType",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "radio_pos_flag",
+          "label": "RadioPosFlag",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 3
+        },
+        {
+          "name": "pa_alt_flag",
+          "label": "PaAltFlag",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 4
+        },
+        {
+          "name": "mag_heading_flag",
+          "label": "MagHeadingFlag",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 5
+        },
+        {
+          "name": "gps_data_flag",
+          "label": "GPSDataFlag",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 6
+        },
+        {
+          "name": "pdop_diff",
+          "label": "PDOP_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "hdop_diff",
+          "label": "HDOP_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "sat_num_diff",
+          "label": "SatNum_Diff",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "pos_update_rate",
+          "label": "位置更新频率",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "vel_update_rate",
+          "label": "速度更新频率",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "state_update_rate",
+          "label": "状态更新频率",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "pressure",
+          "label": "动压",
+          "unit": "Pa",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "pressure_2",
+          "label": "静压",
+          "unit": "Pa",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "vel",
+          "label": "空速",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "pressure_rate",
+          "label": "动压更新频率",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "pressure2_rate",
+          "label": "静压更新频率",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "pressure_temp",
+          "label": "动压温度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "pressure2_temp",
+          "label": "静压温度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "pressure_2_alt",
+          "label": "静压2",
+          "unit": "Pa",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "pressure2_rate_alt",
+          "label": "静压2更新频率",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "pressure2_temp_alt",
+          "label": "静压2温度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "pressure_alt_sensor",
+          "label": "气压高度传感器",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        },
+        {
+          "name": "col_24_静压传感器号",
+          "label": "静压传感器号",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 24
+        }
+      ]
+    },
+    "engine": {
+      "display_label": "发动机数据",
+      "file_patterns": [
+        "EngineData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "col_2_空气盒子温度",
+          "label": "空气盒子温度",
+          "unit": "℃",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "col_3_缸温1",
+          "label": "缸温1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "col_4_缸温2",
+          "label": "缸温2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "col_5_滑油温度",
+          "label": "滑油温度",
+          "unit": "℃",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "col_6_排温1",
+          "label": "排温1",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "col_7_排温2",
+          "label": "排温2",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "col_8_排温3",
+          "label": "排温3",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "col_9_排温4",
+          "label": "排温4",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "col_10_滑油压力",
+          "label": "滑油压力",
+          "unit": "mbar",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "col_11_剩余油量",
+          "label": "剩余油量",
+          "unit": "L",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "col_12_板上电压",
+          "label": "板上电压",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "col_13_启动次数",
+          "label": "启动次数",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "engine_rpm",
+          "label": "发动机转速",
+          "unit": "RPM",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "col_15_油门开度",
+          "label": "油门开度",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "col_16_空气箱压力",
+          "label": "空气箱压力",
+          "unit": "mbar",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "wastegate_pos",
+          "label": "废气门位置",
+          "unit": "%",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "col_18_空气箱温度",
+          "label": "空气箱温度",
+          "unit": "℃",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "pressure",
+          "label": "大气压力",
+          "unit": "mbar",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "tcu修正和限定前推压力",
+          "label": "TCU修正和限定前推压力",
+          "unit": "mbar",
+          "type": "REAL",
+          "ordinal": 20
+        }
+      ]
+    },
+    "gps": {
+      "display_label": "GPS数据",
+      "file_patterns": [
+        "GPSData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "north_vel",
+          "label": "北向速度",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "east_vel",
+          "label": "东向速度",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "down_vel",
+          "label": "垂向速度",
+          "unit": "m/s",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "nava_lat",
+          "label": "NavA_Lat",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "nava_lng",
+          "label": "NavA_Lng",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "nava_alt",
+          "label": "NavA_Alt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "gpsb_vel_n",
+          "label": "GPSBVelN",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "gpsb_vel_e",
+          "label": "GPSBVelE",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "gpsb_vel_d",
+          "label": "GPSBVelD",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "navb_lat",
+          "label": "NavB_Lat",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "navb_lng",
+          "label": "NavB_Lng",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "navb_alt",
+          "label": "NavB_Alt",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "pos_accuracy",
+          "label": "位置精度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "vel_accuracy",
+          "label": "速度精度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "pressure",
+          "label": "大气压力",
+          "unit": "Pa",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "pressure_alt",
+          "label": "气压高度",
+          "unit": "m",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "col_18_卫测角度",
+          "label": "卫测角度",
+          "unit": "°",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "col_19_卫星测量精度",
+          "label": "卫星测量精度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "col_20_基线长度",
+          "label": "基线长度",
+          "unit": "mm",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "col_21_航向频率",
+          "label": "航向频率",
+          "unit": "Hz",
+          "type": "REAL",
+          "ordinal": 21
+        }
+      ]
+    },
+    "imu": {
+      "display_label": "IMU数据",
+      "file_patterns": [
+        "IMUData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "nava_roll",
+          "label": "NavA_Roll",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "nava_pitch",
+          "label": "NavA_Pitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "nava_yaw",
+          "label": "NavA_Yaw",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "vx",
+          "label": "Vx",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "vy",
+          "label": "Vy",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "vz",
+          "label": "Vz",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "ax",
+          "label": "Ax",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "ay",
+          "label": "Ay",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "az",
+          "label": "Az",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "navb_roll",
+          "label": "NavB_Roll",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "navb_pitch",
+          "label": "NavB_Pitch",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "navb_yaw",
+          "label": "NavB_Yaw",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "navb_vx",
+          "label": "NavB_Vx",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "navb_vy",
+          "label": "NavB_Vy",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "navb_vz",
+          "label": "NavB_Vz",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "navb_ax",
+          "label": "NavB_Ax",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "navb_ay",
+          "label": "NavB_Ay",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "navb_az",
+          "label": "NavB_Az",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "ax_extremum",
+          "label": "AxExtremum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "ay_extremum",
+          "label": "AyExtremum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "az_extremum",
+          "label": "AzExtremum",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        }
+      ]
+    },
+    "pos": {
+      "display_label": "位置数据",
+      "file_patterns": [
+        "PosData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "north_pos",
+          "label": "北向位置",
+          "unit": "m",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "east_pos",
+          "label": "东向位置",
+          "unit": "m",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "rel_alt",
+          "label": "相对高度",
+          "unit": "m",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "lng",
+          "label": "经度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "lat",
+          "label": "纬度",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "alt_amsl",
+          "label": "海拔高度",
+          "unit": "m",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "col_8_距home点距离",
+          "label": "距Home点距离",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "fcs_voltage",
+          "label": "飞控电压",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "is_nava_online",
+          "label": "IsNavAOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "is_navb_online",
+          "label": "IsNavBOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "is_rc_online",
+          "label": "遥控器在线状态",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 12
+        },
+        {
+          "name": "is_rc_ok",
+          "label": "遥控器指令开关",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 13
+        },
+        {
+          "name": "is_gcs_online",
+          "label": "IsGCSOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 14
+        },
+        {
+          "name": "is_powerbox_online",
+          "label": "IsPowerBoxOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 15
+        },
+        {
+          "name": "is_ecu_online",
+          "label": "IsECUOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 16
+        },
+        {
+          "name": "is_tcu_online",
+          "label": "IsTCUOnline",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 17
+        },
+        {
+          "name": "col_18_发动机熄火",
+          "label": "发动机熄火",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 18
+        },
+        {
+          "name": "is_servo1_online",
+          "label": "IsServo1Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 19
+        },
+        {
+          "name": "is_servo2_online",
+          "label": "IsServo2Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 20
+        },
+        {
+          "name": "is_servo3_online",
+          "label": "IsServo3Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 21
+        },
+        {
+          "name": "is_servo4_online",
+          "label": "IsServo4Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 22
+        },
+        {
+          "name": "is_servo5_online",
+          "label": "IsServo5Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 23
+        },
+        {
+          "name": "is_servo6_online",
+          "label": "IsServo6Online",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 24
+        },
+        {
+          "name": "flight_mode",
+          "label": "飞行模式",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 25
+        },
+        {
+          "name": "recorder_state",
+          "label": "记录仪",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 26
+        },
+        {
+          "name": "col_27_目标航点",
+          "label": "目标航点",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 27
+        },
+        {
+          "name": "cross_track_err",
+          "label": "偏航距",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 28
+        },
+        {
+          "name": "col_29_距目标点距离",
+          "label": "距目标点距离",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 29
+        },
+        {
+          "name": "nav_switch",
+          "label": "导航切换",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 30
+        },
+        {
+          "name": "navia卫星数",
+          "label": "NaviA卫星数",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 31
+        },
+        {
+          "name": "navibfront卫星数",
+          "label": "NaviBFront卫星数",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 32
+        },
+        {
+          "name": "navibback卫星数",
+          "label": "NaviBBack卫星数",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 33
+        },
+        {
+          "name": "navia_nav_state",
+          "label": "导航A状态",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 34
+        },
+        {
+          "name": "is_navia_ok",
+          "label": "IsNaviAOK",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 35
+        },
+        {
+          "name": "navia_gps_state",
+          "label": "NaviAGPSState",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 36
+        },
+        {
+          "name": "navia_fault",
+          "label": "NaviAFault",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 37
+        },
+        {
+          "name": "navib_fault",
+          "label": "NaviBFault",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 38
+        },
+        {
+          "name": "navib_nav_state",
+          "label": "导航B状态",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 39
+        },
+        {
+          "name": "gps_time_h",
+          "label": "GPSTimeH",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 40
+        },
+        {
+          "name": "gps_time_m",
+          "label": "GPSTimeM",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 41
+        },
+        {
+          "name": "gps_time_s",
+          "label": "GPSTimeS",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 42
+        },
+        {
+          "name": "pdop",
+          "label": "PDOP",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 43
+        },
+        {
+          "name": "vel",
+          "label": "空速",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 44
+        },
+        {
+          "name": "prewarn_drone_pos",
+          "label": "PreWarningDronePosFlag",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 45
+        },
+        {
+          "name": "prewarn_country_boundary",
+          "label": "PreWarningCountryBoundaryFlag",
+          "unit": "",
+          "type": "INTEGER",
+          "ordinal": 46
+        },
+        {
+          "name": "prewarn_boundary_dist",
+          "label": "PreWarningCountryBoundaryDist",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 47
+        },
+        {
+          "name": "col_48_毫米波测距值",
+          "label": "毫米波测距值",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 48
+        }
+      ]
+    },
+    "powerbox": {
+      "display_label": "电源数据",
+      "file_patterns": [
+        "PowerBoxData"
+      ],
+      "columns": [
+        {
+          "name": "uav_send_id",
+          "label": "UAVSendID",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 1
+        },
+        {
+          "name": "fcs_voltage",
+          "label": "飞控电压",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 2
+        },
+        {
+          "name": "servo_voltage",
+          "label": "舵机电压",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 3
+        },
+        {
+          "name": "col_4_吊舱电压",
+          "label": "吊舱电压",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 4
+        },
+        {
+          "name": "col_5_任务电压",
+          "label": "任务电压",
+          "unit": "",
+          "type": "REAL",
+          "ordinal": 5
+        },
+        {
+          "name": "fcs_current",
+          "label": "飞控电流",
+          "unit": "mA",
+          "type": "REAL",
+          "ordinal": 6
+        },
+        {
+          "name": "servo_current",
+          "label": "舵机电流",
+          "unit": "mA",
+          "type": "REAL",
+          "ordinal": 7
+        },
+        {
+          "name": "col_8_吊舱电流",
+          "label": "吊舱电流",
+          "unit": "mA",
+          "type": "REAL",
+          "ordinal": 8
+        },
+        {
+          "name": "col_9_任务电流",
+          "label": "任务电流",
+          "unit": "mA",
+          "type": "REAL",
+          "ordinal": 9
+        },
+        {
+          "name": "col_10_机载12v电压",
+          "label": "机载12V电压",
+          "unit": "V",
+          "type": "REAL",
+          "ordinal": 10
+        },
+        {
+          "name": "col_11_机载28v电压",
+          "label": "机载28V电压",
+          "unit": "V",
+          "type": "REAL",
+          "ordinal": 11
+        },
+        {
+          "name": "fan_current",
+          "label": "风扇电流",
+          "unit": "mA",
+          "type": "REAL",
+          "ordinal": 12
+        }
+      ]
+    },
+    "alert": {
+      "display_label": "飞行告警",
+      "file_patterns": [
+        "FlightAlertInfo"
+      ],
+      "is_alert": true,
+      "columns": [
+        {
+          "name": "uav_id",
+          "label": "无人机编号",
+          "unit": "",
+          "type": "TEXT",
+          "ordinal": 1
+        },
+        {
+          "name": "drone_model",
+          "label": "型号",
+          "unit": "",
+          "type": "TEXT",
+          "ordinal": 2
+        },
+        {
+          "name": "alert_desc",
+          "label": "告警描述",
+          "unit": "",
+          "type": "TEXT",
+          "ordinal": 3
+        },
+        {
+          "name": "extra_value",
+          "label": "附加数值",
+          "unit": "",
+          "type": "TEXT",
+          "ordinal": 4
+        }
+      ]
+    }
+  }
+}
