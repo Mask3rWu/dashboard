@@ -6,6 +6,7 @@ import json
 import threading
 import time as _time
 import traceback
+import ctypes
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,12 +24,17 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from backend.database import init_db, get_db
-from backend.parser import import_flight, import_session, scan_folder, scan_folder_sessions
+from backend.parser import import_session, scan_folder_sessions
+from backend.format_configs import (
+    load_format_config, register_model_tables, get_columns_for_model,
+    get_columns_for_flight, get_table_name,
+)
+from backend.scanner import detect_format
 from backend import analysis
 
 # ─── App Setup ─────────────────────────────────────────────
 
-app = FastAPI(title="Flight Analyzer", version="1.0.0")
+app = FastAPI(title="Flight Analyzer", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,22 +47,42 @@ app.add_middleware(
 
 class ImportRequest(BaseModel):
     source_path: str
+    format_category: str | None = None
 
 
 class ImportSessionRequest(BaseModel):
     source_path: str
-    drone_id: str = ''       # empty = bulk import all sessions (backward compat)
-    session_key: str = ''    # empty = import all sessions for drone
-    mode: str = 'overwrite'  # 'overwrite' or 'as_new'
+    aircraft_id: int       # required — aircraft.id
+    session_key: str = ''  # empty = import all sessions for this aircraft
+    mode: str = 'overwrite'
 
 
 class UpdateFlightRequest(BaseModel):
     name: str
 
 
+class CreateModelRequest(BaseModel):
+    name: str
+    format_category: str  # 'A', 'B', or 'C'
+    description: str = ''
+
+
+class UpdateModelRequest(BaseModel):
+    name: str
+
+
+class CreateAircraftRequest(BaseModel):
+    serial_number: str
+    name: str = ''
+
+
+class UpdateAircraftRequest(BaseModel):
+    serial_number: str
+
+
 class AlignedRequest(BaseModel):
     column_keys: list[str]
-    ref_table: str = "gps_data"
+    ref_table: str = "gps"
     tolerance: float = 0.5
     filter: dict | None = None
 
@@ -90,7 +116,7 @@ class FilterPresetCreate(BaseModel):
 
 @app.get("/api/folders/browse")
 def browse_folder():
-    """Open native folder picker dialog via tkinter (bundled with Python)."""
+    """Open native folder picker dialog via tkinter."""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -109,14 +135,179 @@ def browse_folder():
         raise HTTPException(500, f"Folder browser failed: {e}")
 
 
+# ─── Model Routes ──────────────────────────────────────────
+
+@app.get("/api/models")
+def list_models():
+    """List all aircraft models."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT am.*, (SELECT COUNT(*) FROM aircraft a WHERE a.model_id = am.id) as aircraft_count "
+        "FROM aircraft_models am ORDER BY am.created_at"
+    ).fetchall()
+    conn.close()
+    return {"models": [dict(r) for r in rows]}
+
+
+@app.post("/api/models")
+def create_model(req: CreateModelRequest):
+    """Create a new aircraft model. Automatically creates data tables and column registry."""
+    if req.format_category not in ('A', 'B', 'C'):
+        raise HTTPException(400, "format_category must be A, B, or C")
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO aircraft_models (name, format_category, description) VALUES (?, ?, ?)",
+            (req.name, req.format_category, req.description)
+        )
+        model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # Create data tables and populate registry
+        register_model_tables(conn, model_id, req.format_category)
+
+        conn.close()
+        return {"id": model_id, "name": req.name, "format_category": req.format_category}
+    except Exception as e:
+        conn.close()
+        if 'UNIQUE' in str(e):
+            raise HTTPException(400, f"Model name '{req.name}' already exists")
+        raise HTTPException(500, str(e))
+
+
+@app.patch("/api/models/{model_id}")
+def update_model(model_id: int, req: UpdateModelRequest):
+    """Rename an aircraft model."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Model not found")
+    try:
+        conn.execute("UPDATE aircraft_models SET name=? WHERE id=?", (req.name.strip(), model_id))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        conn.close()
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/models/{model_id}")
+def delete_model(model_id: int):
+    """Delete a model and all related aircraft, flights, and data (cascade)."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Model not found")
+
+    # Get table names to drop
+    tables = conn.execute(
+        "SELECT table_name FROM data_table_registry WHERE model_id=?", (model_id,)
+    ).fetchall()
+
+    conn.execute("DELETE FROM aircraft_models WHERE id=?", (model_id,))
+
+    # Drop per-model data tables
+    for t in tables:
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {t['table_name']}")
+        except Exception:
+            pass
+
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ─── Aircraft Routes ───────────────────────────────────────
+
+@app.get("/api/models/{model_id}/aircraft")
+def list_aircraft(model_id: int):
+    """List all aircraft under a model."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT a.*, (SELECT COUNT(*) FROM flights f WHERE f.aircraft_id = a.id) as flight_count "
+        "FROM aircraft a WHERE a.model_id = ? ORDER BY a.serial_number",
+        (model_id,)
+    ).fetchall()
+    conn.close()
+    return {"aircraft": [dict(r) for r in rows]}
+
+
+@app.post("/api/models/{model_id}/aircraft")
+def create_aircraft(model_id: int, req: CreateAircraftRequest):
+    """Add an aircraft to a model."""
+    conn = get_db()
+    # Verify model exists
+    model = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+    if not model:
+        conn.close()
+        raise HTTPException(404, "Model not found")
+    try:
+        conn.execute(
+            "INSERT INTO aircraft (model_id, serial_number) VALUES (?, ?)",
+            (model_id, req.serial_number)
+        )
+        aid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        conn.close()
+        return {"id": aid, "model_id": model_id, "serial_number": req.serial_number}
+    except Exception as e:
+        conn.close()
+        if 'UNIQUE' in str(e):
+            raise HTTPException(400, f"Aircraft '{req.serial_number}' already exists in this model")
+        raise HTTPException(500, str(e))
+
+
+@app.patch("/api/aircraft/{aircraft_id}")
+def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
+    """Update an aircraft's serial number."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Aircraft not found")
+    try:
+        conn.execute("UPDATE aircraft SET serial_number=? WHERE id=?", (req.serial_number.strip(), aircraft_id))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        conn.close()
+        if 'UNIQUE' in str(e):
+            raise HTTPException(400, f"Serial number '{req.serial_number}' already exists in this model")
+        raise HTTPException(500, str(e))
+
+
+@app.delete("/api/aircraft/{aircraft_id}")
+def delete_aircraft(aircraft_id: int):
+    """Delete an aircraft and all its flights (cascade)."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Aircraft not found")
+    conn.execute("DELETE FROM aircraft WHERE id=?", (aircraft_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 # ─── Flight Routes ─────────────────────────────────────────
 
 @app.get("/api/flights")
 def list_flights():
-    """List all imported flights."""
+    """List all imported flights with model/aircraft info."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM flights ORDER BY import_time DESC"
+        """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
+                  am.id as model_id, am.name as model_name, am.format_category
+           FROM flights f
+           JOIN aircraft a ON a.id = f.aircraft_id
+           JOIN aircraft_models am ON am.id = a.model_id
+           ORDER BY f.import_time DESC"""
     ).fetchall()
     conn.close()
     return {"flights": [dict(r) for r in rows]}
@@ -126,12 +317,20 @@ def list_flights():
 def get_flight(flight_id: int):
     """Get flight details with available columns."""
     conn = get_db()
-    flight = conn.execute("SELECT * FROM flights WHERE id=?", (flight_id,)).fetchone()
+    flight = conn.execute(
+        """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
+                  am.id as model_id, am.name as model_name, am.format_category
+           FROM flights f
+           JOIN aircraft a ON a.id = f.aircraft_id
+           JOIN aircraft_models am ON am.id = a.model_id
+           WHERE f.id=?""",
+        (flight_id,)
+    ).fetchone()
     conn.close()
     if not flight:
         raise HTTPException(404, "Flight not found")
     result = dict(flight)
-    result['columns'] = analysis.get_columns_for_flight(flight_id)
+    result['columns'] = analysis.get_columns_for_flight_api(flight_id)
     return result
 
 
@@ -165,7 +364,19 @@ def update_flight(flight_id: int, req: UpdateFlightRequest):
 def scan_folder_api(req: ImportRequest):
     """Scan a folder for flight sessions. Returns session-grouped preview with import status."""
     conn = get_db()
+
+    # Auto-detect format if not provided
+    fmt = req.format_category
+    if not fmt:
+        fmt = detect_format(req.source_path)
+
     result = scan_folder_sessions(req.source_path, conn=conn)
+
+    # Add format info
+    if fmt:
+        result['format_category'] = fmt
+        result['format_detected'] = True
+
     conn.close()
     return result
 
@@ -176,13 +387,26 @@ def import_flight_api(req: ImportSessionRequest):
     try:
         if req.session_key:
             result = import_session(
-                req.source_path, req.drone_id, req.session_key, req.mode
+                req.source_path, req.aircraft_id, req.session_key, req.mode
             )
             return result
         else:
-            # Backward compatible: import all sessions
-            result = import_flight(req.source_path)
-            return result
+            # Import all sessions for this aircraft
+            conn = get_db()
+            preview = scan_folder_sessions(req.source_path, conn=conn)
+            conn.close()
+
+            imported = []
+            for sess in preview.get('sessions', []):
+                result = import_session(
+                    req.source_path, req.aircraft_id, sess['session_key'], req.mode
+                )
+                if 'error' not in result:
+                    imported.append(result)
+
+            if not imported:
+                return {'error': 'No sessions could be imported'}
+            return {'imported': imported}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))
@@ -193,7 +417,7 @@ def import_flight_api(req: ImportSessionRequest):
 @app.get("/api/flights/{flight_id}/columns")
 def get_columns(flight_id: int):
     """Get all available columns for a flight, grouped by data type."""
-    return {"columns": analysis.get_columns_for_flight(flight_id)}
+    return {"columns": analysis.get_columns_for_flight_api(flight_id)}
 
 
 @app.post("/api/flights/{flight_id}/aligned")
@@ -210,11 +434,26 @@ def get_aligned(flight_id: int, req: AlignedRequest):
 def get_alerts(flight_id: int):
     """Get alerts for a flight."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT time_str, time_sec, alert_desc, extra_value "
-        "FROM flight_alerts WHERE flight_id=? ORDER BY time_sec",
-        (flight_id,)
-    ).fetchall()
+    model_id = analysis._get_model_id(conn, flight_id)
+    if model_id is None:
+        conn.close()
+        return {"alerts": []}
+
+    alert_table = get_table_name(conn, model_id, 'alert')
+    if not alert_table:
+        conn.close()
+        return {"alerts": []}
+
+    try:
+        rows = conn.execute(
+            f"SELECT time_str, time_sec, alert_desc, extra_value "
+            f"FROM {alert_table} WHERE flight_id=? ORDER BY time_sec",
+            (flight_id,)
+        ).fetchall()
+    except Exception:
+        conn.close()
+        return {"alerts": []}
+
     conn.close()
     return {"alerts": [
         {"time_str": r["time_str"], "time_sec": r["time_sec"],
@@ -249,6 +488,17 @@ def anomaly(flight_id: int, req: AnomalyRequest):
 def compare(req: CompareRequest):
     """Compare one metric across multiple flights."""
     return {"series": analysis.get_compare(req.flight_ids, req.column_key)}
+
+
+# ─── Column Registry Routes ────────────────────────────────
+
+@app.get("/api/registry/columns")
+def registry_columns(model_id: int):
+    """Get all columns registered for a model, grouped by data type."""
+    conn = get_db()
+    result = get_columns_for_model(conn, model_id)
+    conn.close()
+    return {"columns": result}
 
 
 # ─── Preset Routes ─────────────────────────────────────────
@@ -338,21 +588,81 @@ if os.path.isdir(FRONTEND_DIR):
 
 # ─── Entry Point ───────────────────────────────────────────
 
+def _show_error(title, msg):
+    """Show error to user — MessageBox in GUI mode, print otherwise."""
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.user32.MessageBoxW(0, str(msg), str(title), 0x10)
+            return
+        except Exception:
+            pass
+    print(f"[{title}] {msg}", file=sys.stderr)
+
+
+_server_error = None
+
+
+def _build_log_config():
+    """Build a log config that works in PyInstaller frozen (no-console) mode."""
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "()": "uvicorn.logging.DefaultFormatter",
+                "fmt": "%(levelprefix)s %(message)s",
+                "use_colors": False,
+            },
+            "access": {
+                "()": "uvicorn.logging.AccessFormatter",
+                "fmt": '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+                "use_colors": False,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"level": "INFO"},
+            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+        },
+    }
+
+
 def run_server(port=18520):
     """Start uvicorn in a daemon thread."""
+    global _server_error
     import uvicorn
     try:
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+        if getattr(sys, 'frozen', False):
+            uvicorn.run(
+                app, host="127.0.0.1", port=port,
+                log_config=_build_log_config(),
+            )
+        else:
+            uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
     except Exception as e:
-        print(f"[ERROR] Server failed to start: {e}")
-        traceback.print_exc()
+        _server_error = f"{e}\n{traceback.format_exc()}"
+        _show_error("Server Error", f"Server failed to start:\n{_server_error}")
 
 
-def _wait_for_server(port, timeout=10):
-    """Wait until the server is actually listening."""
+def _wait_for_server(server_thread, port, timeout=10):
+    """Wait until the server thread is actually listening on the port."""
     import socket
     start = _time.time()
     while _time.time() - start < timeout:
+        if not server_thread.is_alive() or _server_error is not None:
+            return False
         try:
             s = socket.create_connection(("127.0.0.1", port), timeout=0.3)
             s.close()
@@ -367,20 +677,20 @@ def main():
     init_db()
     port = 18520
 
-    # Start server thread
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
     server_thread.start()
 
-    # Wait for server to be ready
-    if not _wait_for_server(port, timeout=15):
-        print(f"[ERROR] Server did not start on port {port} within timeout.")
-        print("Check that the backend modules can be imported correctly.")
-        input("Press Enter to exit...")
-        return
+    if not _wait_for_server(server_thread, port, timeout=15):
+        msg = f"Server did not start on port {port} within timeout.\n\n"
+        if _server_error:
+            msg += f"Server error:\n{_server_error}"
+        else:
+            msg += "Check that the backend modules can be imported correctly."
+        _show_error("Startup Error", msg)
+        sys.exit(1)
 
     print(f"Server ready at http://127.0.0.1:{port}")
 
-    # If frontend is built, open pywebview; else open browser
     if os.path.isdir(FRONTEND_DIR):
         try:
             import webview
