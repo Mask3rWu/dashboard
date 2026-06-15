@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import ImportPage from './pages/ImportPage';
 import FlightView from './pages/FlightView';
 import ComparePage from './pages/ComparePage';
+import ModelManager from './pages/ModelManager';
 import { listFlights, type Flight } from './api';
 
-type Tab = 'import' | 'flight' | 'compare';
+type Tab = 'import' | 'models' | 'flight' | 'compare';
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('flight');
@@ -28,8 +29,14 @@ export default function App() {
 
   useEffect(() => { loadFlights(); }, []);
 
+  const navigateToFlight = (flightId: number) => {
+    setSelectedFlightId(flightId);
+    setTab('flight');
+  };
+
   const tabs: { key: Tab; label: string }[] = [
     { key: 'import', label: '导入数据' },
+    { key: 'models', label: '数据管理' },
     { key: 'flight', label: '飞行分析' },
     { key: 'compare', label: '飞行对比' },
   ];
@@ -64,16 +71,23 @@ export default function App() {
           <div className="flex items-center justify-center h-full text-gray-400">加载中...</div>
         ) : (
           <>
-            {tab === 'import' && <ImportPage onImported={loadFlights} />}
-            {tab === 'flight' && (
+            <div style={{ display: tab === 'import' ? 'contents' : 'none' }}>
+              <ImportPage onImported={loadFlights} />
+            </div>
+            <div style={{ display: tab === 'flight' ? 'contents' : 'none' }}>
               <FlightView
                 flights={flights}
                 selectedFlightId={selectedFlightId}
                 onSelectFlight={setSelectedFlightId}
                 onFlightsChanged={loadFlights}
               />
-            )}
-            {tab === 'compare' && <ComparePage flights={flights} />}
+            </div>
+            <div style={{ display: tab === 'compare' ? 'contents' : 'none' }}>
+              <ComparePage flights={flights} />
+            </div>
+            <div style={{ display: tab === 'models' ? 'contents' : 'none' }}>
+              <ModelManager onModelsChanged={loadFlights} onNavigateToFlight={navigateToFlight} flights={flights} />
+            </div>
           </>
         )}
       </main>
