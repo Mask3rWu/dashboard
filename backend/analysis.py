@@ -204,20 +204,44 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
                 'values': values,
             }
 
-    # Get alerts
+    # Get alerts — use column_registry for actual column names
     alert_table = get_table_name(conn, model_id, 'alert')
     alerts = []
     if alert_table:
-        # Check if table has uav_id column (Format A)
-        alert_cols = [r['name'] for r in conn.execute(f"PRAGMA table_info({alert_table})").fetchall()]
-        alert_rows = conn.execute(
-            f"SELECT time_str, time_sec, alert_desc, extra_value FROM {alert_table} WHERE flight_id=? ORDER BY time_sec",
-            (flight_id,)
+        # Read alert columns from column_registry (ordered by ordinal)
+        alert_col_rows = conn.execute(
+            "SELECT column_name FROM column_registry "
+            "WHERE model_id=? AND data_type_key='alert' AND ordinal IS NOT NULL "
+            "ORDER BY ordinal",
+            (model_id,)
         ).fetchall()
-        alerts = [{
-            'time_str': r['time_str'], 'time_sec': r['time_sec'],
-            'desc': r['alert_desc'], 'extra': r['extra_value'],
-        } for r in alert_rows]
+
+        if alert_col_rows:
+            col_names = [r['column_name'] for r in alert_col_rows]
+            cols_str = ', '.join(col_names)
+            try:
+                alert_rows = conn.execute(
+                    f"SELECT time_str, time_sec, {cols_str} FROM {alert_table} "
+                    f"WHERE flight_id=? ORDER BY time_sec",
+                    (flight_id,)
+                ).fetchall()
+            except Exception:
+                alert_rows = []
+
+            # Map to frontend-compatible {desc, extra} format.
+            # Prefer columns named with 'desc'/'extra', else use first/last column.
+            desc_col = next((c for c in col_names if 'desc' in c.lower()), col_names[0] if col_names else None)
+            extra_candidates = [c for c in col_names if 'extra' in c.lower()]
+            extra_col = extra_candidates[0] if extra_candidates else (
+                col_names[-1] if len(col_names) > 1 else None
+            )
+
+            alerts = [{
+                'time_str': r['time_str'],
+                'time_sec': r['time_sec'],
+                'desc': str(r[desc_col]) if desc_col and r[desc_col] is not None else '',
+                'extra': str(r[extra_col]) if extra_col and r[extra_col] is not None else '',
+            } for r in alert_rows]
 
     conn.close()
 

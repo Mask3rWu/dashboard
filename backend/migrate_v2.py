@@ -48,13 +48,19 @@ def run_migration(conn):
     conn.execute("PRAGMA foreign_keys=OFF")
 
     # ── Step 1: Create default Format A model ──
-    conn.execute(
-        """INSERT OR IGNORE INTO aircraft_models (name, format_category, description)
-           VALUES ('CR500A', 'A', 'Migrated from v1 (Reference Format)')"""
-    )
-    model_row = conn.execute("SELECT id FROM aircraft_models WHERE format_category='A'").fetchone()
-    model_id = model_row['id']
-    logger.info(f"  Created model id={model_id} (CR500A, Format A)")
+    # Use a query to find an existing model, or create one
+    model_row = conn.execute("SELECT id FROM aircraft_models WHERE format_category='A' OR name='CR500A'").fetchone()
+    if model_row:
+        model_id = model_row['id']
+        logger.info(f"  Using existing model id={model_id}")
+    else:
+        conn.execute(
+            """INSERT OR IGNORE INTO aircraft_models (name, format_category, description)
+               VALUES ('CR500A', 'A', 'Migrated from v1 (Reference Format)')"""
+        )
+        model_row = conn.execute("SELECT id FROM aircraft_models WHERE format_category='A' OR name='CR500A'").fetchone()
+        model_id = model_row['id']
+        logger.info(f"  Created model id={model_id} (CR500A, Format A)")
 
     # ── Step 2: Map old drone_ids to aircraft ──
     drone_ids = conn.execute("SELECT DISTINCT drone_id FROM flights").fetchall()

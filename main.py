@@ -24,12 +24,13 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from backend.database import init_db, get_db
-from backend.parser import import_session, scan_folder_sessions
+from backend.parser import import_session
 from backend.format_configs import (
     load_format_config, register_model_tables, get_columns_for_model,
     get_columns_for_flight, get_table_name,
+    save_model_config, delete_model_config, generate_config_from_scan,
 )
-from backend.scanner import detect_format
+from backend.scanner import scan_folder_sessions
 from backend import analysis
 
 # ─── App Setup ─────────────────────────────────────────────
@@ -63,8 +64,14 @@ class UpdateFlightRequest(BaseModel):
 
 class CreateModelRequest(BaseModel):
     name: str
-    format_category: str  # 'A', 'B', or 'C'
+    format_category: str
     description: str = ''
+
+
+class CreateModelFromScanRequest(BaseModel):
+    name: str
+    source_path: str
+    format_category: str
 
 
 class UpdateModelRequest(BaseModel):
@@ -141,19 +148,21 @@ def browse_folder():
 def list_models():
     """List all aircraft models."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT am.*, (SELECT COUNT(*) FROM aircraft a WHERE a.model_id = am.id) as aircraft_count "
-        "FROM aircraft_models am ORDER BY am.created_at"
-    ).fetchall()
-    conn.close()
-    return {"models": [dict(r) for r in rows]}
+    try:
+        rows = conn.execute(
+            "SELECT am.*, (SELECT COUNT(*) FROM aircraft a WHERE a.model_id = am.id) as aircraft_count "
+            "FROM aircraft_models am ORDER BY am.created_at"
+        ).fetchall()
+        return {"models": [dict(r) for r in rows]}
+    finally:
+        conn.close()
 
 
 @app.post("/api/models")
 def create_model(req: CreateModelRequest):
     """Create a new aircraft model. Automatically creates data tables and column registry."""
-    if req.format_category not in ('A', 'B', 'C'):
-        raise HTTPException(400, "format_category must be A, B, or C")
+    if not req.format_category.strip():
+        raise HTTPException(400, "format_category must not be empty")
 
     conn = get_db()
     try:
@@ -162,63 +171,102 @@ def create_model(req: CreateModelRequest):
             (req.name, req.format_category, req.description)
         )
         model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        # Create data tables and populate registry
         register_model_tables(conn, model_id, req.format_category)
-
-        conn.close()
         return {"id": model_id, "name": req.name, "format_category": req.format_category}
     except Exception as e:
-        conn.close()
         if 'UNIQUE' in str(e):
             raise HTTPException(400, f"Model name '{req.name}' already exists")
         raise HTTPException(500, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/models/from-scan")
+def create_model_from_scan(req: CreateModelFromScanRequest):
+    """Create a model from a scanned folder. Auto-generates format config
+    from the folder's file structure."""
+    conn = get_db()
+    try:
+        config_data = generate_config_from_scan(req.source_path)
+        config_data['format'] = req.format_category
+
+        conn.execute(
+            "INSERT INTO aircraft_models (name, format_category, description) VALUES (?, ?, ?)",
+            (req.name, req.format_category,
+             f'Auto-generated from {os.path.basename(req.source_path)}')
+        )
+        model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        config_path = save_model_config(model_id, config_data)
+        conn.execute(
+            "UPDATE aircraft_models SET config_path=? WHERE id=?",
+            (config_path, model_id)
+        )
+        register_model_tables(conn, model_id, req.format_category, config_path=config_path)
+        conn.commit()
+        return {"id": model_id, "name": req.name, "format_category": req.format_category,
+                "config_path": config_path}
+    except Exception as e:
+        if 'UNIQUE' in str(e):
+            raise HTTPException(400, f"Model name '{req.name}' already exists")
+        raise HTTPException(500, str(e))
+    finally:
+        conn.close()
 
 
 @app.patch("/api/models/{model_id}")
 def update_model(model_id: int, req: UpdateModelRequest):
     """Rename an aircraft model."""
     conn = get_db()
-    row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(404, "Model not found")
     try:
+        row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Model not found")
         conn.execute("UPDATE aircraft_models SET name=? WHERE id=?", (req.name.strip(), model_id))
         conn.commit()
-        conn.close()
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
-        conn.close()
         raise HTTPException(400, str(e))
+    finally:
+        conn.close()
 
 
 @app.delete("/api/models/{model_id}")
 def delete_model(model_id: int):
-    """Delete a model and all related aircraft, flights, and data (cascade)."""
+    """Delete a model and all related aircraft, flights, and data (cascade).
+    Also deletes the per-model format config file from disk."""
     conn = get_db()
-    row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
-    if not row:
+    try:
+        row = conn.execute("SELECT id, config_path FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Model not found")
+
+        # Delete config file from disk
+        if row['config_path']:
+            delete_model_config(row['config_path'])
+
+        # Get table names to drop (before cascade deletes registry rows)
+        tables = conn.execute(
+            "SELECT table_name FROM data_table_registry WHERE model_id=?", (model_id,)
+        ).fetchall()
+
+        # Cascade delete: aircraft_models → aircraft → flights → data rows
+        # Also cascades to column_registry and data_table_registry
+        conn.execute("DELETE FROM aircraft_models WHERE id=?", (model_id,))
+
+        # Drop the now-empty per-model data tables
+        for t in tables:
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {t['table_name']}")
+            except Exception:
+                pass
+
+        conn.commit()
+        return {"ok": True}
+    finally:
         conn.close()
-        raise HTTPException(404, "Model not found")
-
-    # Get table names to drop
-    tables = conn.execute(
-        "SELECT table_name FROM data_table_registry WHERE model_id=?", (model_id,)
-    ).fetchall()
-
-    conn.execute("DELETE FROM aircraft_models WHERE id=?", (model_id,))
-
-    # Drop per-model data tables
-    for t in tables:
-        try:
-            conn.execute(f"DROP TABLE IF EXISTS {t['table_name']}")
-        except Exception:
-            pass
-
-    conn.commit()
-    conn.close()
-    return {"ok": True}
 
 
 # ─── Aircraft Routes ───────────────────────────────────────
@@ -227,72 +275,76 @@ def delete_model(model_id: int):
 def list_aircraft(model_id: int):
     """List all aircraft under a model."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT a.*, (SELECT COUNT(*) FROM flights f WHERE f.aircraft_id = a.id) as flight_count "
-        "FROM aircraft a WHERE a.model_id = ? ORDER BY a.serial_number",
-        (model_id,)
-    ).fetchall()
-    conn.close()
-    return {"aircraft": [dict(r) for r in rows]}
+    try:
+        rows = conn.execute(
+            "SELECT a.*, (SELECT COUNT(*) FROM flights f WHERE f.aircraft_id = a.id) as flight_count "
+            "FROM aircraft a WHERE a.model_id = ? ORDER BY a.serial_number",
+            (model_id,)
+        ).fetchall()
+        return {"aircraft": [dict(r) for r in rows]}
+    finally:
+        conn.close()
 
 
 @app.post("/api/models/{model_id}/aircraft")
 def create_aircraft(model_id: int, req: CreateAircraftRequest):
     """Add an aircraft to a model."""
     conn = get_db()
-    # Verify model exists
-    model = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
-    if not model:
-        conn.close()
-        raise HTTPException(404, "Model not found")
     try:
+        model = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+        if not model:
+            raise HTTPException(404, "Model not found")
         conn.execute(
             "INSERT INTO aircraft (model_id, serial_number) VALUES (?, ?)",
             (model_id, req.serial_number)
         )
         aid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
-        conn.close()
         return {"id": aid, "model_id": model_id, "serial_number": req.serial_number}
+    except HTTPException:
+        raise
     except Exception as e:
-        conn.close()
         if 'UNIQUE' in str(e):
             raise HTTPException(400, f"Aircraft '{req.serial_number}' already exists in this model")
         raise HTTPException(500, str(e))
+    finally:
+        conn.close()
 
 
 @app.patch("/api/aircraft/{aircraft_id}")
 def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
     """Update an aircraft's serial number."""
     conn = get_db()
-    row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(404, "Aircraft not found")
     try:
+        row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Aircraft not found")
         conn.execute("UPDATE aircraft SET serial_number=? WHERE id=?", (req.serial_number.strip(), aircraft_id))
         conn.commit()
-        conn.close()
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
-        conn.close()
         if 'UNIQUE' in str(e):
             raise HTTPException(400, f"Serial number '{req.serial_number}' already exists in this model")
         raise HTTPException(500, str(e))
+    finally:
+        conn.close()
 
 
 @app.delete("/api/aircraft/{aircraft_id}")
 def delete_aircraft(aircraft_id: int):
     """Delete an aircraft and all its flights (cascade)."""
     conn = get_db()
-    row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
-    if not row:
+    try:
+        row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Aircraft not found")
+        conn.execute("DELETE FROM aircraft WHERE id=?", (aircraft_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
         conn.close()
-        raise HTTPException(404, "Aircraft not found")
-    conn.execute("DELETE FROM aircraft WHERE id=?", (aircraft_id,))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
 
 
 # ─── Flight Routes ─────────────────────────────────────────
@@ -301,47 +353,53 @@ def delete_aircraft(aircraft_id: int):
 def list_flights():
     """List all imported flights with model/aircraft info."""
     conn = get_db()
-    rows = conn.execute(
-        """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
-                  am.id as model_id, am.name as model_name, am.format_category
-           FROM flights f
-           JOIN aircraft a ON a.id = f.aircraft_id
-           JOIN aircraft_models am ON am.id = a.model_id
-           ORDER BY f.import_time DESC"""
-    ).fetchall()
-    conn.close()
-    return {"flights": [dict(r) for r in rows]}
+    try:
+        rows = conn.execute(
+            """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
+                      am.id as model_id, am.name as model_name, am.format_category
+               FROM flights f
+               JOIN aircraft a ON a.id = f.aircraft_id
+               JOIN aircraft_models am ON am.id = a.model_id
+               ORDER BY f.import_time DESC"""
+        ).fetchall()
+        return {"flights": [dict(r) for r in rows]}
+    finally:
+        conn.close()
 
 
 @app.get("/api/flights/{flight_id}")
 def get_flight(flight_id: int):
     """Get flight details with available columns."""
     conn = get_db()
-    flight = conn.execute(
-        """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
-                  am.id as model_id, am.name as model_name, am.format_category
-           FROM flights f
-           JOIN aircraft a ON a.id = f.aircraft_id
-           JOIN aircraft_models am ON am.id = a.model_id
-           WHERE f.id=?""",
-        (flight_id,)
-    ).fetchone()
-    conn.close()
-    if not flight:
-        raise HTTPException(404, "Flight not found")
-    result = dict(flight)
-    result['columns'] = analysis.get_columns_for_flight_api(flight_id)
-    return result
+    try:
+        flight = conn.execute(
+            """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
+                      am.id as model_id, am.name as model_name, am.format_category
+               FROM flights f
+               JOIN aircraft a ON a.id = f.aircraft_id
+               JOIN aircraft_models am ON am.id = a.model_id
+               WHERE f.id=?""",
+            (flight_id,)
+        ).fetchone()
+        if not flight:
+            raise HTTPException(404, "Flight not found")
+        result = dict(flight)
+        result['columns'] = analysis.get_columns_for_flight_api(flight_id)
+        return result
+    finally:
+        conn.close()
 
 
 @app.delete("/api/flights/{flight_id}")
 def delete_flight(flight_id: int):
     """Delete a flight and all its data."""
     conn = get_db()
-    conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
+    try:
+        conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
 
 @app.patch("/api/flights/{flight_id}")
@@ -350,35 +408,30 @@ def update_flight(flight_id: int, req: UpdateFlightRequest):
     if not req.name.strip():
         raise HTTPException(400, "Name cannot be empty")
     conn = get_db()
-    row = conn.execute("SELECT id FROM flights WHERE id=?", (flight_id,)).fetchone()
-    if not row:
+    try:
+        row = conn.execute("SELECT id FROM flights WHERE id=?", (flight_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Flight not found")
+        conn.execute("UPDATE flights SET name=? WHERE id=?", (req.name.strip(), flight_id))
+        conn.commit()
+        return {"ok": True}
+    finally:
         conn.close()
-        raise HTTPException(404, "Flight not found")
-    conn.execute("UPDATE flights SET name=? WHERE id=?", (req.name.strip(), flight_id))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
 
 
 @app.post("/api/flights/scan")
 def scan_folder_api(req: ImportRequest):
-    """Scan a folder for flight sessions. Returns session-grouped preview with import status."""
+    """Scan a folder for flight sessions.
+
+    Auto-detects the data format, matches against existing models or
+    auto-creates a new one. Returns session-grouped preview with model info.
+    """
     conn = get_db()
-
-    # Auto-detect format if not provided
-    fmt = req.format_category
-    if not fmt:
-        fmt = detect_format(req.source_path)
-
-    result = scan_folder_sessions(req.source_path, conn=conn)
-
-    # Add format info
-    if fmt:
-        result['format_category'] = fmt
-        result['format_detected'] = True
-
-    conn.close()
-    return result
+    try:
+        result = scan_folder_sessions(req.source_path, conn=conn)
+        return result
+    finally:
+        conn.close()
 
 
 @app.post("/api/flights/import")
@@ -393,20 +446,20 @@ def import_flight_api(req: ImportSessionRequest):
         else:
             # Import all sessions for this aircraft
             conn = get_db()
-            preview = scan_folder_sessions(req.source_path, conn=conn)
-            conn.close()
-
-            imported = []
-            for sess in preview.get('sessions', []):
-                result = import_session(
-                    req.source_path, req.aircraft_id, sess['session_key'], req.mode
-                )
-                if 'error' not in result:
-                    imported.append(result)
-
-            if not imported:
-                return {'error': 'No sessions could be imported'}
-            return {'imported': imported}
+            try:
+                preview = scan_folder_sessions(req.source_path, conn=conn)
+                imported = []
+                for sess in preview.get('sessions', []):
+                    result = import_session(
+                        req.source_path, req.aircraft_id, sess['session_key'], req.mode
+                    )
+                    if 'error' not in result:
+                        imported.append(result)
+                if not imported:
+                    return {'error': 'No sessions could be imported'}
+                return {'imported': imported}
+            finally:
+                conn.close()
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))
@@ -434,32 +487,53 @@ def get_aligned(flight_id: int, req: AlignedRequest):
 def get_alerts(flight_id: int):
     """Get alerts for a flight."""
     conn = get_db()
-    model_id = analysis._get_model_id(conn, flight_id)
-    if model_id is None:
-        conn.close()
-        return {"alerts": []}
-
-    alert_table = get_table_name(conn, model_id, 'alert')
-    if not alert_table:
-        conn.close()
-        return {"alerts": []}
-
     try:
-        rows = conn.execute(
-            f"SELECT time_str, time_sec, alert_desc, extra_value "
-            f"FROM {alert_table} WHERE flight_id=? ORDER BY time_sec",
-            (flight_id,)
-        ).fetchall()
-    except Exception:
-        conn.close()
-        return {"alerts": []}
+        model_id = analysis._get_model_id(conn, flight_id)
+        if model_id is None:
+            return {"alerts": []}
 
-    conn.close()
-    return {"alerts": [
-        {"time_str": r["time_str"], "time_sec": r["time_sec"],
-         "desc": r["alert_desc"], "extra": r["extra_value"]}
-        for r in rows
-    ]}
+        alert_table = get_table_name(conn, model_id, 'alert')
+        if not alert_table:
+            return {"alerts": []}
+
+        # Read alert columns from column_registry (ordered by ordinal)
+        alert_col_rows = conn.execute(
+            "SELECT column_name FROM column_registry "
+            "WHERE model_id=? AND data_type_key='alert' AND ordinal IS NOT NULL "
+            "ORDER BY ordinal",
+            (model_id,)
+        ).fetchall()
+
+        if not alert_col_rows:
+            return {"alerts": []}
+
+        col_names = [r['column_name'] for r in alert_col_rows]
+        cols_str = ', '.join(col_names)
+
+        try:
+            rows = conn.execute(
+                f"SELECT time_str, time_sec, {cols_str} "
+                f"FROM {alert_table} WHERE flight_id=? ORDER BY time_sec",
+                (flight_id,)
+            ).fetchall()
+        except Exception:
+            return {"alerts": []}
+
+        # Map to frontend-compatible {desc, extra} format.
+        desc_col = next((c for c in col_names if 'desc' in c.lower()), col_names[0] if col_names else None)
+        extra_candidates = [c for c in col_names if 'extra' in c.lower()]
+        extra_col = extra_candidates[0] if extra_candidates else (
+            col_names[-1] if len(col_names) > 1 else None
+        )
+
+        return {"alerts": [
+            {"time_str": r["time_str"], "time_sec": r["time_sec"],
+             "desc": str(r[desc_col]) if desc_col and r[desc_col] is not None else '',
+             "extra": str(r[extra_col]) if extra_col and r[extra_col] is not None else ''}
+            for r in rows
+        ]}
+    finally:
+        conn.close()
 
 
 @app.get("/api/flights/{flight_id}/stats")
@@ -496,9 +570,11 @@ def compare(req: CompareRequest):
 def registry_columns(model_id: int):
     """Get all columns registered for a model, grouped by data type."""
     conn = get_db()
-    result = get_columns_for_model(conn, model_id)
-    conn.close()
-    return {"columns": result}
+    try:
+        result = get_columns_for_model(conn, model_id)
+        return {"columns": result}
+    finally:
+        conn.close()
 
 
 # ─── Preset Routes ─────────────────────────────────────────
@@ -507,9 +583,11 @@ def registry_columns(model_id: int):
 def list_presets():
     """List all saved column presets."""
     conn = get_db()
-    rows = conn.execute("SELECT * FROM presets ORDER BY name").fetchall()
-    conn.close()
-    return {"presets": [{"id": r['id'], "name": r['name'], "columns": json.loads(r['columns_json'])} for r in rows]}
+    try:
+        rows = conn.execute("SELECT * FROM presets ORDER BY name").fetchall()
+        return {"presets": [{"id": r['id'], "name": r['name'], "columns": json.loads(r['columns_json'])} for r in rows]}
+    finally:
+        conn.close()
 
 
 @app.post("/api/presets")
@@ -523,21 +601,23 @@ def create_preset(req: PresetCreate):
         )
         conn.commit()
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
         return {"id": pid, "name": req.name, "columns": req.columns}
     except Exception as e:
-        conn.close()
         raise HTTPException(400, str(e))
+    finally:
+        conn.close()
 
 
 @app.delete("/api/presets/{preset_id}")
 def delete_preset(preset_id: int):
     """Delete a preset."""
     conn = get_db()
-    conn.execute("DELETE FROM presets WHERE id=?", (preset_id,))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
+    try:
+        conn.execute("DELETE FROM presets WHERE id=?", (preset_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
 
 # ─── Filter Preset Routes ──────────────────────────────────
@@ -546,9 +626,11 @@ def delete_preset(preset_id: int):
 def list_filter_presets():
     """List all saved filter presets."""
     conn = get_db()
-    rows = conn.execute("SELECT * FROM filter_presets ORDER BY name").fetchall()
-    conn.close()
-    return {"presets": [{"id": r['id'], "name": r['name'], "config": json.loads(r['config_json'])} for r in rows]}
+    try:
+        rows = conn.execute("SELECT * FROM filter_presets ORDER BY name").fetchall()
+        return {"presets": [{"id": r['id'], "name": r['name'], "config": json.loads(r['config_json'])} for r in rows]}
+    finally:
+        conn.close()
 
 
 @app.post("/api/filter-presets")
@@ -562,20 +644,23 @@ def create_filter_preset(req: FilterPresetCreate):
         )
         conn.commit()
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
         return {"id": pid, "name": req.name, "config": req.config}
     except Exception as e:
-        conn.close()
         raise HTTPException(400, str(e))
+    finally:
+        conn.close()
 
 
 @app.delete("/api/filter-presets/{preset_id}")
 def delete_filter_preset(preset_id: int):
     """Delete a filter preset."""
     conn = get_db()
-    conn.execute("DELETE FROM filter_presets WHERE id=?", (preset_id,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM filter_presets WHERE id=?", (preset_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
     return {"ok": True}
 
 

@@ -13,13 +13,12 @@ logger = logging.getLogger(__name__)
 # Re-export from scanner for backward compatibility
 from backend.scanner import (
     detect_encoding, has_header, parse_lines, time_to_sec,
-    detect_format, scan_folder, scan_folder_sessions,
-    parse_session_key,
+    scan_folder, scan_folder_sessions, parse_session_key,
 )
 
 # Re-export config helpers
 from backend.format_configs import (
-    load_format_config, get_data_type_key, data_table_name,
+    load_format_config_by_model, get_data_type_key, data_table_name,
     register_model_tables, get_columns_for_model, get_columns_for_flight,
 )
 
@@ -57,27 +56,28 @@ def import_session(source_path, aircraft_id, session_key, mode='overwrite'):
     model_id = aircraft['model_id']
     format_category = aircraft['format_category']
 
-    # Scan files for this format
-    from backend.scanner import scan_format_a, scan_format_b, scan_format_c
-
-    scanners = {
-        'A': scan_format_a,
-        'B': scan_format_b,
-        'C': scan_format_c,
-    }
-    scanner = scanners.get(format_category)
-    if not scanner:
+    # Load model-specific config (model_{id}.json), not raw format_category
+    fmt_config = load_format_config_by_model(conn, model_id)
+    if not fmt_config:
         conn.close()
-        return {'error': f'Unknown format: {format_category}'}
+        return {'error': f'Format config not found for model {model_id}'}
 
-    all_files = scanner(source_path)
+    # Scan files using the model's config
+    from backend.scanner import scan_files_recursive
+    try:
+        all_files = scan_files_recursive(source_path, fmt_config)
+    except FileNotFoundError as e:
+        conn.close()
+        return {'error': str(e)}
 
     # Filter to this aircraft and cluster by time
-    # For Format A, aircraft_serial comes from directory
-    # For Format B/C, aircraft_serial is empty string (all files belong to the user-specified aircraft)
     target_serial = aircraft['serial_number']
-    if format_category == 'A':
+    if fmt_config.get('extract_serial_from_path', False):
         drone_files = [f for f in all_files if f['aircraft_serial'] == target_serial]
+        # Fallback: if source_path IS the aircraft folder, serial extraction
+        # returns empty; use all files in this case
+        if not drone_files:
+            drone_files = all_files
     else:
         drone_files = all_files  # All files belong to the assigned aircraft
 

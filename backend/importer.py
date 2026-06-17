@@ -6,7 +6,7 @@ import_data_type() that reads column definitions from a format config.
 
 import logging
 from backend.format_configs import (
-    load_format_config, data_table_name, get_data_type_key,
+    load_format_config_by_model, data_table_name, get_data_type_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,11 +128,35 @@ def import_data_type(conn, flight_id, filepath, data_type_key, format_config, mo
 
 
 def import_alerts(conn, flight_id, filepath, data_type_key, format_config, model_id):
-    """Special importer for alert files (multi-word descriptions)."""
+    """Special importer for alert files (multi-word descriptions).
+
+    For legacy format configs that define semantic column names (alert_desc,
+    extra_value, etc.), uses multi-word token parsing.  For auto-generated
+    configs with generic col_N names, falls back to standard one-token-per-column
+    import.
+    """
     from backend.scanner import has_header, parse_lines
     tdef = format_config['data_types'].get(data_type_key, {})
-    has_uav = format_config.get('has_uav_send_id', False)
     table_name = data_table_name(model_id, data_type_key)
+
+    # Check whether config uses known legacy alert column names.
+    columns = tdef.get('columns', [])
+    active_cols = [c for c in columns if c.get('ordinal') is not None]
+    col_names_set = {c['name'] for c in active_cols}
+    known_alert_cols = {'alert_desc', 'extra_value', 'uav_id', 'drone_model'}
+
+    if not col_names_set & known_alert_cols:
+        # Auto-generated config — use generic token-per-column import
+        logger.info(
+            "Alert table %s uses generic column names, falling back to standard import",
+            table_name,
+        )
+        return import_data_type(
+            conn, flight_id, filepath, data_type_key, format_config, model_id
+        )
+
+    # ── Legacy format configs — multi-word alert parsing ──
+    has_uav = format_config.get('has_uav_send_id', False)
 
     try:
         lines = parse_lines(filepath)
@@ -151,7 +175,6 @@ def import_alerts(conn, flight_id, filepath, data_type_key, format_config, model
     base_sec = time_to_sec(lines[start].split()[0])
 
     # Build INSERT based on format
-    alert_cols = []
     if has_uav:
         # Format A: Time, UAV, Model, Desc..., ExtraValue (at least 5 tokens)
         sql = (
@@ -231,8 +254,9 @@ def import_files_for_session(conn, flight_id, files_info, model_id):
     if not model:
         return {'error': f'Model {model_id} not found'}
 
-    format_category = model['format_category']
-    format_config = load_format_config(format_category)
+    format_config = load_format_config_by_model(conn, model_id)
+    if not format_config:
+        return {'error': f'Format config not found for model {model_id}'}
 
     total_rows = 0
     details = {}
