@@ -77,10 +77,15 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
   const chartInst = useRef<echarts.ECharts | null>(null);
   const presetNameRef = useRef<HTMLInputElement>(null);
 
+  // Track latest flight ID to abort stale async operations
+  const latestFlightRef = useRef<number | null>(null);
+
   // ─── Load flight data ──────────────────────────────────
   useEffect(() => {
     if (!selectedFlightId) return;
+    latestFlightRef.current = selectedFlightId;
     setLoading(true);
+    setAligned(null);  // clear chart immediately when flight changes
     Promise.all([
       getFlight(selectedFlightId),
       getAlerts(selectedFlightId),
@@ -88,44 +93,88 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       listPresets(),
       listFilterPresets(),
     ]).then(([flightData, alertData, statsData, presetData, fpData]) => {
+      // Abort if flight changed during fetch
+      if (latestFlightRef.current !== selectedFlightId) return;
       setColumnGroups(flightData.columns);
+      setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
       setAlerts(alertData.alerts);
       setStats(statsData);
       setPresets(presetData.presets);
       setFilterPresets(fpData.presets);
-      const defaults = [
-        'pos.lat', 'pos.lng', 'gps.nava_alt',
-        'engine.engine_rpm', 'drone_state.battery_pct',
-      ];
-      const available = defaults.filter((d) =>
-        flightData.columns.some((g) => g.columns.some((c) => c.key === d))
-      );
-      setSelectedColumns(available);
-      setAligned(null);
+
+      // Preserve previously selected columns that still exist in the new flight.
+      // Only fall back to defaults on first load (no prior selection).
+      setSelectedColumns((prev) => {
+        const newKeys = new Set(
+          flightData.columns.flatMap((g) => g.columns.map((c) => c.key))
+        );
+        const kept = prev.filter((k) => newKeys.has(k));
+        if (kept.length > 0) return kept;
+        // First load: pick sensible defaults
+        const defaults = [
+          'pos.lat', 'pos.lng', 'gps.nava_alt',
+          'engine.engine_rpm', 'drone_state.battery_pct',
+        ];
+        return defaults.filter((d) => newKeys.has(d));
+      });
       setCorrData(null);
       setAnomalyData(null);
-    }).finally(() => setLoading(false));
+    }).catch((err) => {
+      console.error('Failed to load flight data:', err);
+    }).finally(() => {
+      if (latestFlightRef.current === selectedFlightId) {
+        setLoading(false);
+      }
+    });
   }, [selectedFlightId]);
 
   // ─── Fetch aligned data ────────────────────────────────
   useEffect(() => {
     if (!selectedFlightId || selectedColumns.length === 0) return;
-    getAlignedData(selectedFlightId, selectedColumns, refTable, 0.5, filterSpec ?? undefined).then(setAligned);
+    const flightId = selectedFlightId;
+    getAlignedData(flightId, selectedColumns, refTable, 0.5, filterSpec ?? undefined)
+      .then((data) => {
+        // Abort if flight changed during fetch
+        if (latestFlightRef.current === flightId) {
+          setAligned(data);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch aligned data:', err);
+        if (latestFlightRef.current === flightId) {
+          setAligned(null);
+        }
+      });
   }, [selectedFlightId, selectedColumns, refTable, filterSpec]);
 
   // ─── Chart ─────────────────────────────────────────────
   useEffect(() => {
     if (viewMode !== 'chart') {
-      if (chartInst.current) { chartInst.current.dispose(); chartInst.current = null; }
+      if (chartInst.current) {
+        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
+        chartInst.current = null;
+      }
       return;
     }
     if (!chartRef.current || !aligned) return;
 
-    if (chartInst.current) { chartInst.current.dispose(); }
-    chartInst.current = echarts.init(chartRef.current);
+    // Guard: container must have dimensions for ECharts to init
+    if (chartRef.current.clientWidth === 0 || chartRef.current.clientHeight === 0) return;
 
-    const times = aligned.times;
-    const seriesList = Object.entries(aligned.series);
+    // Dispose previous chart and create new one
+    if (chartInst.current) {
+      try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
+      chartInst.current = null;
+    }
+    try {
+      chartInst.current = echarts.init(chartRef.current);
+    } catch (e) {
+      console.error('ECharts init failed:', e);
+      return;
+    }
+
+    const times = aligned.times || [];
+    const seriesList = Object.entries(aligned.series || {});
 
     const getValues = (vals: (number | null)[]) => {
       if (!normalize) return vals;
@@ -317,31 +366,42 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
           z: 0,
         }] : []),
       ],
-      ...(aligned.alerts.length > 0 ? {
+      ...((aligned.alerts?.length ?? 0) > 0 ? {
         markLine: {
           silent: true,
           symbol: 'none',
           lineStyle: { type: 'dashed', color: '#ef4444', width: 1 },
-          data: aligned.alerts
-            .filter((_, idx) => idx % Math.max(1, Math.floor(aligned.alerts.length / 30)) === 0)
+          data: (aligned.alerts || [])
+            .filter((_, idx) => idx % Math.max(1, Math.floor((aligned.alerts || []).length / 30)) === 0)
             .map((a) => ({ xAxis: a.time_str, label: { show: false } })),
         },
       } as any : {}),
     };
 
-    chartInst.current.setOption(option, true);
+    try {
+      chartInst.current.setOption(option, true);
+    } catch (e) {
+      console.error('ECharts setOption failed:', e);
+    }
 
-    const handleResize = () => chartInst.current?.resize();
+    const handleResize = () => {
+      try { chartInst.current?.resize(); } catch (e) { /* ignore */ }
+    };
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
-      if (chartInst.current) { chartInst.current.dispose(); chartInst.current = null; }
+      if (chartInst.current) {
+        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
+        chartInst.current = null;
+      }
     };
   }, [aligned, normalize, viewMode]);
 
   // Resize chart when sidebar toggles
   useEffect(() => {
-    const timer = setTimeout(() => chartInst.current?.resize(), 100);
+    const timer = setTimeout(() => {
+      try { chartInst.current?.resize(); } catch (e) { /* ignore */ }
+    }, 100);
     return () => clearTimeout(timer);
   }, [sidebarOpen]);
 
