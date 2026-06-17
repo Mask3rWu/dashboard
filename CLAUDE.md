@@ -24,6 +24,25 @@ dashboard/
 └── requirements.txt     # 最小依赖
 ```
 
+## 核心架构原则
+
+### 动态格式识别（禁止硬编码格式枚举）
+
+**传入任何新数据时，系统必须自动分析其实际特征，与已有机型配置比对，若无匹配则自动创建新机型。** 不再使用评分机制（`detect_format_from_content`/`_score_format_match`）强制匹配到 A/B/C。
+
+格式识别流程（`backend/scanner.py:resolve_model_for_scan`）：
+1. `generate_config_from_scan(source_path)` — 分析实际数据结构（表头、UAVSendID、列名、数据类型）
+2. `compare_configs(generated, existing)` — 与所有已有机型逐项比对（结构标志 0.50 + 数据类型 Jaccard 0.30 + 列数 0.20）
+3. 分数 ≥ 0.75 → 匹配，沿用该机型
+4. 分数 < 0.75 → 自动创建新机型（insert aircraft_models, save_model_config, register_model_tables）
+5. 前端无需手动"创建新机型"按钮
+
+每个机型有独立的 `configs/model_{id}.json` 配置文件。旧 `format_A.json`/`format_C.json` 仅作为已有机型配置保留。
+
+### 告警列名必须动态查询
+
+告警表的列名必须从 `column_registry` 动态读取，不要硬编码 `alert_desc`/`extra_value`。自动生成的配置可能使用不同列名（`col_2`/`col_3`/`col_4`）。
+
 ## 开发环境
 
 ```bash
