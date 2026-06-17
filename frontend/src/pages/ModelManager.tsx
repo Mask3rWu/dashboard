@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Pencil, Trash2 } from 'lucide-react';
 import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
@@ -215,7 +216,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                         className="text-gray-300 hover:text-blue-500 p-0.5"
                         title="重命名"
                       >
-                        ✏️
+                        <Pencil className="w-3 h-3" />
                       </button>
                       {deletingModelId === m.id ? (
                         <span className="text-[10px] text-red-500 whitespace-nowrap">
@@ -230,7 +231,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                           className="text-gray-300 hover:text-red-500 p-0.5"
                           title="删除"
                         >
-                          🗑
+                          <Trash2 className="w-3 h-3" />
                         </button>
                       )}
                     </div>
@@ -385,7 +386,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                         <button
                                           onClick={() => { setEditingFlightId(f.id); setEditFlightName(f.name); }}
                                           className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 text-[10px]"
-                                        >✏️</button>
+                                        ><Pencil className="w-3 h-3" /></button>
                                       </span>
                                     )}
                                   </span>
