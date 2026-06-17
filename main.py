@@ -528,7 +528,7 @@ def import_flight_api(req: ImportSessionRequest):
     try:
         if req.session_key:
             result = import_session(
-                req.source_path, req.aircraft_id, req.session_key, req.mode
+                os.path.normpath(req.source_path), req.aircraft_id, req.session_key, req.mode
             )
             return result
         else:
@@ -539,7 +539,7 @@ def import_flight_api(req: ImportSessionRequest):
                 imported = []
                 for sess in preview.get('sessions', []):
                     result = import_session(
-                        req.source_path, req.aircraft_id, sess['session_key'], req.mode
+                        os.path.normpath(req.source_path), req.aircraft_id, sess['session_key'], req.mode
                     )
                     if 'error' not in result:
                         imported.append(result)

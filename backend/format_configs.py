@@ -649,7 +649,7 @@ def get_data_type_key(filename, format_config):
         for pattern in tdef.get('file_patterns', []):
             # Pattern must be a complete word: preceded by start-of-string or
             # underscore, followed by underscore + digit (session key).
-            if re.search(rf'(?:^|_){re.escape(pattern)}_\d', filename):
+            if re.search(rf'(?:^\d*|_){re.escape(pattern)}_\d', filename):
                 return tk, tdef
     return None, None
 

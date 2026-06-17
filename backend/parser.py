@@ -41,6 +41,9 @@ def import_session(source_path, aircraft_id, session_key, mode='overwrite'):
     """
     conn = get_db()
 
+    # Normalize path for cross-platform consistency (matches scanner.py:449)
+    source_path = os.path.normpath(source_path)
+
     # Resolve aircraft → model → format
     aircraft = conn.execute(
         """SELECT a.id, a.serial_number, am.id as model_id, am.format_category, am.name as model_name
