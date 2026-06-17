@@ -53,6 +53,12 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [editColLabel, setEditColLabel] = useState('');
   const [editColUnit, setEditColUnit] = useState('');
 
+  // ─── Search & Filter state ────────────────────────────
+  const [modelSearch, setModelSearch] = useState('');
+  const [aircraftSearch, setAircraftSearch] = useState('');
+  const [timeFilterStart, setTimeFilterStart] = useState('');
+  const [timeFilterEnd, setTimeFilterEnd] = useState('');
+
   const loadModels = async () => {
     try {
       const data = await listModels();
@@ -85,6 +91,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       setAircraft([]);
       setColumnGroups([]);
     }
+    // Reset search/filter when switching model
+    setAircraftSearch('');
+    setTimeFilterStart('');
+    setTimeFilterEnd('');
   }, [selectedModelId]);
 
   const refresh = () => {
@@ -173,8 +183,44 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   const selectedModel = models.find((m) => m.id === selectedModelId);
 
+  // ─── Search filter logic ──────────────────────────────
+  const filteredModels = models.filter((m) =>
+    !modelSearch.trim() || m.name.toLowerCase().includes(modelSearch.trim().toLowerCase())
+  );
+
+  const isTimeFilterActive = timeFilterStart.trim() !== '' && timeFilterEnd.trim() !== '';
+  const filterStartMs = isTimeFilterActive ? Date.parse(timeFilterStart) : NaN;
+  const filterEndMs = isTimeFilterActive ? Date.parse(timeFilterEnd) : NaN;
+
+  const flightOverlapsTimeFilter = (f: Flight): boolean => {
+    if (!isTimeFilterActive) return true;
+    if (isNaN(filterStartMs) || isNaN(filterEndMs)) return true;  // invalid dates — show all
+    if (!f.start_time || !f.end_time) return false;                // no time data — hide
+    const fs = new Date(f.start_time.replace(' ', 'T')).getTime();
+    const fe = new Date(f.end_time.replace(' ', 'T')).getTime();
+    return fs <= filterEndMs && fe >= filterStartMs;
+  };
+
   const getFlightsForAircraft = (acId: number): Flight[] =>
-    flights.filter((f) => f.aircraft_id === acId);
+    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f));
+
+  const filteredAircraft = aircraft.filter((ac) => {
+    if (!aircraftSearch.trim()) return true;
+    const t = aircraftSearch.trim().toLowerCase();
+    return ac.serial_number.toLowerCase().includes(t) || (ac.name && ac.name.toLowerCase().includes(t));
+  });
+
+  const getAircraftStats = (acId: number) => {
+    const acFlights = getFlightsForAircraft(acId);
+    const hours = acFlights.reduce((s, f) => s + (f.duration_sec ?? 0), 0) / 3600;
+    return { count: acFlights.length, hours };
+  };
+
+  const globalStats = {
+    totalAircraft: models.reduce((s, m) => s + (m.aircraft_count ?? 0), 0),
+    totalFlights: flights.length,
+    totalHours: flights.reduce((s, f) => s + (f.duration_sec ?? 0), 0) / 3600,
+  };
 
   return (
     <div className="h-full flex">
@@ -184,8 +230,35 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
           <span className="text-xs font-medium text-gray-500">机型列表</span>
         </div>
 
+        {/* Global summary stats */}
+        <div className="px-3 py-2 border-b border-gray-100 bg-white space-y-1">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-gray-400">总飞机数</span>
+            <span className="font-semibold text-gray-700">{globalStats.totalAircraft}</span>
+          </div>
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-gray-400">总架次</span>
+            <span className="font-semibold text-gray-700">{globalStats.totalFlights}</span>
+          </div>
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-gray-400">总航时</span>
+            <span className="font-semibold text-gray-700">{globalStats.totalHours.toFixed(1)} 小时</span>
+          </div>
+        </div>
+
+        {/* Model search */}
+        <div className="px-2 pt-2 pb-1">
+          <input
+            type="text"
+            value={modelSearch}
+            onChange={(e) => setModelSearch(e.target.value)}
+            placeholder="搜索机型..."
+            className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {models.map((m) => (
+          {filteredModels.map((m) => (
             <div key={m.id}>
               <div
                 onClick={() => setSelectedModelId(m.id)}
@@ -243,6 +316,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
               </div>
             </div>
           ))}
+          {filteredModels.length === 0 && models.length > 0 && (
+            <p className="text-xs text-gray-400 p-2">未找到匹配的机型</p>
+          )}
           {models.length === 0 && (
             <p className="text-xs text-gray-400 p-2">暂无机型</p>
           )}
@@ -269,7 +345,43 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
               </button>
             </div>
 
-            {/* Add aircraft form */}
+            {/* Search & Filter Toolbar */}
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-gray-500 shrink-0">飞机搜索:</span>
+                <input
+                  type="text"
+                  value={aircraftSearch}
+                  onChange={(e) => setAircraftSearch(e.target.value)}
+                  placeholder="序号/名称..."
+                  className="w-36 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-gray-500 shrink-0">时间范围:</span>
+                <input
+                  type="datetime-local"
+                  value={timeFilterStart}
+                  onChange={(e) => setTimeFilterStart(e.target.value)}
+                  className="w-44 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+                />
+                <span className="text-xs text-gray-400">~</span>
+                <input
+                  type="datetime-local"
+                  value={timeFilterEnd}
+                  onChange={(e) => setTimeFilterEnd(e.target.value)}
+                  className="w-44 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              {isTimeFilterActive && (
+                <button
+                  onClick={() => { setTimeFilterStart(''); setTimeFilterEnd(''); }}
+                  className="text-xs text-blue-600 hover:text-blue-500"
+                >
+                  清除时间筛选
+                </button>
+              )}
+            </div>
             {showAddAircraft && (
               <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg space-y-2">
                 <input
@@ -291,7 +403,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
               <p className="text-sm text-gray-400">暂无飞机，请添加飞机序号</p>
             ) : (
               <div className="space-y-2">
-                {aircraft.map((ac) => {
+                {filteredAircraft.map((ac) => {
                   const acFlights = getFlightsForAircraft(ac.id);
                   const isExpanded = expandedAc.has(ac.id);
 
@@ -326,9 +438,19 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                               <button onClick={() => setEditingAcId(null)} className="text-xs px-2 py-0.5 bg-gray-200 text-gray-600 rounded">取消</button>
                             </div>
                           ) : null}
-                          <span className="text-xs text-gray-400">
-                            {acFlights.length} 个架次
-                          </span>
+                          {(() => {
+                            const s = getAircraftStats(ac.id);
+                            return (
+                              <>
+                                <span className="text-xs text-gray-400">
+                                  总架次: <span className="font-medium text-gray-600">{s.count}</span>
+                                </span>
+                                <span className="text-xs text-gray-400">
+                                  总航时: <span className="font-medium text-gray-600">{s.hours.toFixed(1)}</span> 小时
+                                </span>
+                              </>
+                            );
+                          })()}
                         </div>
                         <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                           <button
