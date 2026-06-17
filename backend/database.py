@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS aircraft_models (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
-    format_category TEXT NOT NULL CHECK(format_category IN ('A','B','C')),
+    format_category TEXT NOT NULL CHECK(format_category != ''),
+    config_path     TEXT DEFAULT '',
     description     TEXT DEFAULT '',
     created_at      TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -130,12 +131,29 @@ def _is_migrated(conn):
     return len(rows) > 0
 
 
+def _is_migrated_v3(conn):
+    """Check if v3 migration has been applied."""
+    rows = conn.execute(
+        "SELECT version FROM schema_version WHERE version >= 3"
+    ).fetchall()
+    return len(rows) > 0
+
+
 def _run_v2_migration(conn):
     """Run migration from v1 to v2 schema.
 
     This is imported from backend.migrate_v2 at runtime to avoid circular imports.
     """
     from backend.migrate_v2 import run_migration
+    run_migration(conn)
+
+
+def _run_v3_migration(conn):
+    """Run migration from v2 to v3 schema (relax format_category, add config_path).
+
+    This is imported from backend.migrate_v3 at runtime to avoid circular imports.
+    """
+    from backend.migrate_v3 import run_migration
     run_migration(conn)
 
 
@@ -159,6 +177,15 @@ def init_db():
             _run_v2_migration(conn)
         except Exception as e:
             logger.error(f"Migration failed: {e}")
+            raise
+
+    # v3 migration: relax format_category, add config_path
+    if not _is_migrated_v3(conn):
+        logger.info("v2 schema detected — running migration to v3")
+        try:
+            _run_v3_migration(conn)
+        except Exception as e:
+            logger.error(f"v3 migration failed: {e}")
             raise
 
     conn.execute("PRAGMA foreign_keys=ON")

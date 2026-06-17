@@ -1,4 +1,8 @@
-"""Format auto-detection and per-format directory scanning."""
+"""Format auto-detection and per-format directory scanning.
+
+Supports any format category string — not just A/B/C. Config-driven file
+pattern matching and session key extraction via format config JSONs.
+"""
 
 import os
 import re
@@ -52,74 +56,6 @@ def parse_lines(filepath):
         return [line.strip() for line in f.readlines() if line.strip()]
 
 
-def detect_format(source_path):
-    """Auto-detect the format category of a data folder.
-
-    Detection rules (priority order):
-    1. Find ParserData/ at depth ≤ 3 from source_path
-       - If parent dir is 1-3 digit number → Format A
-       - If parent dir is 8-digit date (YYYYMMDD) → Format B
-    2. Find .jlog files → Format B
-    3. Find .txt files directly at source_path root (no ParserData subdirs) → Format C
-    4. Fallback: None (unknown)
-
-    Returns: 'A' | 'B' | 'C' | None
-    """
-    if not os.path.isdir(source_path):
-        return None
-
-    # Check for ParserData at various depths
-    for root, dirs, files in os.walk(source_path):
-        depth = root[len(source_path):].count(os.sep)
-        if depth > 3:
-            continue
-
-        if 'ParserData' in dirs:
-            parent_name = os.path.basename(root)
-            # Format B: parent is an 8-digit date
-            if re.match(r'^\d{8}$', parent_name):
-                return 'B'
-            # Format A: any other directory with ParserData
-            # (aircraft serial can be numbers, letters, Chinese, etc.)
-            return 'A'
-
-        # Check for .jlog files (Format B indicator)
-        for f in files:
-            if f.endswith('.jlog'):
-                return 'B'
-
-        # Check for flat .txt files (Format C indicator)
-        has_txt = any(f.endswith('.txt') for f in files)
-        if has_txt and depth == 0 and 'ParserData' not in dirs:
-            # Also check one level deeper for confirmation
-            pass
-
-    # Final check: flat txt files at root
-    for f in os.listdir(source_path):
-        fp = os.path.join(source_path, f)
-        if os.path.isfile(fp) and f.endswith('.txt'):
-            # Check that we're not inside a structure with subdirs
-            has_parser = False
-            for sub in os.listdir(source_path):
-                subp = os.path.join(source_path, sub)
-                if os.path.isdir(subp):
-                    for sub2 in os.listdir(subp):
-                        if sub2 == 'ParserData':
-                            has_parser = True
-                            break
-            if not has_parser:
-                return 'C'
-
-    # Last attempt: walk and look for ParserData at any depth
-    for root, dirs, files in os.walk(source_path):
-        if 'ParserData' in dirs:
-            parent_name = os.path.basename(root)
-            if re.match(r'^\d{8}$', parent_name):
-                return 'B'
-            return 'A'  # Any other directory with ParserData → Format A
-
-    return None
-
 
 def time_to_sec(t_str):
     """Convert HH:MM:SS[.f] to seconds."""
@@ -130,51 +66,43 @@ def time_to_sec(t_str):
         return 0.0
 
 
-def parse_session_key(filename, data_type_key, has_aircraft_prefix=False):
+def _get_config_file_patterns(config):
+    """Get the union of all file_patterns from a config's data_types."""
+    patterns = set()
+    for tdef in config.get('data_types', {}).values():
+        for p in tdef.get('file_patterns', []):
+            patterns.add(p)
+    return patterns
+
+
+def parse_session_key(filename, config, has_aircraft_prefix=False):
     """Extract session key (timestamp[_seq]) from a filename.
 
-    Format A: "21DroneStateData_153351_535.txt" → "153351_535"
-    Format B: "DroneStateData_114430.txt" → "114430"
-    Format C: same as Format B
+    Uses the format config's file_patterns to locate the type marker,
+    then extracts everything after it.
 
     Args:
         filename: The file basename
-        data_type_key: The matched data type key (e.g., 'drone_state')
-        has_aircraft_prefix: True if filename starts with aircraft ID digits (Format A)
+        config: The format config dict
+        has_aircraft_prefix: True if filename starts with aircraft ID digits
 
     Returns:
         str: session key, or '' if not found
     """
     base = filename.rsplit('.txt', 1)[0]
 
-    if has_aircraft_prefix:
-        # "21DroneStateData_153351_535.txt" → extract after type marker
-        for pattern in ['DroneStateData', 'GPSData', 'IMUData', 'PosData',
-                        'EngineData', 'PowerBoxData', 'DualAntennaData',
-                        'FlightAlertInfo', 'AllReceivedData', 'HandlePacket',
-                        'SendCommand', 'AvionicsData', 'ControllerData',
-                        'FanControlData', 'GPSCompareData']:
-            marker = pattern + '_'
-            idx = base.find(marker)
-            if idx >= 0:
-                return base[idx + len(marker):]
-        return ''
-    else:
-        # "DroneStateData_114430.txt" → everything after the type marker and underscore
-        for pattern in ['DroneStateData', 'GPSData', 'IMUData', 'PosData',
-                        'EngineData', 'PowerBoxData', 'DualAntennaData',
-                        'FlightAlertInfo', 'AllReceivedData', 'HandlePacket',
-                        'SendCommand', 'AvionicsData', 'ControllerData',
-                        'FanControlData', 'GPSCompareData']:
-            marker = pattern + '_'
-            idx = base.find(marker)
-            if idx >= 0:
-                return base[idx + len(marker):]
-        # Fallback: last underscore-separated segment looks like timestamp
-        parts = base.rsplit('_', 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            return parts[1]
-        return ''
+    patterns = _get_config_file_patterns(config)
+    for pattern in patterns:
+        marker = pattern + '_'
+        idx = base.find(marker)
+        if idx >= 0:
+            return base[idx + len(marker):]
+
+    # Fallback: last underscore-separated segment looks like timestamp
+    parts = base.rsplit('_', 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[1]
+    return ''
 
 
 def _extract_timestamp_from_key(session_key):
@@ -234,221 +162,235 @@ def _build_clusters(files_info, max_diff_sec=3):
     return [(key, files) for key, files, _ in clusters]
 
 
-# ── Per-format scanners ──
+# ── Model resolution (auto-detect + compare + auto-create) ──
 
-# Subdirectories to scan under each aircraft folder in Format A
-# Ordered: ParserData first (primary data), then others
-FORMAT_A_SCAN_DIRS = [
-    ('ParserData', False),        # data_type derived from filename
-    ('FlightAlertInfo', True),    # is_alert=True, data_type='alert'
-    ('AllFlightData', False),     # e.g., AllReceivedData
-    ('HandlePacket', False),      # e.g., HandlePacket
-    ('SendCommand', False),       # e.g., SendCommand
-]
+MATCH_THRESHOLD = 0.95
 
 
-def scan_format_a(root_path):
-    """Scan Format A directory structure: {root}/{aircraft_id}/{subdir}/*.txt
+def resolve_model_for_scan(conn, source_path):
+    """Analyze a folder, compare against all existing model configs, and
+    either return the best-matching model or auto-create a new one.
 
-    Scans all known subdirectories under each aircraft folder, not just
-    ParserData. This ensures aircraft serials are detected even when an
-    aircraft only has data in non-ParserData directories (e.g., SendCommand).
+    Returns:
+        dict with keys:
+            model_id, model_name, format_category, is_new,
+            match_confidence (None for new), config (generated config dict),
+            matching_models (list of {id, name, score})
     """
-    config = load_format_config('A')
+    from backend.format_configs import (
+        generate_config_from_scan, load_all_model_configs_with_ids,
+        compare_configs, save_model_config, register_model_tables,
+    )
+
+    # Step 1 — auto-generate config from the folder
+    generated = generate_config_from_scan(source_path)
+    if not generated or not generated.get('data_types'):
+        return None
+
+    # Step 2 — load all existing model configs
+    all_models = load_all_model_configs_with_ids(conn)
+
+    # Step 3 — compare against every existing model
+    best_score = 0.0
+    best_model = None
+    all_scores = []
+
+    for model_id, model_name, _fmt_cat, existing_config in all_models:
+        score = compare_configs(generated, existing_config)
+        all_scores.append({
+            'id': model_id, 'name': model_name, 'score': round(score, 3),
+        })
+        if score > best_score:
+            best_score = score
+            best_model = (model_id, model_name)
+
+    all_scores.sort(key=lambda x: x['score'], reverse=True)
+
+    # Step 4a — match found
+    if best_model and best_score >= MATCH_THRESHOLD:
+        model_id, model_name = best_model
+        # Resolve the matched model's format_category
+        fmt_row = conn.execute(
+            "SELECT format_category FROM aircraft_models WHERE id=?", (model_id,)
+        ).fetchone()
+        fmt_cat = fmt_row['format_category'] if fmt_row else ''
+        return {
+            'model_id': model_id,
+            'model_name': model_name,
+            'format_category': fmt_cat,
+            'is_new': False,
+            'match_confidence': round(best_score, 3),
+            'config': generated,
+            'matching_models': all_scores[:5],
+        }
+
+    # Step 4b — no match: auto-create a new model
+    from datetime import datetime
+    folder_name = os.path.basename(source_path.rstrip('/\\'))
+    ts = datetime.now().strftime('%H%M%S')
+    new_name = f"Auto-{folder_name}-{ts}"
+    fmt_cat = generated.get('format', folder_name) or folder_name
+    description = f'Auto-generated from {folder_name}'
+
+    conn.execute(
+        "INSERT INTO aircraft_models (name, format_category, description) VALUES (?, ?, ?)",
+        (new_name, fmt_cat, description),
+    )
+    model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    generated['format'] = fmt_cat
+    config_path = save_model_config(model_id, generated)
+    conn.execute(
+        "UPDATE aircraft_models SET config_path=? WHERE id=?",
+        (config_path, model_id),
+    )
+
+    register_model_tables(conn, model_id, fmt_cat, config_path=config_path)
+    conn.commit()
+
+    return {
+        'model_id': model_id,
+        'model_name': new_name,
+        'format_category': fmt_cat,
+        'is_new': True,
+        'match_confidence': None,
+        'config': generated,
+        'matching_models': all_scores[:5],
+    }
+
+
+# ── Known subdirectory names (used for aircraft_serial extraction in Format A) ──
+KNOWN_SUBDIRS = {
+    'ParserData', 'FlightAlertInfo', 'AllFlightData',
+    'HandlePacket', 'SendCommand', 'GPSCompareData',
+}
+
+
+def _extract_aircraft_serial_from_path(filepath, source_path):
+    """Extract aircraft serial from a file's path.
+
+    Walk path components from source_path to filepath, return the first
+    component that is NOT a known subdirectory name (ParserData etc.).
+    """
+    rel = os.path.relpath(os.path.dirname(filepath), source_path)
+    parts = rel.split(os.sep)
+    for part in parts:
+        if part and part not in KNOWN_SUBDIRS and not part.startswith('.'):
+            return part
+    return ''
+
+
+def scan_files_recursive(source_path, config):
+    """Unified recursive scanner: find all .txt files at any depth.
+
+    Unlike the old per-format scanners which assumed fixed directory
+    structures, this function uses os.walk() to discover files regardless
+    of folder layout.
+
+    Args:
+        source_path: Root directory to scan
+        config: Format config dict (already loaded by caller)
+
+    Returns:
+        list of dicts with keys: aircraft_serial, data_type_key, filepath,
+                                  filename, is_alert, session_key
+    """
     results = []
 
-    if not os.path.isdir(root_path):
+    if not os.path.isdir(source_path):
         return results
 
-    for entry in os.listdir(root_path):
-        drone_dir = os.path.join(root_path, entry)
-        if not os.path.isdir(drone_dir):
-            continue
-        # Accept any directory name as aircraft serial (numbers, letters, Chinese, etc.)
-        # Skip hidden dirs and files; the directory must contain at least one data subdir
-        if entry.startswith('.'):
-            continue
-        aircraft_serial = entry
+    extract_serial = config.get('extract_serial_from_path',
+                                  config.get('has_uav_send_id', False))
+    has_prefix = config.get('has_aircraft_prefix',
+                            config.get('has_uav_send_id', False))
 
-        for scan_dir, is_alert_dir in FORMAT_A_SCAN_DIRS:
-            dir_path = os.path.join(drone_dir, scan_dir)
-            if not os.path.isdir(dir_path):
+    for root, _dirs, files in os.walk(source_path):
+        # Determine if this is a special directory
+        dir_name = os.path.basename(root)
+        is_alert_dir = (dir_name == 'FlightAlertInfo')
+        is_gps_compare_dir = (dir_name == 'GPSCompareData')
+
+        for fname in files:
+            if not fname.endswith('.txt'):
                 continue
 
-            for fname in os.listdir(dir_path):
-                if not fname.endswith('.txt'):
-                    continue
-                filepath = os.path.join(dir_path, fname)
+            filepath = os.path.join(root, fname)
 
-                if is_alert_dir:
-                    # FlightAlertInfo: all files are alerts
-                    dt_key = 'alert'
-                    is_alert = True
+            # Classify file
+            if is_alert_dir:
+                dt_key = 'alert'
+                is_alert = True
+            elif is_gps_compare_dir:
+                # Files in GPSCompareData dir should only match known patterns.
+                # Use get_data_type_key (now with word-boundary matching) so
+                # "SendGPSData" does NOT match "GPSData" or "GPSCompareData".
+                dt_key, tdef = get_data_type_key(fname, config)
+                if dt_key:
+                    is_alert = False
                 else:
-                    dt_key, tdef = get_data_type_key(fname, config)
-                    if not dt_key:
-                        # File type not in format config — skip for import,
-                        # but aircraft_serial is still recorded via other files
-                        continue
-                    is_alert = tdef.get('is_alert', False) if tdef else False
-
-                results.append({
-                    'aircraft_serial': aircraft_serial,
-                    'data_type_key': dt_key,
-                    'filepath': filepath,
-                    'filename': fname,
-                    'is_alert': is_alert,
-                    'session_key': parse_session_key(
-                        fname, dt_key,
-                        has_aircraft_prefix=True,
-                    ),
-                })
-
-    return results
-
-
-def scan_format_b(root_path):
-    """Scan Format B directory structure: {root}/{YYYYMMDD}/ParserData/*.txt etc."""
-    config = load_format_config('B')
-    results = []
-
-    if not os.path.isdir(root_path):
-        return results
-
-    # Look for date subdirectories (8-digit YYYYMMDD)
-    for entry in os.listdir(root_path):
-        date_dir = os.path.join(root_path, entry)
-        if not os.path.isdir(date_dir):
-            continue
-        if not re.match(r'^\d{8}$', entry):
-            continue
-
-        aircraft_serial = ''  # Format B doesn't encode aircraft serial in directory structure
-
-        # Scan ParserData
-        parser_dir = os.path.join(date_dir, 'ParserData')
-        if os.path.isdir(parser_dir):
-            for fname in os.listdir(parser_dir):
-                if not fname.endswith('.txt'):
+                    # No known pattern matched — skip (e.g. SendGPSData binary dumps)
                     continue
-                filepath = os.path.join(parser_dir, fname)
+            else:
                 dt_key, tdef = get_data_type_key(fname, config)
                 if not dt_key:
                     continue
+                is_alert = tdef.get('is_alert', False) if tdef else False
 
-                results.append({
-                    'aircraft_serial': aircraft_serial,
-                    'data_type_key': dt_key,
-                    'filepath': filepath,
-                    'filename': fname,
-                    'is_alert': tdef.get('is_alert', False),
-                    'session_key': parse_session_key(fname, dt_key, has_aircraft_prefix=False),
-                })
+            # Determine aircraft_serial
+            if extract_serial:
+                aircraft_serial = _extract_aircraft_serial_from_path(filepath, source_path)
+            else:
+                aircraft_serial = ''
 
-        # Scan FlightAlertInfo
-        alert_dir = os.path.join(date_dir, 'FlightAlertInfo')
-        if os.path.isdir(alert_dir):
-            for fname in os.listdir(alert_dir):
-                if not fname.endswith('.txt'):
-                    continue
-                filepath = os.path.join(alert_dir, fname)
-                results.append({
-                    'aircraft_serial': aircraft_serial,
-                    'data_type_key': 'alert',
-                    'filepath': filepath,
-                    'filename': fname,
-                    'is_alert': True,
-                    'session_key': parse_session_key(fname, 'alert', has_aircraft_prefix=False),
-                })
+            session_key = parse_session_key(fname, config, has_aircraft_prefix=has_prefix)
 
-        # Scan GPSCompareData
-        gps_compare_dir = os.path.join(date_dir, 'GPSCompareData')
-        if os.path.isdir(gps_compare_dir):
-            for fname in os.listdir(gps_compare_dir):
-                if not fname.endswith('.txt'):
-                    continue
-                filepath = os.path.join(gps_compare_dir, fname)
-                results.append({
-                    'aircraft_serial': aircraft_serial,
-                    'data_type_key': 'gps_compare',
-                    'filepath': filepath,
-                    'filename': fname,
-                    'is_alert': False,
-                    'session_key': parse_session_key(fname, 'gps_compare', has_aircraft_prefix=False),
-                })
+            results.append({
+                'aircraft_serial': aircraft_serial,
+                'data_type_key': dt_key,
+                'filepath': filepath,
+                'filename': fname,
+                'is_alert': is_alert,
+                'session_key': session_key,
+            })
 
     return results
 
 
-def scan_format_c(root_path):
-    """Scan Format C directory structure: flat .txt files at root."""
-    config = load_format_config('C')
-    results = []
+def scan_folder(source_path, config, format_category=''):
+    """Scan a folder for flight data files using the given config.
 
-    if not os.path.isdir(root_path):
-        return results
-
-    aircraft_serial = ''
-
-    for fname in os.listdir(root_path):
-        if not fname.endswith('.txt'):
-            continue
-        filepath = os.path.join(root_path, fname)
-        dt_key, tdef = get_data_type_key(fname, config)
-        if not dt_key:
-            continue
-
-        results.append({
-            'aircraft_serial': aircraft_serial,
-            'data_type_key': dt_key,
-            'filepath': filepath,
-            'filename': fname,
-            'is_alert': tdef.get('is_alert', False),
-            'session_key': parse_session_key(fname, dt_key, has_aircraft_prefix=False),
-        })
-
-    return results
-
-
-def scan_folder(source_path, format_category=None):
-    """Scan a folder for flight data files.
+    This is a helper that does NOT auto-detect — the caller is responsible
+    for resolving the format config (via resolve_model_for_scan()).
 
     Args:
         source_path: Root folder path
-        format_category: 'A', 'B', 'C' or None (auto-detect)
+        config: Format config dict (required)
+        format_category: Optional label for result dict
 
     Returns:
         dict: {source_path, folder_name, format_category, sessions: [...]}
     """
-    if format_category is None:
-        format_category = detect_format(source_path)
-
-    if format_category is None:
-        return {
-            'source_path': source_path,
-            'folder_name': os.path.basename(source_path.rstrip('/\\')),
-            'format_category': None,
-            'sessions': [],
-            'error': 'Could not detect data format. Please specify format manually.',
-        }
-
-    scanners = {
-        'A': scan_format_a,
-        'B': scan_format_b,
-        'C': scan_format_c,
-    }
-
-    scanner = scanners.get(format_category)
-    if not scanner:
+    if not os.path.isdir(source_path):
         return {
             'source_path': source_path,
             'folder_name': os.path.basename(source_path.rstrip('/\\')),
             'format_category': format_category,
             'sessions': [],
-            'error': f'Unknown format category: {format_category}',
+            'error': 'Source path is not a directory',
         }
 
-    files = scanner(source_path)
+    try:
+        files = scan_files_recursive(source_path, config)
+    except FileNotFoundError as e:
+        return {
+            'source_path': source_path,
+            'folder_name': os.path.basename(source_path.rstrip('/\\')),
+            'format_category': format_category,
+            'sessions': [],
+            'error': str(e),
+        }
+
     if not files:
         return {
             'source_path': source_path,
@@ -490,14 +432,13 @@ def scan_folder(source_path, format_category=None):
 
 
 def scan_folder_sessions(source_path, conn=None):
-    """Scan and return session-grouped preview with import status.
+    """Scan, auto-detect format, resolve model (auto-create if new), and
+    return session-grouped preview with import status.
 
-    Used by the API endpoint for the scan preview in the Import page.
+    This is the main entry point used by the scan API endpoint.
     """
     from backend.database import get_db
     from backend.format_configs import get_table_name
-
-    result = scan_folder(source_path)
 
     if conn is None:
         conn = get_db()
@@ -505,61 +446,90 @@ def scan_folder_sessions(source_path, conn=None):
     else:
         close_conn = False
 
-    # Find suggested model based on format_category
-    fmt = result.get('format_category')
-    if fmt:
-        existing_models = conn.execute(
-            "SELECT id, name FROM aircraft_models WHERE format_category=?",
-            (fmt,)
-        ).fetchall()
-        if existing_models:
-            result['suggested_model_id'] = existing_models[0]['id']
-            result['suggested_model_name'] = existing_models[0]['name']
-            result['matching_models'] = [{'id': m['id'], 'name': m['name']} for m in existing_models]
+    source_path = os.path.normpath(source_path)
 
-    # Check import status for each session
-    for sess in result.get('sessions', []):
+    # Step 1 — resolve model: auto-generate config, compare, auto-create if no match
+    model_info = resolve_model_for_scan(conn, source_path)
+
+    if model_info is None:
+        result = {
+            'source_path': source_path,
+            'folder_name': os.path.basename(source_path.rstrip('/\\')),
+            'format_category': None,
+            'format_detected': False,
+            'model': None,
+            'sessions': [],
+            'error': 'No recognizable data files found in this folder.',
+        }
+        if close_conn:
+            conn.close()
+        return result
+
+    fmt = model_info['format_category']
+
+    # Step 2 — scan files using the generated config (has correct file_patterns)
+    scan_result = scan_folder(source_path, model_info['config'], format_category=fmt)
+
+    # Build the model descriptor
+    model_desc = {
+        'id': model_info['model_id'],
+        'name': model_info['model_name'],
+        'format_category': fmt,
+        'is_new': model_info['is_new'],
+        'match_confidence': model_info['match_confidence'],
+    }
+
+    # Step 3 — merge scan result with model info and import status
+    result = {
+        'source_path': source_path,
+        'folder_name': scan_result.get('folder_name', os.path.basename(source_path.rstrip('/\\'))),
+        'format_category': fmt,
+        'format_detected': True,
+        'model': model_desc,
+        'suggested_model_id': model_info['model_id'],
+        'suggested_model_name': model_info['model_name'],
+        'matching_models': model_info.get('matching_models', []),
+        'sessions': scan_result.get('sessions', []),
+        'error': scan_result.get('error'),
+    }
+
+    # Step 4 — check import status for each session
+    for sess in result['sessions']:
         sess['import_status'] = 'new'
         serial = sess['aircraft_serial']
 
-        if fmt:
-            # Format A: serial comes from directory name → look up aircraft by serial
-            if serial:
-                ac = conn.execute(
-                    """SELECT a.id, a.serial_number, am.name as model_name
-                       FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
-                       WHERE am.format_category=? AND a.serial_number=?""",
-                    (fmt, serial)
-                ).fetchone()
-                if ac:
-                    existing = conn.execute(
-                        "SELECT id, name FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-                        (ac['id'], source_path, sess['session_key'])
-                    ).fetchone()
-                    if existing:
-                        sess['import_status'] = 'imported'
-                        sess['existing_flight_id'] = existing['id']
-                        sess['existing_flight_name'] = existing['name']
-                        sess['aircraft_id'] = ac['id']
-
-            # Format B/C: serial is empty → check flights table by (source_path, session_key) directly
-            else:
+        if serial:
+            ac = conn.execute(
+                """SELECT a.id, a.serial_number, am.name as model_name
+                   FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
+                   WHERE am.id=? AND a.serial_number=?""",
+                (model_info['model_id'], serial)
+            ).fetchone()
+            if ac:
                 existing = conn.execute(
-                    """SELECT f.id, f.name, f.aircraft_id, a.serial_number as aircraft_serial
-                       FROM flights f
-                       LEFT JOIN aircraft a ON a.id = f.aircraft_id
-                       WHERE f.source_path=? AND f.session_key=?""",
-                    (source_path, sess['session_key'])
+                    "SELECT id, name FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
+                    (ac['id'], source_path, sess['session_key'])
                 ).fetchone()
                 if existing:
                     sess['import_status'] = 'imported'
                     sess['existing_flight_id'] = existing['id']
                     sess['existing_flight_name'] = existing['name']
-                    sess['aircraft_id'] = existing['aircraft_id']
-                    # Set the aircraft serial from the existing flight so the
-                    # frontend shows which aircraft this session belongs to
-                    if existing['aircraft_serial']:
-                        sess['aircraft_serial'] = existing['aircraft_serial']
+                    sess['aircraft_id'] = ac['id']
+        else:
+            existing = conn.execute(
+                """SELECT f.id, f.name, f.aircraft_id, a.serial_number as aircraft_serial
+                   FROM flights f
+                   LEFT JOIN aircraft a ON a.id = f.aircraft_id
+                   WHERE f.source_path=? AND f.session_key=?""",
+                (source_path, sess['session_key'])
+            ).fetchone()
+            if existing:
+                sess['import_status'] = 'imported'
+                sess['existing_flight_id'] = existing['id']
+                sess['existing_flight_name'] = existing['name']
+                sess['aircraft_id'] = existing['aircraft_id']
+                if existing['aircraft_serial']:
+                    sess['aircraft_serial'] = existing['aircraft_serial']
 
     if close_conn:
         conn.close()
