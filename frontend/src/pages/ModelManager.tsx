@@ -1,38 +1,22 @@
 import { useState, useEffect } from 'react';
 import {
-  listModels, createModel, updateModel, deleteModel,
+  listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight,
   type AircraftModel, type Aircraft, type Flight,
 } from '../api';
 
-const FORMAT_LABELS: Record<string, string> = {
-  A: '参考格式 (飞机ID/ParserData/)',
-  B: '新版格式 (日期/ParserData/)',
-  C: '旧版格式 (扁平无表头)',
-};
-
-const FORMAT_BADGE_COLORS: Record<string, string> = {
-  A: 'bg-blue-100 text-blue-700',
-  B: 'bg-green-100 text-green-700',
-  C: 'bg-amber-100 text-amber-700',
-};
-
 interface Props {
   onModelsChanged: () => void;
   onNavigateToFlight: (flightId: number) => void;
   flights: Flight[];
+  modelsVersion: number;
 }
 
-export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights }: Props) {
+export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion }: Props) {
   const [models, setModels] = useState<AircraftModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
-
-  // Create model
-  const [showCreate, setShowCreate] = useState(false);
-  const [newModelName, setNewModelName] = useState('');
-  const [newModelFormat, setNewModelFormat] = useState('A');
 
   // Edit model
   const [editingModelId, setEditingModelId] = useState<number | null>(null);
@@ -76,6 +60,14 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   useEffect(() => { loadModels(); }, []);
 
+  // Refresh models/aircraft when external data changes (e.g. import on another tab)
+  useEffect(() => {
+    if (modelsVersion > 0) {
+      loadModels();
+      if (selectedModelId) loadAircraft(selectedModelId);
+    }
+  }, [modelsVersion]);
+
   useEffect(() => {
     if (selectedModelId) loadAircraft(selectedModelId);
     else setAircraft([]);
@@ -87,19 +79,12 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     onModelsChanged();
   };
 
-  const handleCreateModel = async () => {
-    if (!newModelName.trim()) return;
-    await createModel(newModelName.trim(), newModelFormat);
-    setShowCreate(false);
-    setNewModelName('');
-    refresh();
-  };
-
   const handleRenameModel = async (id: number) => {
     if (!editModelName.trim()) { setEditingModelId(null); return; }
     await updateModel(id, editModelName.trim());
     setEditingModelId(null);
     loadModels();
+    onModelsChanged();  // refresh flight list so dropdown labels update
   };
 
   const handleDeleteModel = async (id: number) => {
@@ -165,38 +150,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     <div className="h-full flex">
       {/* Left: Model List */}
       <aside className="w-64 shrink-0 border-r border-gray-200 overflow-y-auto bg-gray-50/50 flex flex-col">
-        <div className="p-3 border-b border-gray-200 flex items-center justify-between">
+        <div className="p-3 border-b border-gray-200">
           <span className="text-xs font-medium text-gray-500">机型列表</span>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500"
-          >
-            + 新增
-          </button>
         </div>
-
-        {showCreate && (
-          <div className="p-3 border-b border-gray-200 bg-white space-y-2">
-            <input
-              type="text" value={newModelName}
-              onChange={(e) => setNewModelName(e.target.value)}
-              placeholder="机型名称..."
-              className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:border-blue-500"
-              onKeyDown={(e) => e.key === 'Enter' && handleCreateModel()}
-            />
-            <select value={newModelFormat} onChange={(e) => setNewModelFormat(e.target.value)}
-              className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs"
-            >
-              <option value="A">Format A - 参考格式</option>
-              <option value="B">Format B - 新版格式</option>
-              <option value="C">Format C - 旧版格式</option>
-            </select>
-            <div className="flex gap-1">
-              <button onClick={handleCreateModel} className="text-xs px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-500">创建</button>
-              <button onClick={() => setShowCreate(false)} className="text-xs px-3 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">取消</button>
-            </div>
-          </div>
-        )}
 
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {models.map((m) => (
@@ -209,33 +165,31 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                     : 'bg-white border border-gray-200 hover:bg-gray-100'
                 }`}
               >
-                <div className="flex items-center justify-between">
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${FORMAT_BADGE_COLORS[m.format_category] || 'bg-gray-100 text-gray-600'}`}>
-                    {m.format_category}
-                  </span>
-                  {editingModelId === m.id ? (
-                    <div className="flex gap-1">
-                      <input
-                        type="text" value={editModelName}
-                        onChange={(e) => setEditModelName(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') handleRenameModel(m.id); if (e.key === 'Escape') setEditingModelId(null); }}
-                        className="w-24 bg-white border border-blue-400 rounded px-1 py-0.5 text-xs focus:outline-none"
-                        autoFocus
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                      <button onClick={(e) => { e.stopPropagation(); handleRenameModel(m.id); }} className="text-[10px] text-blue-600">✓</button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1">
-                      <span className="text-sm font-medium text-gray-800">{m.name}</span>
+                {editingModelId === m.id ? (
+                  <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text" value={editModelName}
+                      onChange={(e) => setEditModelName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleRenameModel(m.id); if (e.key === 'Escape') setEditingModelId(null); }}
+                      className="flex-1 bg-white border border-blue-400 rounded px-1 py-0.5 text-xs focus:outline-none"
+                      autoFocus
+                    />
+                    <button onClick={() => handleRenameModel(m.id)} className="text-[10px] text-blue-600 px-1">✓</button>
+                    <button onClick={() => setEditingModelId(null)} className="text-[10px] text-gray-400 px-1">✕</button>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-800 truncate">{m.name}</span>
+                    <div className="flex items-center gap-0.5 shrink-0 ml-1">
                       <button
                         onClick={(e) => { e.stopPropagation(); setEditingModelId(m.id); setEditModelName(m.name); }}
-                        className="text-gray-300 hover:text-blue-500 text-[10px] opacity-0 group-hover:opacity-100"
+                        className="text-gray-300 hover:text-blue-500 p-0.5"
+                        title="重命名"
                       >
                         ✏️
                       </button>
                       {deletingModelId === m.id ? (
-                        <span className="text-[10px] text-red-500">
+                        <span className="text-[10px] text-red-500 whitespace-nowrap">
                           确认?{' '}
                           <button onClick={(e) => { e.stopPropagation(); handleDeleteModel(m.id); }} className="text-red-600 font-bold">是</button>
                           {' / '}
@@ -244,25 +198,23 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       ) : (
                         <button
                           onClick={(e) => { e.stopPropagation(); setDeletingModelId(m.id); }}
-                          className="text-gray-300 hover:text-red-500 text-[10px]"
+                          className="text-gray-300 hover:text-red-500 p-0.5"
+                          title="删除"
                         >
                           🗑
                         </button>
                       )}
                     </div>
-                  )}
-                </div>
-                <div className="text-[10px] text-gray-400 mt-1">
-                  {FORMAT_LABELS[m.format_category] || m.format_category}
-                </div>
-                <div className="text-[10px] text-gray-400">
+                  </div>
+                )}
+                <div className="text-[10px] text-gray-400 mt-0.5">
                   {(m.aircraft_count ?? 0)} 架飞机
                 </div>
               </div>
             </div>
           ))}
           {models.length === 0 && (
-            <p className="text-xs text-gray-400 p-2">暂无机型，请先创建机型再导入数据</p>
+            <p className="text-xs text-gray-400 p-2">暂无机型</p>
           )}
         </div>
       </aside>
@@ -278,9 +230,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">{selectedModel.name}</h2>
-                <p className="text-xs text-gray-400 mt-1">
-                  {FORMAT_LABELS[selectedModel.format_category] || selectedModel.format_category}
-                </p>
               </div>
               <button
                 onClick={() => setShowAddAircraft(true)}
