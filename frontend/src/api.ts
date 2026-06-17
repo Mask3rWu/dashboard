@@ -15,7 +15,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export interface AircraftModel {
   id: number;
   name: string;
-  format_category: 'A' | 'B' | 'C';
+  format_category: string;
   description: string;
   created_at: string;
   aircraft_count?: number;
@@ -67,9 +67,16 @@ export interface ScanResult {
   folder_name: string;
   format_category: string | null;
   format_detected?: boolean;
+  model: {
+    id: number;
+    name: string;
+    format_category: string;
+    is_new: boolean;
+    match_confidence: number | null;
+  } | null;
   suggested_model_id?: number;
   suggested_model_name?: string;
-  matching_models?: { id: number; name: string }[];
+  matching_models?: { id: number; name: string; score: number }[];
   sessions: SessionPreview[];
   error?: string;
 }
@@ -163,6 +170,8 @@ export interface Preset {
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');
 export const createModel = (name: string, formatCategory: string, description?: string) =>
   request<AircraftModel>('/models', { method: 'POST', body: JSON.stringify({ name, format_category: formatCategory, description: description || '' }) });
+export const createModelFromScan = (name: string, sourcePath: string, formatCategory: string) =>
+  request<AircraftModel>('/models/from-scan', { method: 'POST', body: JSON.stringify({ name, source_path: sourcePath, format_category: formatCategory }) });
 export const updateModel = (id: number, name: string) =>
   request('/models/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const deleteModel = (id: number) => request('/models/' + id, { method: 'DELETE' });

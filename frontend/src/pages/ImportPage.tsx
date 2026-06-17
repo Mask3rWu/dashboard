@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import {
   scanFolder, importSession, listFlights, deleteFlight, updateFlight, browseFolder,
-  listModels, createModel, listAircraft, createAircraft,
+  listModels, createModelFromScan, listAircraft, createAircraft,
   type Flight, type ScanResult, type SessionPreview,
   type AircraftModel, type Aircraft,
 } from '../api';
@@ -12,15 +12,22 @@ const DATA_TYPE_LABELS: Record<string, string> = {
   avionics: '航电', controller: '舵机', fan_control: '风扇', gps_compare: 'GPS对比',
 };
 
-const FORMAT_LABELS: Record<string, string> = {
-  A: '参考格式', B: '新版格式', C: '旧版格式',
-};
-
-const FORMAT_BADGES: Record<string, string> = {
-  A: 'bg-blue-100 text-blue-700 border-blue-200',
-  B: 'bg-green-100 text-green-700 border-green-200',
-  C: 'bg-amber-100 text-amber-700 border-amber-200',
-};
+function formatBadgeStyle(fmt: string): string {
+  const colors = [
+    'bg-blue-100 text-blue-700 border-blue-200',
+    'bg-green-100 text-green-700 border-green-200',
+    'bg-amber-100 text-amber-700 border-amber-200',
+    'bg-purple-100 text-purple-700 border-purple-200',
+    'bg-pink-100 text-pink-700 border-pink-200',
+    'bg-teal-100 text-teal-700 border-teal-200',
+  ];
+  let hash = 0;
+  for (let i = 0; i < fmt.length; i++) {
+    hash = ((hash << 5) - hash) + fmt.charCodeAt(i);
+    hash |= 0;
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
 
 interface Props {
   onImported: () => void;
@@ -49,10 +56,6 @@ export default function ImportPage({ onImported }: Props) {
   const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
   const [editName, setEditName] = useState('');
   const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
-
-  // Create model inline
-  const [showCreateModel, setShowCreateModel] = useState(false);
-  const [newModelName, setNewModelName] = useState('');
 
   // Create aircraft inline
   const [showCreateAircraft, setShowCreateAircraft] = useState<Record<string, boolean>>({});
@@ -84,17 +87,24 @@ export default function ImportPage({ onImported }: Props) {
     await loadContext();
     try {
       const data = await scanFolder(scanPath);
+      // Reload model list first if a new model was auto-created,
+      // so the model is available before the dropdown renders
+      if (data.model?.is_new) {
+        await loadContext();
+      }
       setScanResult(data);
-      if (data.suggested_model_id) {
-        setSelectedModelId(data.suggested_model_id);
-        await loadAircraftForModel(data.suggested_model_id);
+      if (data.model) {
+        setSelectedModelId(data.model.id);
+        await loadAircraftForModel(data.model.id);
+      } else {
+        setSelectedModelId(null);
       }
       setImportingKeys(new Set());
       setImportedKeys(new Set());
       setErrorKeys({});
       setSessionAircraftMap({});
     } catch (e: any) {
-      setScanResult({ source_path: scanPath, folder_name: scanPath, format_category: null, sessions: [], error: '扫描失败: ' + e.message });
+      setScanResult({ source_path: scanPath, folder_name: scanPath, format_category: null, model: null, sessions: [], error: '扫描失败: ' + e.message });
     } finally { setScanning(false); }
   };
 
@@ -188,19 +198,18 @@ export default function ImportPage({ onImported }: Props) {
 
   // ─── Create model / aircraft ──────────────────────────────
 
-  const handleCreateModel = async () => {
-    if (!newModelName.trim() || !scanResult?.format_category) return;
+  // Manual override: create a fresh model even when auto-match exists
+  const handleCreateModelFromScan = async () => {
+    if (!scanResult?.format_category || !path.trim()) return;
     const cat = scanResult.format_category;
-    await createModel(newModelName.trim(), cat);
-    setShowCreateModel(false);
-    setNewModelName('');
-    await loadContext();
-    // Find the newly created model
-    const data = await listModels();
-    const found = data.models.find((m) => m.format_category === cat && m.name === newModelName.trim());
-    if (found) {
-      setSelectedModelId(found.id);
-      await loadAircraftForModel(found.id);
+    const modelName = `${cat}-${Date.now().toString(36)}`;
+    try {
+      const result = await createModelFromScan(modelName, path.trim(), cat);
+      setSelectedModelId(result.id);
+      await loadContext();
+      await loadAircraftForModel(result.id);
+    } catch (e: any) {
+      alert('创建机型失败: ' + e.message);
     }
   };
 
@@ -296,8 +305,8 @@ export default function ImportPage({ onImported }: Props) {
               扫描结果 — {scanResult.folder_name}
             </h3>
             {scanResult.format_category && (
-              <span className={`px-2 py-0.5 rounded text-xs font-medium border ${FORMAT_BADGES[scanResult.format_category] || 'bg-gray-100 text-gray-600'}`}>
-                {FORMAT_LABELS[scanResult.format_category] || scanResult.format_category}
+              <span className={`px-2 py-0.5 rounded text-xs font-medium border ${formatBadgeStyle(scanResult.format_category)}`}>
+                {scanResult.format_category}
               </span>
             )}
             {scanResult.format_detected && (
@@ -305,8 +314,8 @@ export default function ImportPage({ onImported }: Props) {
             )}
           </div>
 
-          {/* Model selection */}
-          {scanResult.format_category && scanResult.sessions.length > 0 && (
+          {/* Model selection — always resolved (matched or auto-created) */}
+          {scanResult.model && scanResult.sessions.length > 0 && (
             <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
               <div className="flex items-center gap-3">
                 <span className="text-xs text-gray-500">机型:</span>
@@ -319,26 +328,31 @@ export default function ImportPage({ onImported }: Props) {
                   }}
                   className="bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500"
                 >
-                  <option value="">选择机型...</option>
-                  {models.filter((m) => m.format_category === scanResult.format_category).map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
+                  {/* Always show resolved model first, then other models sharing the same format_category */}
+                  <option value={scanResult.model.id}>
+                    {scanResult.model.name} (推荐)
+                  </option>
+                  {models
+                    .filter((m) => m.id !== scanResult.model!.id)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
                 </select>
-                {showCreateModel ? (
-                  <div className="flex items-center gap-1">
-                    <input type="text" value={newModelName} onChange={(e) => setNewModelName(e.target.value)}
-                      placeholder="新机型名称..."
-                      className="bg-white border border-blue-400 rounded px-2 py-1 text-xs w-36 focus:outline-none"
-                      onKeyDown={(e) => e.key === 'Enter' && handleCreateModel()} />
-                    <button onClick={handleCreateModel} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">创建</button>
-                    <button onClick={() => setShowCreateModel(false)} className="text-xs px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">取消</button>
-                  </div>
-                ) : (
-                  <button onClick={() => setShowCreateModel(true)}
-                    className="text-xs text-blue-600 hover:text-blue-500">
-                    + 新建机型
-                  </button>
-                )}
+                {scanResult.model.is_new ? (
+                  <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium border border-green-200">
+                    已自动创建
+                  </span>
+                ) : scanResult.model.match_confidence != null ? (
+                  <span className="px-2 py-0.5 bg-blue-100 text-blue-600 rounded text-xs font-medium border border-blue-200">
+                    匹配度 {(scanResult.model.match_confidence * 100).toFixed(0)}%
+                  </span>
+                ) : null}
+                <button
+                  onClick={handleCreateModelFromScan}
+                  className="px-2 py-1 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded border border-dashed border-blue-300 hover:border-blue-400"
+                >
+                  + 新建机型
+                </button>
               </div>
 
               {/* Aircraft assignment for sessions without matching aircraft */}
