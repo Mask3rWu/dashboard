@@ -90,18 +90,22 @@ CREATE TABLE IF NOT EXISTS column_registry (
 );
 CREATE INDEX IF NOT EXISTS idx_colreg_model ON column_registry(model_id, data_type_key);
 
--- Presets (unchanged from v1)
+-- Presets (scoped per model)
 CREATE TABLE IF NOT EXISTS presets (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL UNIQUE,
-    columns_json    TEXT NOT NULL
+    model_id        INTEGER NOT NULL REFERENCES aircraft_models(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    columns_json    TEXT NOT NULL,
+    UNIQUE(model_id, name)
 );
 
--- Filter presets (unchanged from v1)
+-- Filter presets (scoped per model)
 CREATE TABLE IF NOT EXISTS filter_presets (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL UNIQUE,
-    config_json     TEXT NOT NULL
+    model_id        INTEGER NOT NULL REFERENCES aircraft_models(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    config_json     TEXT NOT NULL,
+    UNIQUE(model_id, name)
 );
 """
 
@@ -157,6 +161,23 @@ def _run_v3_migration(conn):
     run_migration(conn)
 
 
+def _is_migrated_v4(conn):
+    """Check if v4 migration has been applied."""
+    rows = conn.execute(
+        "SELECT version FROM schema_version WHERE version >= 4"
+    ).fetchall()
+    return len(rows) > 0
+
+
+def _run_v4_migration(conn):
+    """Run migration from v3 to v4 schema (preset → model scoping).
+
+    This is imported from backend.migrate_v4 at runtime to avoid circular imports.
+    """
+    from backend.migrate_v4 import run_migration
+    run_migration(conn)
+
+
 def init_db():
     """Create all management tables. Run migrations if needed.
 
@@ -190,6 +211,15 @@ def init_db():
             _run_v3_migration(conn)
         except Exception as e:
             logger.error(f"v3 migration failed: {e}")
+            raise
+
+    # v4 migration: model-scoped presets
+    if not _is_migrated_v4(conn):
+        logger.info("v3 schema detected — running migration to v4")
+        try:
+            _run_v4_migration(conn)
+        except Exception as e:
+            logger.error(f"v4 migration failed: {e}")
             raise
 
     conn.execute("PRAGMA foreign_keys=ON")

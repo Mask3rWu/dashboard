@@ -78,6 +78,9 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
   const chartInst = useRef<echarts.ECharts | null>(null);
   const presetNameRef = useRef<HTMLInputElement>(null);
 
+  // Derive current model_id from the selected flight
+  const currentModelId = flights.find(f => f.id === selectedFlightId)?.model_id ?? null;
+
   // Track latest flight ID to abort stale async operations
   const latestFlightRef = useRef<number | null>(null);
 
@@ -91,8 +94,8 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       getFlight(selectedFlightId),
       getAlerts(selectedFlightId),
       getStats(selectedFlightId),
-      listPresets(),
-      listFilterPresets(),
+      currentModelId != null ? listPresets(currentModelId) : Promise.resolve({ presets: [] }),
+      currentModelId != null ? listFilterPresets(currentModelId) : Promise.resolve({ presets: [] }),
     ]).then(([flightData, alertData, statsData, presetData, fpData]) => {
       // Abort if flight changed during fetch
       if (latestFlightRef.current !== selectedFlightId) return;
@@ -434,9 +437,9 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
   // ─── Presets ───────────────────────────────────────────
   const savePreset = async () => {
     const name = presetNameRef.current?.value?.trim();
-    if (!name || selectedColumns.length === 0) return;
-    await createPreset(name, selectedColumns);
-    const data = await listPresets();
+    if (!name || selectedColumns.length === 0 || currentModelId == null) return;
+    await createPreset(currentModelId, name, selectedColumns);
+    const data = await listPresets(currentModelId);
     setPresets(data.presets);
     if (presetNameRef.current) presetNameRef.current.value = '';
   };
@@ -663,9 +666,9 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
         onChange={setFilterSpec}
         filterPresets={filterPresets}
         onSavePreset={async (name) => {
-          if (!filterSpec) return;
-          await createFilterPreset(name, filterSpec);
-          const data = await listFilterPresets();
+          if (!filterSpec || currentModelId == null) return;
+          await createFilterPreset(currentModelId, name, filterSpec);
+          const data = await listFilterPresets(currentModelId);
           setFilterPresets(data.presets);
         }}
         onLoadPreset={(preset) => setFilterSpec(preset.config)}

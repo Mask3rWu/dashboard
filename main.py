@@ -116,11 +116,13 @@ class CompareRequest(BaseModel):
 
 
 class PresetCreate(BaseModel):
+    model_id: int
     name: str
     columns: list[str]
 
 
 class FilterPresetCreate(BaseModel):
+    model_id: int
     name: str
     config: dict
 
@@ -666,12 +668,18 @@ def registry_columns(model_id: int):
 # ─── Preset Routes ─────────────────────────────────────────
 
 @app.get("/api/presets")
-def list_presets():
-    """List all saved column presets."""
+def list_presets(model_id: int):
+    """List column presets for a given model."""
     conn = get_db()
     try:
-        rows = conn.execute("SELECT * FROM presets ORDER BY name").fetchall()
-        return {"presets": [{"id": r['id'], "name": r['name'], "columns": json.loads(r['columns_json'])} for r in rows]}
+        rows = conn.execute(
+            "SELECT * FROM presets WHERE model_id=? ORDER BY name",
+            (model_id,)
+        ).fetchall()
+        return {"presets": [
+            {"id": r['id'], "model_id": r['model_id'], "name": r['name'], "columns": json.loads(r['columns_json'])}
+            for r in rows
+        ]}
     finally:
         conn.close()
 
@@ -682,12 +690,12 @@ def create_preset(req: PresetCreate):
     conn = get_db()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO presets (name, columns_json) VALUES (?, ?)",
-            (req.name, json.dumps(req.columns))
+            "INSERT OR REPLACE INTO presets (model_id, name, columns_json) VALUES (?, ?, ?)",
+            (req.model_id, req.name, json.dumps(req.columns))
         )
         conn.commit()
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        return {"id": pid, "name": req.name, "columns": req.columns}
+        return {"id": pid, "model_id": req.model_id, "name": req.name, "columns": req.columns}
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -709,12 +717,18 @@ def delete_preset(preset_id: int):
 # ─── Filter Preset Routes ──────────────────────────────────
 
 @app.get("/api/filter-presets")
-def list_filter_presets():
-    """List all saved filter presets."""
+def list_filter_presets(model_id: int):
+    """List filter presets for a given model."""
     conn = get_db()
     try:
-        rows = conn.execute("SELECT * FROM filter_presets ORDER BY name").fetchall()
-        return {"presets": [{"id": r['id'], "name": r['name'], "config": json.loads(r['config_json'])} for r in rows]}
+        rows = conn.execute(
+            "SELECT * FROM filter_presets WHERE model_id=? ORDER BY name",
+            (model_id,)
+        ).fetchall()
+        return {"presets": [
+            {"id": r['id'], "model_id": r['model_id'], "name": r['name'], "config": json.loads(r['config_json'])}
+            for r in rows
+        ]}
     finally:
         conn.close()
 
@@ -725,12 +739,12 @@ def create_filter_preset(req: FilterPresetCreate):
     conn = get_db()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO filter_presets (name, config_json) VALUES (?, ?)",
-            (req.name, json.dumps(req.config))
+            "INSERT OR REPLACE INTO filter_presets (model_id, name, config_json) VALUES (?, ?, ?)",
+            (req.model_id, req.name, json.dumps(req.config))
         )
         conn.commit()
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        return {"id": pid, "name": req.name, "config": req.config}
+        return {"id": pid, "model_id": req.model_id, "name": req.name, "config": req.config}
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:

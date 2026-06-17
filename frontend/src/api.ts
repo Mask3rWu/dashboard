@@ -132,6 +132,7 @@ export interface FilterSpec {
 
 export interface FilterPreset {
   id: number;
+  model_id: number;
   name: string;
   config: FilterSpec;
 }
@@ -162,6 +163,7 @@ export interface FlightStats {
 
 export interface Preset {
   id: number;
+  model_id: number;
   name: string;
   columns: string[];
 }
@@ -265,13 +267,15 @@ export const getCompare = (flightIds: number[], columnKey: string) =>
   );
 
 // Presets
-export const listPresets = () => request<{ presets: Preset[] }>('/presets');
-export const createPreset = (name: string, columns: string[]) =>
-  request<Preset>('/presets', { method: 'POST', body: JSON.stringify({ name, columns }) });
+export const listPresets = (modelId: number) =>
+  request<{ presets: Preset[] }>(`/presets?model_id=${modelId}`);
+export const createPreset = (modelId: number, name: string, columns: string[]) =>
+  request<Preset>('/presets', { method: 'POST', body: JSON.stringify({ model_id: modelId, name, columns }) });
 export const deletePreset = (id: number) => request('/presets/' + id, { method: 'DELETE' });
 
 // Filter Presets
-export const listFilterPresets = () => request<{ presets: FilterPreset[] }>('/filter-presets');
-export const createFilterPreset = (name: string, config: FilterSpec) =>
-  request<FilterPreset>('/filter-presets', { method: 'POST', body: JSON.stringify({ name, config }) });
+export const listFilterPresets = (modelId: number) =>
+  request<{ presets: FilterPreset[] }>(`/filter-presets?model_id=${modelId}`);
+export const createFilterPreset = (modelId: number, name: string, config: FilterSpec) =>
+  request<FilterPreset>('/filter-presets', { method: 'POST', body: JSON.stringify({ model_id: modelId, name, config }) });
 export const deleteFilterPreset = (id: number) => request('/filter-presets/' + id, { method: 'DELETE' });
