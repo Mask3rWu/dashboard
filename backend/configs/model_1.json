@@ -81,8 +81,8 @@
         },
         {
           "name": "前向速度_m_s_",
-          "label": "前向速度(m/s)",
-          "unit": "",
+          "label": "前向速度",
+          "unit": "m/s",
           "type": "REAL",
           "ordinal": 7
         },

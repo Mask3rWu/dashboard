@@ -163,6 +163,10 @@ def init_db():
     Data tables (model_N_*_data) are created dynamically when models
     are registered, not during init.
     """
+    # Ensure persistent config files exist (copied from _MEIPASS in frozen mode)
+    from backend.format_configs import _ensure_persistent_configs
+    _ensure_persistent_configs()
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=OFF")

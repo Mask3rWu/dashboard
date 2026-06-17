@@ -29,6 +29,7 @@ from backend.format_configs import (
     load_format_config, register_model_tables, get_columns_for_model,
     get_columns_for_flight, get_table_name,
     save_model_config, delete_model_config, generate_config_from_scan,
+    update_column_metadata,
 )
 from backend.scanner import scan_folder_sessions
 from backend import analysis
@@ -76,6 +77,11 @@ class CreateModelFromScanRequest(BaseModel):
 
 class UpdateModelRequest(BaseModel):
     name: str
+
+
+class UpdateColumnRequest(BaseModel):
+    display_label: str | None = None
+    unit: str | None = None
 
 
 class CreateAircraftRequest(BaseModel):
@@ -265,6 +271,86 @@ def delete_model(model_id: int):
 
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ─── Model Column Routes ────────────────────────────────────
+
+@app.get("/api/models/{model_id}/columns")
+def get_model_columns(model_id: int):
+    """Get all columns for a model with full metadata, grouped by data type.
+
+    Returns more detail than /api/registry/columns (includes column_name, ordinal).
+    """
+    from collections import OrderedDict
+    conn = get_db()
+    try:
+        model = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+        if not model:
+            raise HTTPException(404, "Model not found")
+
+        rows = conn.execute(
+            """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
+                      cr.column_name, cr.display_label as col_label, cr.unit,
+                      cr.data_type, cr.ordinal
+               FROM data_table_registry dtr
+               JOIN column_registry cr ON cr.model_id = dtr.model_id
+                   AND cr.data_type_key = dtr.data_type_key
+               WHERE dtr.model_id = ?
+               ORDER BY dtr.data_type_key, cr.ordinal""",
+            (model_id,)
+        ).fetchall()
+
+        groups = OrderedDict()
+        for row in rows:
+            tk = row['data_type_key']
+            if tk not in groups:
+                groups[tk] = {
+                    'data_type_key': tk,
+                    'table': row['table_name'],
+                    'label': row['display_label'],
+                    'columns': [],
+                }
+            groups[tk]['columns'].append({
+                'column_name': row['column_name'],
+                'display_label': row['col_label'],
+                'unit': row['unit'] or '',
+                'data_type': row['data_type'],
+                'ordinal': row['ordinal'],
+            })
+
+        return {"data_types": list(groups.values())}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/models/{model_id}/columns")
+def update_model_column(
+    model_id: int,
+    data_type_key: str = Query(...),
+    column_name: str = Query(...),
+    req: UpdateColumnRequest | None = None,
+):
+    """Update a column's display label and/or unit.
+
+    Updates both the column_registry in SQLite and the config JSON on disk.
+    """
+    if req is None or (req.display_label is None and req.unit is None):
+        raise HTTPException(400, "At least one of display_label or unit must be provided")
+
+    conn = get_db()
+    try:
+        result = update_column_metadata(
+            conn, model_id, data_type_key, column_name,
+            display_label=req.display_label,
+            unit=req.unit,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
     finally:
         conn.close()
 

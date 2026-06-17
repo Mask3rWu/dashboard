@@ -166,6 +166,21 @@ export interface Preset {
   columns: string[];
 }
 
+export interface ColumnDetail {
+  column_name: string;
+  display_label: string;
+  unit: string;
+  data_type: string;
+  ordinal: number;
+}
+
+export interface DataTypeGroup {
+  data_type_key: string;
+  table: string;
+  label: string;
+  columns: ColumnDetail[];
+}
+
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');
 export const createModel = (name: string, formatCategory: string, description?: string) =>
@@ -175,6 +190,21 @@ export const createModelFromScan = (name: string, sourcePath: string, formatCate
 export const updateModel = (id: number, name: string) =>
   request('/models/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const deleteModel = (id: number) => request('/models/' + id, { method: 'DELETE' });
+
+// Model Columns
+export const getModelColumns = (modelId: number) =>
+  request<{ data_types: DataTypeGroup[] }>(`/models/${modelId}/columns`);
+
+export const updateModelColumn = (
+  modelId: number,
+  dataTypeKey: string,
+  columnName: string,
+  updates: { display_label?: string; unit?: string }
+) =>
+  request<{ column_name: string; display_label: string; unit: string }>(
+    `/models/${modelId}/columns?data_type_key=${encodeURIComponent(dataTypeKey)}&column_name=${encodeURIComponent(columnName)}`,
+    { method: 'PATCH', body: JSON.stringify(updates) }
+  );
 
 // Aircraft
 export const listAircraft = (modelId: number) =>

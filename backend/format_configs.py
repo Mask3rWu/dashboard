@@ -8,12 +8,54 @@ compatibility — they are migrated to per-model configs during v3 migration.
 """
 
 import os
+import sys
 import json
 import logging
+import shutil
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'configs')
+
+# ── Config directory resolution ──
+
+def get_config_dir():
+    """Return the config directory path.
+
+    In frozen (PyInstaller) mode, uses %APPDATA%/FlightAnalyzer/configs/
+    so user edits persist across restarts.  In dev mode, uses the project
+    backend/configs/ directory.
+    """
+    if getattr(sys, 'frozen', False):
+        from backend.database import DATA_DIR
+        return os.path.join(DATA_DIR, 'configs')
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'configs')
+
+
+def _ensure_persistent_configs():
+    """Copy bundled config files to the persistent config directory on first launch.
+
+    Only runs in frozen (PyInstaller) mode.  Existing files in the persistent
+    directory are never overwritten — user edits are preserved.
+    """
+    if not getattr(sys, 'frozen', False):
+        return
+
+    dest_dir = get_config_dir()
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # Bundled configs live at _MEIPASS/backend/configs/
+    bundled_dir = os.path.join(sys._MEIPASS, 'backend', 'configs')
+    if not os.path.isdir(bundled_dir):
+        return
+
+    for fname in os.listdir(bundled_dir):
+        if not fname.endswith('.json'):
+            continue
+        src = os.path.join(bundled_dir, fname)
+        dst = os.path.join(dest_dir, fname)
+        if not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            logger.info(f"Copied bundled config: {fname} → {dst}")
 
 
 # ── Config path helpers ──
@@ -46,13 +88,13 @@ def load_format_config(format_category):
         FileNotFoundError: if no config file found
     """
     # Try legacy format_{cat}.json
-    legacy = os.path.join(CONFIG_DIR, legacy_format_path(format_category))
+    legacy = os.path.join(get_config_dir(), legacy_format_path(format_category))
     if os.path.exists(legacy):
         with open(legacy, 'r', encoding='utf-8') as f:
             return json.load(f)
 
     # Try model_{cat}.json
-    model_file = os.path.join(CONFIG_DIR, f"model_{format_category}.json")
+    model_file = os.path.join(get_config_dir(), f"model_{format_category}.json")
     if os.path.exists(model_file):
         with open(model_file, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -82,7 +124,7 @@ def load_format_config_by_model(conn, model_id):
 
     # Try config_path first
     if row['config_path']:
-        path = os.path.join(CONFIG_DIR, row['config_path'])
+        path = os.path.join(get_config_dir(), row['config_path'])
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -93,8 +135,8 @@ def load_format_config_by_model(conn, model_id):
 
 
 def load_format_config_from_path(config_path):
-    """Load a format config from a named path relative to CONFIG_DIR."""
-    path = os.path.join(CONFIG_DIR, config_path)
+    """Load a format config from a named path relative to get_config_dir()."""
+    path = os.path.join(get_config_dir(), config_path)
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
@@ -106,13 +148,13 @@ def load_all_format_configs():
         dict: {format_category: config_dict, ...}
     """
     configs = {}
-    if not os.path.isdir(CONFIG_DIR):
+    if not os.path.isdir(get_config_dir()):
         return configs
 
-    for fname in os.listdir(CONFIG_DIR):
+    for fname in os.listdir(get_config_dir()):
         if not fname.endswith('.json'):
             continue
-        path = os.path.join(CONFIG_DIR, fname)
+        path = os.path.join(get_config_dir(), fname)
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
@@ -209,7 +251,7 @@ def save_model_config(model_id, config_data):
         str: relative config path (e.g. 'model_1.json')
     """
     rel_path = model_config_path(model_id)
-    full_path = os.path.join(CONFIG_DIR, rel_path)
+    full_path = os.path.join(get_config_dir(), rel_path)
     with open(full_path, 'w', encoding='utf-8') as f:
         json.dump(config_data, f, ensure_ascii=False, indent=2)
     logger.info(f"Saved config: {full_path}")
@@ -224,13 +266,122 @@ def delete_model_config(config_path):
     """
     if not config_path:
         return
-    full_path = os.path.join(CONFIG_DIR, config_path)
+    full_path = os.path.join(get_config_dir(), config_path)
     if os.path.exists(full_path):
         try:
             os.remove(full_path)
             logger.info(f"Deleted config: {full_path}")
         except Exception as e:
             logger.warning(f"Failed to delete config {full_path}: {e}")
+
+
+# ── Column metadata update ──
+
+def update_column_metadata(conn, model_id, data_type_key, column_name,
+                           display_label=None, unit=None):
+    """Update display_label and/or unit for a column.
+
+    Writes to BOTH the config JSON on disk and the column_registry in SQLite.
+    Only display_label and unit are editable — the SQL column name never changes.
+
+    If the model doesn't have its own config_path yet (legacy data), a new
+    model_{id}.json file is created automatically from the effective config.
+
+    Args:
+        conn: SQLite connection
+        model_id: aircraft_models.id
+        data_type_key: e.g. 'gps', 'imu'
+        column_name: SQL column name (internal identifier, not editable)
+        display_label: new display label, or None to keep unchanged
+        unit: new unit string, or None to keep unchanged
+
+    Returns:
+        dict: {column_name, display_label, unit} with updated values
+
+    Raises:
+        ValueError: if model or column not found
+    """
+    if display_label is None and unit is None:
+        raise ValueError("At least one of display_label or unit must be provided")
+
+    # Verify model exists
+    model = conn.execute(
+        "SELECT id, config_path, format_category FROM aircraft_models WHERE id=?",
+        (model_id,)
+    ).fetchone()
+    if not model:
+        raise ValueError(f"Model {model_id} not found")
+
+    # Verify column exists in registry
+    col_row = conn.execute(
+        """SELECT display_label, unit FROM column_registry
+           WHERE model_id=? AND data_type_key=? AND column_name=?""",
+        (model_id, data_type_key, column_name)
+    ).fetchone()
+    if not col_row:
+        raise ValueError(
+            f"Column '{column_name}' not found in registry for model {model_id}"
+        )
+
+    new_label = display_label if display_label is not None else col_row['display_label']
+    new_unit = unit if unit is not None else col_row['unit']
+
+    # ── Update column_registry in SQLite ──
+    conn.execute(
+        """UPDATE column_registry SET display_label=?, unit=?
+           WHERE model_id=? AND data_type_key=? AND column_name=?""",
+        (new_label, new_unit, model_id, data_type_key, column_name)
+    )
+
+    # ── Update config JSON on disk ──
+    # If the model doesn't have its own config_path, create one
+    config_path = model['config_path']
+    if not config_path:
+        config = load_format_config_by_model(conn, model_id)
+        if not config:
+            raise ValueError(f"Could not load config for model {model_id}")
+        config_path = save_model_config(model_id, config)
+        conn.execute(
+            "UPDATE aircraft_models SET config_path=? WHERE id=?",
+            (config_path, model_id)
+        )
+        logger.info(f"Auto-created per-model config: {config_path}")
+
+    config = load_format_config_by_model(conn, model_id)
+    if not config:
+        raise ValueError(f"Could not reload config for model {model_id}")
+
+    # Locate the column in the config
+    dt = config.get('data_types', {}).get(data_type_key)
+    if not dt:
+        raise ValueError(f"Data type '{data_type_key}' not found in config")
+
+    target_col = None
+    for col in dt.get('columns', []):
+        if col.get('name') == column_name:
+            target_col = col
+            break
+    if not target_col:
+        raise ValueError(
+            f"Column '{column_name}' not found in config for data type '{data_type_key}'"
+        )
+
+    target_col['label'] = new_label
+    target_col['unit'] = new_unit
+
+    save_model_config(model_id, config)
+
+    conn.commit()
+    logger.info(
+        f"Updated column {model_id}/{data_type_key}/{column_name}: "
+        f"label='{new_label}', unit='{new_unit}'"
+    )
+
+    return {
+        'column_name': column_name,
+        'display_label': new_label,
+        'unit': new_unit,
+    }
 
 
 # ── Auto-generate config from scan ──

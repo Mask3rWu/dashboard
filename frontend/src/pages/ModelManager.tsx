@@ -3,7 +3,9 @@ import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight,
+  getModelColumns, updateModelColumn,
   type AircraftModel, type Aircraft, type Flight,
+  type DataTypeGroup,
 } from '../api';
 
 interface Props {
@@ -44,6 +46,12 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [editFlightName, setEditFlightName] = useState('');
   const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
 
+  // Column editing
+  const [columnGroups, setColumnGroups] = useState<DataTypeGroup[]>([]);
+  const [editingColumn, setEditingColumn] = useState<{ dataTypeKey: string; columnName: string } | null>(null);
+  const [editColLabel, setEditColLabel] = useState('');
+  const [editColUnit, setEditColUnit] = useState('');
+
   const loadModels = async () => {
     try {
       const data = await listModels();
@@ -69,8 +77,13 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   }, [modelsVersion]);
 
   useEffect(() => {
-    if (selectedModelId) loadAircraft(selectedModelId);
-    else setAircraft([]);
+    if (selectedModelId) {
+      loadAircraft(selectedModelId);
+      getModelColumns(selectedModelId).then(d => setColumnGroups(d.data_types)).catch(() => setColumnGroups([]));
+    } else {
+      setAircraft([]);
+      setColumnGroups([]);
+    }
   }, [selectedModelId]);
 
   const refresh = () => {
@@ -130,6 +143,22 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     await deleteFlight(id);
     setDeletingFlightId(null);
     refresh();
+  };
+
+  const startEditColumn = (dataTypeKey: string, columnName: string, label: string, unit: string) => {
+    setEditingColumn({ dataTypeKey, columnName });
+    setEditColLabel(label);
+    setEditColUnit(unit);
+  };
+
+  const saveColumn = async () => {
+    if (!editingColumn || !selectedModelId) return;
+    await updateModelColumn(selectedModelId, editingColumn.dataTypeKey, editingColumn.columnName, {
+      display_label: editColLabel.trim() || undefined,
+      unit: editColUnit.trim() || undefined,
+    });
+    setEditingColumn(null);
+    getModelColumns(selectedModelId).then(d => setColumnGroups(d.data_types));
   };
 
   const toggleExpand = (acId: number) => {
@@ -399,6 +428,68 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {/* ── Column Definitions ────────────────────── */}
+            {columnGroups.length > 0 && (
+              <div className="mt-8">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">
+                  列定义 ({columnGroups.reduce((s, g) => s + g.columns.length, 0)} 列)
+                </h3>
+                <div className="space-y-3">
+                  {columnGroups.map((group) => (
+                    <div key={group.data_type_key} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 bg-gray-50 text-xs font-medium text-gray-600">
+                        {group.label}
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {group.columns.map((col) => {
+                          const isEditing = editingColumn?.dataTypeKey === group.data_type_key
+                            && editingColumn?.columnName === col.column_name;
+                          return (
+                            <div key={col.column_name} className="flex items-center px-3 py-1.5 text-xs">
+                              <span className="text-gray-400 w-8 shrink-0">{col.ordinal}</span>
+                              {isEditing ? (
+                                <div className="flex items-center gap-1 flex-1">
+                                  <input
+                                    type="text" value={editColLabel}
+                                    onChange={e => setEditColLabel(e.target.value)}
+                                    className="flex-1 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs focus:outline-none w-24"
+                                    placeholder="列名称"
+                                    autoFocus
+                                  />
+                                  <input
+                                    type="text" value={editColUnit}
+                                    onChange={e => setEditColUnit(e.target.value)}
+                                    className="w-16 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs focus:outline-none"
+                                    placeholder="单位"
+                                  />
+                                  <button onClick={saveColumn} className="text-[10px] px-1.5 py-0.5 bg-blue-600 text-white rounded">✓</button>
+                                  <button onClick={() => setEditingColumn(null)} className="text-[10px] px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded">✕</button>
+                                </div>
+                              ) : (
+                                <>
+                                  <span className="flex-1 text-gray-700 truncate group flex items-center gap-1">
+                                    {col.display_label || col.column_name}
+                                    <button
+                                      onClick={() => startEditColumn(group.data_type_key, col.column_name, col.display_label, col.unit)}
+                                      className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 text-[10px] transition-opacity"
+                                      title="编辑列"
+                                    >
+                                      ✏️
+                                    </button>
+                                  </span>
+                                  <span className="text-gray-400 w-16 text-right shrink-0">{col.unit || '-'}</span>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
