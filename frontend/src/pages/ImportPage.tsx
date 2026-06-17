@@ -169,7 +169,7 @@ export default function ImportPage({ onImported }: Props) {
     try { const data = await scanFolder(path.trim()); setScanResult(data); } catch {}
   };
 
-  const handleImport = async (session: SessionPreview, mode: 'overwrite' | 'as_new' = 'overwrite') => {
+  const handleImport = async (session: SessionPreview) => {
     const key = sessionKey(session.aircraft_serial, session.session_key);
 
     // Auto-create aircraft if needed
@@ -183,7 +183,7 @@ export default function ImportPage({ onImported }: Props) {
     setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
 
     try {
-      const result = await importSession(path, aid, session.session_key, mode);
+      const result = await importSession(path, aid, session.session_key);
       if (result.error) throw new Error(result.error);
       setImportedKeys((prev) => new Set(prev).add(key));
       onImported();
@@ -462,22 +462,14 @@ export default function ImportPage({ onImported }: Props) {
                       </div>
                       <div className="shrink-0 flex items-center gap-2">
                         {!isImported && !isImporting && (
-                          <button onClick={() => handleImport(session, 'overwrite')} disabled={!selectedModelId && !aid}
+                          <button onClick={() => handleImport(session)} disabled={!selectedModelId && !aid}
                             className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs font-medium"
                             title={!selectedModelId && !aid ? '请先选择机型' : '导入'}>
                             导入
                           </button>
                         )}
-                        {isImported && !isImporting && (
-                          <>
-                            <button onClick={() => handleImport(session, 'overwrite')}
-                              className="px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded text-xs">覆盖</button>
-                            <button onClick={() => handleImport(session, 'as_new')}
-                              className="px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded text-xs">作为新记录导入</button>
-                          </>
-                        )}
                         {isImporting && (
-                          <button onClick={() => handleImport(session)} disabled
+                          <button disabled
                             className="px-3 py-1 bg-gray-200 text-gray-400 rounded text-xs cursor-not-allowed">导入中...</button>
                         )}
                         {errMsg && (

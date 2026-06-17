@@ -56,7 +56,6 @@ class ImportSessionRequest(BaseModel):
     source_path: str
     aircraft_id: int       # required — aircraft.id
     session_key: str = ''  # empty = import all sessions for this aircraft
-    mode: str = 'overwrite'
 
 
 class UpdateFlightRequest(BaseModel):
@@ -528,7 +527,7 @@ def import_flight_api(req: ImportSessionRequest):
     try:
         if req.session_key:
             result = import_session(
-                os.path.normpath(req.source_path), req.aircraft_id, req.session_key, req.mode
+                os.path.normpath(req.source_path), req.aircraft_id, req.session_key
             )
             return result
         else:
@@ -539,7 +538,7 @@ def import_flight_api(req: ImportSessionRequest):
                 imported = []
                 for sess in preview.get('sessions', []):
                     result = import_session(
-                        os.path.normpath(req.source_path), req.aircraft_id, sess['session_key'], req.mode
+                        os.path.normpath(req.source_path), req.aircraft_id, sess['session_key']
                     )
                     if 'error' not in result:
                         imported.append(result)

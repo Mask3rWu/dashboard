@@ -494,6 +494,8 @@ def scan_folder_sessions(source_path, conn=None):
     }
 
     # Step 4 — check import status for each session
+    # Use normalized source_path matching to handle old data with unnormalized paths
+    norm_source = source_path  # already normalized at line 449
     for sess in result['sessions']:
         sess['import_status'] = 'new'
         serial = sess['aircraft_serial']
@@ -507,29 +509,35 @@ def scan_folder_sessions(source_path, conn=None):
             ).fetchone()
             if ac:
                 existing = conn.execute(
-                    "SELECT id, name FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-                    (ac['id'], source_path, sess['session_key'])
-                ).fetchone()
+                    "SELECT id, name, source_path FROM flights WHERE aircraft_id=? AND session_key=?",
+                    (ac['id'], sess['session_key'])
+                ).fetchall()
+                # Filter by normalized path to handle normalization mismatches
+                existing = [r for r in existing if os.path.normpath(r['source_path']) == norm_source]
                 if existing:
+                    r = existing[0]
                     sess['import_status'] = 'imported'
-                    sess['existing_flight_id'] = existing['id']
-                    sess['existing_flight_name'] = existing['name']
+                    sess['existing_flight_id'] = r['id']
+                    sess['existing_flight_name'] = r['name']
                     sess['aircraft_id'] = ac['id']
         else:
             existing = conn.execute(
-                """SELECT f.id, f.name, f.aircraft_id, a.serial_number as aircraft_serial
+                """SELECT f.id, f.name, f.source_path, f.aircraft_id, a.serial_number as aircraft_serial
                    FROM flights f
                    LEFT JOIN aircraft a ON a.id = f.aircraft_id
-                   WHERE f.source_path=? AND f.session_key=?""",
-                (source_path, sess['session_key'])
-            ).fetchone()
+                   WHERE f.session_key=?""",
+                (sess['session_key'],)
+            ).fetchall()
+            # Filter by normalized path to handle normalization mismatches
+            existing = [r for r in existing if os.path.normpath(r['source_path']) == norm_source]
             if existing:
+                r = existing[0]
                 sess['import_status'] = 'imported'
-                sess['existing_flight_id'] = existing['id']
-                sess['existing_flight_name'] = existing['name']
-                sess['aircraft_id'] = existing['aircraft_id']
-                if existing['aircraft_serial']:
-                    sess['aircraft_serial'] = existing['aircraft_serial']
+                sess['existing_flight_id'] = r['id']
+                sess['existing_flight_name'] = r['name']
+                sess['aircraft_id'] = r['aircraft_id']
+                if r['aircraft_serial']:
+                    sess['aircraft_serial'] = r['aircraft_serial']
 
     if close_conn:
         conn.close()

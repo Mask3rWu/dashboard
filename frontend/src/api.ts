@@ -227,9 +227,9 @@ export const scanFolder = (sourcePath: string, formatCategory?: string) =>
   request<ScanResult>(
     '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, format_category: formatCategory || null }) }
   );
-export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string, mode: 'overwrite' | 'as_new' = 'overwrite') =>
+export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string) =>
   request<ImportSessionResult>(
-    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, aircraft_id: aircraftId, session_key: sessionKey, mode }) }
+    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, aircraft_id: aircraftId, session_key: sessionKey }) }
   );
 
 // Folder browser

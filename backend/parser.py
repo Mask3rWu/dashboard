@@ -27,14 +27,13 @@ from backend.importer import (
 )
 
 
-def import_session(source_path, aircraft_id, session_key, mode='overwrite'):
+def import_session(source_path, aircraft_id, session_key):
     """Import a single flight session into the hierarchy.
 
     Args:
         source_path: Root folder path
         aircraft_id: aircraft.id (must exist)
         session_key: Target session key
-        mode: 'overwrite' or 'as_new'
 
     Returns:
         {flight_id, aircraft_id, session_key, name, rows, details} or {error: ...}
@@ -113,33 +112,14 @@ def import_session(source_path, aircraft_id, session_key, mode='overwrite'):
     session_key = canonical_key
     folder_name = os.path.basename(source_path.rstrip('/\\'))
 
-    # Handle existing flight
-    if mode == 'overwrite':
-        existing = conn.execute(
-            "SELECT id FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-            (aircraft_id, source_path, session_key)
-        ).fetchone()
-        if existing:
-            conn.execute("DELETE FROM flights WHERE id=?", (existing['id'],))
-            conn.commit()
-    elif mode == 'as_new':
-        existing = conn.execute(
-            "SELECT id FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-            (aircraft_id, source_path, session_key)
-        ).fetchone()
-        if existing:
-            base_key = session_key
-            suffix = 2
-            while True:
-                new_key = f"{base_key}_{suffix}"
-                check = conn.execute(
-                    "SELECT id FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-                    (aircraft_id, source_path, new_key)
-                ).fetchone()
-                if not check:
-                    break
-                suffix += 1
-            session_key = new_key
+    # Reject if already imported
+    existing = conn.execute(
+        "SELECT id FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
+        (aircraft_id, source_path, session_key)
+    ).fetchone()
+    if existing:
+        conn.close()
+        return {'error': f'Flight already exists for session {session_key}'}
 
     # Determine flight_date from folder name or session key
     flight_date = None
