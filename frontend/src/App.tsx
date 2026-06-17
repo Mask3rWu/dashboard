@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Component, type ReactNode } from 'react';
 import ImportPage from './pages/ImportPage';
 import FlightView from './pages/FlightView';
 import ComparePage from './pages/ComparePage';
@@ -7,11 +7,44 @@ import { listFlights, type Flight } from './api';
 
 type Tab = 'import' | 'models' | 'flight' | 'compare';
 
+// ═══════════════════════════════════════════════════════════════
+// Error Boundary — prevents a single component error from
+// crashing the entire app (white screen).
+// ═══════════════════════════════════════════════════════════════
+interface EBState { hasError: boolean; error: Error | null }
+class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, EBState> {
+  state: EBState = { hasError: false, error: null };
+  static getDerivedStateFromError(error: Error): EBState {
+    return { hasError: true, error };
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div className="flex items-center justify-center h-full bg-white">
+          <div className="text-center max-w-xl p-8">
+            <div className="text-red-500 text-4xl mb-4">⚠️</div>
+            <h2 className="text-lg font-bold text-gray-800 mb-2">页面发生了错误</h2>
+            <p className="text-sm text-gray-500 mb-4">{this.state.error?.message}</p>
+            <button
+              onClick={() => this.setState({ hasError: false, error: null })}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-500"
+            >
+              重试
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('flight');
   const [flights, setFlights] = useState<Flight[]>([]);
   const [selectedFlightId, setSelectedFlightId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [modelsVersion, setModelsVersion] = useState(0);
 
   const loadFlights = async () => {
     try {
@@ -25,6 +58,11 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const onDataChanged = () => {
+    loadFlights();
+    setModelsVersion(v => v + 1);
   };
 
   useEffect(() => { loadFlights(); }, []);
@@ -71,22 +109,40 @@ export default function App() {
           <div className="flex items-center justify-center h-full text-gray-400">加载中...</div>
         ) : (
           <>
-            <div style={{ display: tab === 'import' ? 'contents' : 'none' }}>
-              <ImportPage onImported={loadFlights} />
+            {/* Use visibility + absolute positioning for keep-alive instead of
+                display:contents which breaks CSS layout (h-full, flex children)
+                and causes ECharts container dimension failures in WebView2.
+                Only the active tab is in-flow; hidden tabs are positioned off-screen
+                so they stay mounted (preserving state) but don't affect layout. */}
+            <div className={tab === 'import' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
+              <ErrorBoundary>
+                <ImportPage onImported={onDataChanged} />
+              </ErrorBoundary>
             </div>
-            <div style={{ display: tab === 'flight' ? 'contents' : 'none' }}>
-              <FlightView
-                flights={flights}
-                selectedFlightId={selectedFlightId}
-                onSelectFlight={setSelectedFlightId}
-                onFlightsChanged={loadFlights}
-              />
+            <div className={tab === 'flight' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
+              <ErrorBoundary>
+                <FlightView
+                  flights={flights}
+                  selectedFlightId={selectedFlightId}
+                  onSelectFlight={setSelectedFlightId}
+                  onFlightsChanged={onDataChanged}
+                />
+              </ErrorBoundary>
             </div>
-            <div style={{ display: tab === 'compare' ? 'contents' : 'none' }}>
-              <ComparePage flights={flights} />
+            <div className={tab === 'compare' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
+              <ErrorBoundary>
+                <ComparePage flights={flights} />
+              </ErrorBoundary>
             </div>
-            <div style={{ display: tab === 'models' ? 'contents' : 'none' }}>
-              <ModelManager onModelsChanged={loadFlights} onNavigateToFlight={navigateToFlight} flights={flights} />
+            <div className={tab === 'models' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
+              <ErrorBoundary>
+                <ModelManager
+                  onModelsChanged={onDataChanged}
+                  onNavigateToFlight={navigateToFlight}
+                  flights={flights}
+                  modelsVersion={modelsVersion}
+                />
+              </ErrorBoundary>
             </div>
           </>
         )}
