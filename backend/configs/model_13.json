@@ -1,9 +1,9 @@
 {
-  "format": "2.25.6.24B-1生产",
-  "description": "Auto-generated from 2.25.6.24B-1生产",
+  "format": "20250624B-1生产",
+  "description": "Auto-generated from 20250624B-1生产",
   "has_header": true,
   "has_uav_send_id": false,
-  "extract_serial_from_path": false,
+  "extract_serial_from_path": true,
   "has_aircraft_prefix": false,
   "encoding": "gbk",
   "data_types": {

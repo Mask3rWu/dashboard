@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS column_registry (
     data_type       TEXT DEFAULT 'REAL',
     ordinal         INTEGER,
     is_numeric      INTEGER DEFAULT 1,
+    scale_factor    REAL DEFAULT 1.0,
     UNIQUE(model_id, table_name, column_name)
 );
 CREATE INDEX IF NOT EXISTS idx_colreg_model ON column_registry(model_id, data_type_key);
@@ -178,6 +179,40 @@ def _run_v4_migration(conn):
     run_migration(conn)
 
 
+def _is_migrated_v5(conn):
+    """Check if v5 migration has been applied."""
+    rows = conn.execute(
+        "SELECT version FROM schema_version WHERE version >= 5"
+    ).fetchall()
+    return len(rows) > 0
+
+
+def _run_v5_migration(conn):
+    """Run migration from v4 to v5 schema (column scale_factor).
+
+    This is imported from backend.migrate_v5 at runtime to avoid circular imports.
+    """
+    from backend.migrate_v5 import run_migration
+    run_migration(conn)
+
+
+def _is_migrated_v6(conn):
+    """Check if v6 migration has been applied."""
+    rows = conn.execute(
+        "SELECT version FROM schema_version WHERE version >= 6"
+    ).fetchall()
+    return len(rows) > 0
+
+
+def _run_v6_migration(conn):
+    """Run migration from v5 to v6 schema (full datetime in flights).
+
+    This is imported from backend.migrate_v6 at runtime to avoid circular imports.
+    """
+    from backend.migrate_v6 import run_migration
+    run_migration(conn)
+
+
 def init_db():
     """Create all management tables. Run migrations if needed.
 
@@ -220,6 +255,24 @@ def init_db():
             _run_v4_migration(conn)
         except Exception as e:
             logger.error(f"v4 migration failed: {e}")
+            raise
+
+    # v5 migration: column scale_factor
+    if not _is_migrated_v5(conn):
+        logger.info("v4 schema detected — running migration to v5")
+        try:
+            _run_v5_migration(conn)
+        except Exception as e:
+            logger.error(f"v5 migration failed: {e}")
+            raise
+
+    # v6 migration: full datetime in flights
+    if not _is_migrated_v6(conn):
+        logger.info("v5 schema detected — running migration to v6")
+        try:
+            _run_v6_migration(conn)
+        except Exception as e:
+            logger.error(f"v6 migration failed: {e}")
             raise
 
     conn.execute("PRAGMA foreign_keys=ON")

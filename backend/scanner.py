@@ -259,24 +259,22 @@ def resolve_model_for_scan(conn, source_path):
     }
 
 
-# ── Known subdirectory names (used for aircraft_serial extraction in Format A) ──
-KNOWN_SUBDIRS = {
-    'ParserData', 'FlightAlertInfo', 'AllFlightData',
-    'HandlePacket', 'SendCommand', 'GPSCompareData',
-}
-
-
 def _extract_aircraft_serial_from_path(filepath, source_path):
-    """Extract aircraft serial from a file's path.
+    """Extract aircraft serial from standardized directory hierarchy.
 
-    Walk path components from source_path to filepath, return the first
-    component that is NOT a known subdirectory name (ParserData etc.).
+    Standard: YYYYMMDD*/aircraft_serial/...
+    Finds the date directory (starts with 8 digits) in the path;
+    the immediate subdirectory below it is the aircraft serial.
+
+    Returns the aircraft serial string, or '' if no date dir found.
     """
-    rel = os.path.relpath(os.path.dirname(filepath), source_path)
-    parts = rel.split(os.sep)
-    for part in parts:
-        if part and part not in KNOWN_SUBDIRS and not part.startswith('.'):
-            return part
+    path = os.path.normpath(filepath)
+    parts = path.split(os.sep)
+    for i, part in enumerate(parts):
+        if len(part) >= 8 and part[:8].isdigit():
+            if i + 1 < len(parts):
+                return parts[i + 1]
+            break
     return ''
 
 
@@ -300,8 +298,7 @@ def scan_files_recursive(source_path, config):
     if not os.path.isdir(source_path):
         return results
 
-    extract_serial = config.get('extract_serial_from_path',
-                                  config.get('has_uav_send_id', False))
+    extract_serial = config.get('extract_serial_from_path', True)
     has_prefix = config.get('has_aircraft_prefix',
                             config.get('has_uav_send_id', False))
 
@@ -431,6 +428,36 @@ def scan_folder(source_path, config, format_category=''):
     }
 
 
+def _validate_source_path(source_path):
+    """Validate that source_path follows the standard directory hierarchy.
+
+    Standard: YYYYMMDD*/... (date directory must exist somewhere in the path)
+    The aircraft serial is extracted from subdirectories within the date dir
+    by _extract_aircraft_serial_from_path(); it does NOT need to be part of
+    the source_path itself (e.g. source_path may be the date dir itself).
+
+    Returns an error message string if invalid, or None if valid.
+    """
+    path = os.path.normpath(source_path)
+    folders = [p for p in path.split(os.sep) if p]
+
+    # Find date directory
+    date_idx = -1
+    for i, folder in enumerate(folders):
+        if len(folder) >= 8 and folder[:8].isdigit():
+            date_idx = i
+            break
+
+    if date_idx < 0:
+        return (
+            "目录结构不符合规范。\n"
+            "第一层目录需以 YYYYMMDD（8位日期）开头，例如 20250323_test_flight/。\n"
+            "当前路径未检测到日期目录。请整理目录结构后重试。"
+        )
+
+    return None
+
+
 def scan_folder_sessions(source_path, conn=None):
     """Scan, auto-detect format, resolve model (auto-create if new), and
     return session-grouped preview with import status.
@@ -447,6 +474,22 @@ def scan_folder_sessions(source_path, conn=None):
         close_conn = False
 
     source_path = os.path.normpath(source_path)
+
+    # Step 0 — validate directory structure
+    path_error = _validate_source_path(source_path)
+    if path_error:
+        result = {
+            'source_path': source_path,
+            'folder_name': os.path.basename(source_path.rstrip('/\\')),
+            'format_category': None,
+            'format_detected': False,
+            'model': None,
+            'sessions': [],
+            'error': path_error,
+        }
+        if close_conn:
+            conn.close()
+        return result
 
     # Step 1 — resolve model: auto-generate config, compare, auto-create if no match
     model_info = resolve_model_for_scan(conn, source_path)

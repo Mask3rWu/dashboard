@@ -81,6 +81,7 @@ class UpdateModelRequest(BaseModel):
 class UpdateColumnRequest(BaseModel):
     display_label: str | None = None
     unit: str | None = None
+    scale_factor: float | None = None
 
 
 class CreateAircraftRequest(BaseModel):
@@ -149,6 +150,20 @@ def browse_folder():
         raise HTTPException(500, f"Folder browser failed: {e}")
 
 
+@app.get("/api/folders/subdirs")
+def list_subdirs(path: str):
+    """List immediate subdirectories of a given path."""
+    p = os.path.normpath(path)
+    if not os.path.isdir(p):
+        raise HTTPException(400, "Not a directory")
+    try:
+        entries = [name for name in sorted(os.listdir(p))
+                   if os.path.isdir(os.path.join(p, name))]
+        return {'path': p, 'subdirs': entries}
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+
+
 # ─── Model Routes ──────────────────────────────────────────
 
 @app.get("/api/models")
@@ -157,8 +172,15 @@ def list_models():
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT am.*, (SELECT COUNT(*) FROM aircraft a WHERE a.model_id = am.id) as aircraft_count "
-            "FROM aircraft_models am ORDER BY am.created_at"
+            """SELECT am.*,
+               (SELECT COUNT(*) FROM aircraft a WHERE a.model_id = am.id) as aircraft_count,
+               COALESCE((SELECT COUNT(*) FROM flights f
+                         JOIN aircraft a2 ON a2.id = f.aircraft_id
+                         WHERE a2.model_id = am.id), 0) as total_flights,
+               COALESCE((SELECT SUM(f2.duration_sec) FROM flights f2
+                         JOIN aircraft a3 ON a3.id = f2.aircraft_id
+                         WHERE a3.model_id = am.id), 0) as total_flight_hours
+               FROM aircraft_models am ORDER BY am.created_at"""
         ).fetchall()
         return {"models": [dict(r) for r in rows]}
     finally:
@@ -294,7 +316,7 @@ def get_model_columns(model_id: int):
         rows = conn.execute(
             """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
                       cr.column_name, cr.display_label as col_label, cr.unit,
-                      cr.data_type, cr.ordinal
+                      cr.data_type, cr.ordinal, cr.scale_factor
                FROM data_table_registry dtr
                JOIN column_registry cr ON cr.model_id = dtr.model_id
                    AND cr.data_type_key = dtr.data_type_key
@@ -319,6 +341,7 @@ def get_model_columns(model_id: int):
                 'unit': row['unit'] or '',
                 'data_type': row['data_type'],
                 'ordinal': row['ordinal'],
+                'scale_factor': row['scale_factor'] if row['scale_factor'] is not None else 1.0,
             })
 
         return {"data_types": list(groups.values())}
@@ -337,8 +360,8 @@ def update_model_column(
 
     Updates both the column_registry in SQLite and the config JSON on disk.
     """
-    if req is None or (req.display_label is None and req.unit is None):
-        raise HTTPException(400, "At least one of display_label or unit must be provided")
+    if req is None or (req.display_label is None and req.unit is None and req.scale_factor is None):
+        raise HTTPException(400, "At least one of display_label, unit, or scale_factor must be provided")
 
     conn = get_db()
     try:
@@ -346,6 +369,7 @@ def update_model_column(
             conn, model_id, data_type_key, column_name,
             display_label=req.display_label,
             unit=req.unit,
+            scale_factor=req.scale_factor,
         )
         return result
     except ValueError as e:

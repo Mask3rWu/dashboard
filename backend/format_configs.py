@@ -278,11 +278,12 @@ def delete_model_config(config_path):
 # ── Column metadata update ──
 
 def update_column_metadata(conn, model_id, data_type_key, column_name,
-                           display_label=None, unit=None):
-    """Update display_label and/or unit for a column.
+                           display_label=None, unit=None, scale_factor=None):
+    """Update display_label, unit, and/or scale_factor for a column.
 
     Writes to BOTH the config JSON on disk and the column_registry in SQLite.
-    Only display_label and unit are editable — the SQL column name never changes.
+    Only display_label, unit, and scale_factor are editable — the SQL column name
+    never changes.
 
     If the model doesn't have its own config_path yet (legacy data), a new
     model_{id}.json file is created automatically from the effective config.
@@ -294,15 +295,16 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
         column_name: SQL column name (internal identifier, not editable)
         display_label: new display label, or None to keep unchanged
         unit: new unit string, or None to keep unchanged
+        scale_factor: new scale factor, or None to keep unchanged
 
     Returns:
-        dict: {column_name, display_label, unit} with updated values
+        dict: {column_name, display_label, unit, scale_factor} with updated values
 
     Raises:
         ValueError: if model or column not found
     """
-    if display_label is None and unit is None:
-        raise ValueError("At least one of display_label or unit must be provided")
+    if display_label is None and unit is None and scale_factor is None:
+        raise ValueError("At least one of display_label, unit, or scale_factor must be provided")
 
     # Verify model exists
     model = conn.execute(
@@ -314,7 +316,7 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
 
     # Verify column exists in registry
     col_row = conn.execute(
-        """SELECT display_label, unit FROM column_registry
+        """SELECT display_label, unit, scale_factor FROM column_registry
            WHERE model_id=? AND data_type_key=? AND column_name=?""",
         (model_id, data_type_key, column_name)
     ).fetchone()
@@ -325,12 +327,13 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
 
     new_label = display_label if display_label is not None else col_row['display_label']
     new_unit = unit if unit is not None else col_row['unit']
+    new_scale = scale_factor if scale_factor is not None else (col_row['scale_factor'] or 1.0)
 
     # ── Update column_registry in SQLite ──
     conn.execute(
-        """UPDATE column_registry SET display_label=?, unit=?
+        """UPDATE column_registry SET display_label=?, unit=?, scale_factor=?
            WHERE model_id=? AND data_type_key=? AND column_name=?""",
-        (new_label, new_unit, model_id, data_type_key, column_name)
+        (new_label, new_unit, new_scale, model_id, data_type_key, column_name)
     )
 
     # ── Update config JSON on disk ──
@@ -368,19 +371,21 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
 
     target_col['label'] = new_label
     target_col['unit'] = new_unit
+    target_col['scale_factor'] = new_scale
 
     save_model_config(model_id, config)
 
     conn.commit()
     logger.info(
         f"Updated column {model_id}/{data_type_key}/{column_name}: "
-        f"label='{new_label}', unit='{new_unit}'"
+        f"label='{new_label}', unit='{new_unit}', scale_factor={new_scale}"
     )
 
     return {
         'column_name': column_name,
         'display_label': new_label,
         'unit': new_unit,
+        'scale_factor': new_scale,
     }
 
 
@@ -624,7 +629,7 @@ def generate_config_from_scan(source_path):
         'description': f'Auto-generated from {os.path.basename(source_path)}',
         'has_header': has_header_flag,
         'has_uav_send_id': has_uav,
-        'extract_serial_from_path': has_uav,  # heuristic: if UAVSendID, likely Format A style
+        'extract_serial_from_path': True,  # always extract from standardized dir hierarchy
         'has_aircraft_prefix': has_uav,
         'encoding': 'gbk',
         'data_types': data_types,
@@ -751,15 +756,17 @@ def register_model_tables(conn, model_id, format_category, config_path=None):
             ordinal = col.get('ordinal')
             is_numeric = 1 if col_type.upper() in ('REAL', 'INTEGER', 'FLOAT') else 0
 
+            scale_factor = col.get('scale_factor', 1.0)
+
             conn.execute(
                 """INSERT OR REPLACE INTO column_registry
                    (model_id, data_type_key, table_name, column_name,
-                    display_label, unit, data_type, ordinal, is_numeric)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    display_label, unit, data_type, ordinal, is_numeric, scale_factor)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     model_id, data_type_key, table_name, col['name'],
                     col['label'], col.get('unit', ''), col_type,
-                    ordinal, is_numeric,
+                    ordinal, is_numeric, scale_factor,
                 )
             )
 
@@ -791,7 +798,8 @@ def get_columns_for_model(conn, model_id):
 
     rows = conn.execute(
         """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
-                  cr.column_name, cr.display_label as col_label, cr.unit
+                  cr.column_name, cr.display_label as col_label, cr.unit,
+                  cr.scale_factor
            FROM data_table_registry dtr
            JOIN column_registry cr ON cr.model_id = dtr.model_id
                AND cr.data_type_key = dtr.data_type_key
@@ -813,6 +821,7 @@ def get_columns_for_model(conn, model_id):
             'key': f"{row['data_type_key']}.{row['column_name']}",
             'label': row['col_label'],
             'unit': row['unit'] or '',
+            'scale_factor': row['scale_factor'] if row['scale_factor'] is not None else 1.0,
         })
 
     return list(groups.values())
@@ -836,7 +845,8 @@ def get_columns_for_flight(conn, flight_id):
 
     rows = conn.execute(
         """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
-                  cr.column_name, cr.display_label as col_label, cr.unit
+                  cr.column_name, cr.display_label as col_label, cr.unit,
+                  cr.scale_factor
            FROM data_table_registry dtr
            JOIN column_registry cr ON cr.model_id = dtr.model_id
                AND cr.data_type_key = dtr.data_type_key
@@ -866,6 +876,7 @@ def get_columns_for_flight(conn, flight_id):
             'key': f"{row['data_type_key']}.{row['column_name']}",
             'label': row['col_label'],
             'unit': row['unit'] or '',
+            'scale_factor': row['scale_factor'] if row['scale_factor'] is not None else 1.0,
         })
 
     return list(groups.values())

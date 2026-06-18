@@ -288,6 +288,12 @@ def import_files_for_session(conn, flight_id, files_info, model_id):
 
 def _update_flight_meta(conn, flight_id, total_rows, format_config, model_id):
     """Update flight duration, times, and row count from imported data."""
+    # Fetch flight_date to build full datetime strings
+    flight = conn.execute(
+        "SELECT flight_date FROM flights WHERE id=?", (flight_id,)
+    ).fetchone()
+    flight_date = flight['flight_date'] if flight else None
+
     # Try gps data first for time range
     gps_table = data_table_name(model_id, 'gps')
     time_info = conn.execute(
@@ -299,9 +305,11 @@ def _update_flight_meta(conn, flight_id, total_rows, format_config, model_id):
 
     if time_info and time_info['end_sec'] is not None:
         duration = time_info['end_sec'] - time_info['start_sec']
+        start_dt = f"{flight_date} {time_info['start_str']}" if flight_date else time_info['start_str']
+        end_dt = f"{flight_date} {time_info['end_str']}" if flight_date else time_info['end_str']
         conn.execute(
             "UPDATE flights SET start_time=?, end_time=?, duration_sec=?, total_rows=? WHERE id=?",
-            (time_info['start_str'], time_info['end_str'], duration, total_rows, flight_id)
+            (start_dt, end_dt, duration, total_rows, flight_id)
         )
     else:
         # Try any available data type
@@ -315,9 +323,11 @@ def _update_flight_meta(conn, flight_id, total_rows, format_config, model_id):
             ).fetchone()
             if time_info and time_info['end_sec'] is not None:
                 duration = time_info['end_sec'] - time_info['start_sec']
+                start_dt = f"{flight_date} {time_info['start_str']}" if flight_date else time_info['start_str']
+                end_dt = f"{flight_date} {time_info['end_str']}" if flight_date else time_info['end_str']
                 conn.execute(
                     "UPDATE flights SET start_time=?, end_time=?, duration_sec=?, total_rows=? WHERE id=?",
-                    (time_info['start_str'], time_info['end_str'], duration, total_rows, flight_id)
+                    (start_dt, end_dt, duration, total_rows, flight_id)
                 )
                 break
         else:

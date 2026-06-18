@@ -55,15 +55,15 @@ def _resolve_table_col(conn, model_id, col_key):
 
 
 def _get_column_info(conn, model_id, dt_key, col_name):
-    """Get display label and unit for a column from the registry."""
+    """Get display label, unit, and scale_factor for a column from the registry."""
     row = conn.execute(
-        "SELECT display_label, unit FROM column_registry "
+        "SELECT display_label, unit, scale_factor FROM column_registry "
         "WHERE model_id=? AND data_type_key=? AND column_name=?",
         (model_id, dt_key, col_name)
     ).fetchone()
     if row:
-        return row['display_label'], row['unit'] or ''
-    return col_name, ''
+        return row['display_label'], row['unit'] or '', row['scale_factor'] or 1.0
+    return col_name, '', 1.0
 
 
 # ── Column listing ──
@@ -182,7 +182,7 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
         # Align to reference times
         for col in cols:
             full_key = f"{dt_key}.{col}"
-            label, unit = _get_column_info(conn, model_id, dt_key, col)
+            label, unit, scale_factor = _get_column_info(conn, model_id, dt_key, col)
             values = []
 
             ti = 0
@@ -200,6 +200,7 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
             series[full_key] = {
                 'label': label,
                 'unit': unit,
+                'scale_factor': scale_factor,
                 'table': table_name,
                 'values': values,
             }

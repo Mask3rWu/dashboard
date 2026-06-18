@@ -8,31 +8,31 @@
   "encoding": "gbk",
   "data_types": {
     "alert": {
-      "display_label": "告警",
+      "display_label": "飞行告警",
       "file_patterns": [
-        "24FlightAlertInfo"
+        "FlightAlertInfo"
       ],
       "is_alert": true,
       "columns": [
         {
           "name": "col_2",
-          "label": "列2",
+          "label": "型号",
           "unit": "",
-          "type": "REAL",
+          "type": "TEXT",
           "ordinal": 2
         },
         {
           "name": "col_3",
-          "label": "列3",
+          "label": "告警描述",
           "unit": "",
-          "type": "REAL",
+          "type": "TEXT",
           "ordinal": 3
         },
         {
           "name": "col_4",
-          "label": "列4",
+          "label": "附加数值",
           "unit": "",
-          "type": "REAL",
+          "type": "TEXT",
           "ordinal": 4
         }
       ]
@@ -1216,7 +1216,8 @@
           "label": "任务电压",
           "unit": "",
           "type": "REAL",
-          "ordinal": 5
+          "ordinal": 5,
+          "scale_factor": 1.0
         },
         {
           "name": "飞控电流_mA_",
@@ -1241,15 +1242,15 @@
         },
         {
           "name": "任务电流_mA_",
-          "label": "任务电流(mA)",
-          "unit": "",
+          "label": "任务电流",
+          "unit": "mA",
           "type": "REAL",
           "ordinal": 9
         },
         {
           "name": "机载12V电压_V_",
-          "label": "机载12V电压(V)",
-          "unit": "",
+          "label": "机载12V电压",
+          "unit": "V",
           "type": "REAL",
           "ordinal": 10
         },

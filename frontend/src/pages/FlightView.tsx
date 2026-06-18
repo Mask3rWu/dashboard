@@ -5,7 +5,7 @@ import {
   getFlight, getAlignedData, getAlerts, getStats, getCorrelation, getAnomaly,
   listPresets, createPreset, deletePreset,
   listFilterPresets, createFilterPreset, deleteFilterPreset,
-  updateFlight, deleteFlight,
+  updateFlight, deleteFlight, updateModelColumn,
   type Flight, type ColumnGroup,
   type AlignedData, type AlertItem, type FlightStats, type Preset,
   type FilterSpec, type FilterPreset,
@@ -68,6 +68,15 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
   const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
   const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
 
+  // Per-column scale factor: key -> multiplier (default 1.0)
+  const [scaleFactors, setScaleFactors] = useState<Record<string, number>>({});
+  const [hoveredCol, setHoveredCol] = useState<string | null>(null);
+  const [editingCol, setEditingCol] = useState<string | null>(null);
+  const [draftScale, setDraftScale] = useState<number>(1.0);
+  const editInputRef = useRef<HTMLInputElement>(null);
+  const skipBlurRef = useRef(false);
+  const persistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
   // ─── Flight management state ───────────────────────────
   const [flightSearch, setFlightSearch] = useState('');
   const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
@@ -101,6 +110,14 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       if (latestFlightRef.current !== selectedFlightId) return;
       setColumnGroups(flightData.columns);
       setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
+      // Initialize scale factors from column metadata
+      const sf: Record<string, number> = {};
+      flightData.columns.forEach((g: ColumnGroup) => {
+        g.columns.forEach((c: any) => {
+          sf[c.key] = c.scale_factor ?? 1.0;
+        });
+      });
+      setScaleFactors(sf);
       setAlerts(alertData.alerts);
       setStats(statsData);
       setPresets(presetData.presets);
@@ -151,25 +168,19 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       });
   }, [selectedFlightId, selectedColumns, refTable, filterSpec]);
 
-  // ─── Chart ─────────────────────────────────────────────
+  // ─── Chart: init once, update on data change ──────────────
+  // Init / dispose based on viewMode
   useEffect(() => {
-    if (viewMode !== 'chart') {
+    if (viewMode !== 'chart' || !chartRef.current) {
       if (chartInst.current) {
         try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
         chartInst.current = null;
       }
       return;
     }
-    if (!chartRef.current || !aligned) return;
-
-    // Guard: container must have dimensions for ECharts to init
     if (chartRef.current.clientWidth === 0 || chartRef.current.clientHeight === 0) return;
+    if (chartInst.current) return; // already initialized
 
-    // Dispose previous chart and create new one
-    if (chartInst.current) {
-      try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-      chartInst.current = null;
-    }
     try {
       chartInst.current = echarts.init(chartRef.current);
     } catch (e) {
@@ -177,17 +188,36 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       return;
     }
 
+    const handleResize = () => {
+      try { chartInst.current?.resize(); } catch (e) { /* ignore */ }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (chartInst.current) {
+        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
+        chartInst.current = null;
+      }
+    };
+  }, [viewMode]);
+
+  // Update chart options when data or scale changes
+  useEffect(() => {
+    if (!chartInst.current || !aligned || viewMode !== 'chart') return;
+
     const times = aligned.times || [];
     const seriesList = Object.entries(aligned.series || {});
 
-    const getValues = (vals: (number | null)[]) => {
-      if (!normalize) return vals;
-      const nums = vals.filter((v) => v !== null) as number[];
-      if (nums.length === 0) return vals;
+    const getValues = (vals: (number | null)[], key: string) => {
+      const sf = scaleFactors[key] ?? 1.0;
+      const scaled = vals.map((v) => (v !== null ? v * sf : null));
+      if (!normalize) return scaled;
+      const nums = scaled.filter((v) => v !== null) as number[];
+      if (nums.length === 0) return scaled;
       const min = Math.min(...nums);
       const max = Math.max(...nums);
       const range = max - min || 1;
-      return vals.map((v) => (v !== null ? (v - min) / range : null));
+      return scaled.map((v) => (v !== null ? (v - min) / range : null));
     };
 
     const colors = ['#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#7c3aed', '#0891b2', '#db2777', '#ea580c'];
@@ -283,7 +313,16 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
           let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
           mainParams.forEach((p: any) => {
             if (p.value?.[1] != null) {
-              html += `<div>${p.marker} ${p.seriesName}: <strong>${Number(p.value[1]).toFixed(2)}</strong></div>`;
+              const sIdx = p.seriesIndex;
+              const key = seriesList[sIdx]?.[0] || '';
+              const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
+              const displayVal = Number(p.value[1]).toFixed(2);
+              html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
+              if (sf !== 1.0) {
+                const rawVal = (Number(p.value[1]) / sf).toFixed(3);
+                html += ` <span style="color:#9ca3af;font-size:10px">(原始: ${rawVal}×${sf})</span>`;
+              }
+              html += `</div>`;
             }
           });
           return html;
@@ -328,8 +367,8 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
       ],
       series: [
         // ── Line series ──
-        ...seriesList.map(([, s], i) => {
-          const values = getValues(s.values);
+        ...seriesList.map(([key, s], i) => {
+          const values = getValues(s.values, key);
           return {
             name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
             type: 'line',
@@ -387,19 +426,7 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
     } catch (e) {
       console.error('ECharts setOption failed:', e);
     }
-
-    const handleResize = () => {
-      try { chartInst.current?.resize(); } catch (e) { /* ignore */ }
-    };
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      if (chartInst.current) {
-        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-        chartInst.current = null;
-      }
-    };
-  }, [aligned, normalize, viewMode]);
+  }, [aligned, normalize, scaleFactors]);
 
   // Resize chart when sidebar toggles
   useEffect(() => {
@@ -414,6 +441,26 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
     setSelectedColumns((prev) =>
       prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
     );
+  };
+
+  // ─── Scale factor persistence (debounced) ──────────────────
+  const handleScaleChange = (key: string, value: number) => {
+    const safeVal = isNaN(value) || value === 0 ? 1.0 : value;
+    setScaleFactors((prev) => ({ ...prev, [key]: safeVal }));
+
+    // Debounced persist to backend
+    const timerKey = `sf_${key}`;
+    if (persistTimers.current[timerKey]) {
+      clearTimeout(persistTimers.current[timerKey]);
+    }
+    persistTimers.current[timerKey] = setTimeout(() => {
+      if (currentModelId == null) return;
+      const dotIdx = key.indexOf('.');
+      if (dotIdx <= 0) return;
+      const dtKey = key.slice(0, dotIdx);
+      const colName = key.slice(dotIdx + 1);
+      updateModelColumn(currentModelId, dtKey, colName, { scale_factor: safeVal }).catch(() => {});
+    }, 300);
   };
 
   const toggleGroup = (group: ColumnGroup) => {
@@ -580,12 +627,14 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
               autoFocus
             />
             <button
+              type="button"
               onClick={() => handleRename(editingFlightId)}
               className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-500"
             >
               保存
             </button>
             <button
+              type="button"
               onClick={() => setEditingFlightId(null)}
               className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
             >
@@ -599,12 +648,14 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
           <div className="flex items-center gap-1">
             <span className="text-xs text-gray-500">确认删除?</span>
             <button
+              type="button"
               onClick={() => handleDeleteFlight(deletingFlightId)}
               className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500"
             >
               是
             </button>
             <button
+              type="button"
               onClick={() => setDeletingFlightId(null)}
               className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
             >
@@ -780,21 +831,126 @@ export default function FlightView({ flights, selectedFlightId, onSelectFlight, 
                     {/* Group columns */}
                     {!isCollapsed && (
                       <div className="px-2 py-1 space-y-0.5 border-t border-gray-100">
-                        {group.columns.map((col) => (
-                          <label
+                        {group.columns.map((col) => {
+                          const scale = scaleFactors[col.key] ?? 1.0;
+                          const isEditing = editingCol === col.key;
+                          const isHovered = hoveredCol === col.key;
+                          const hasScale = scale !== 1.0;
+
+                          // Show input when: actively editing, OR hovered (with no scale), OR scale is set
+                          const showInput = isEditing || (isHovered && !hasScale) || hasScale;
+                          // Show badge when: scale is set AND not currently editing
+                          const showBadge = hasScale && !isEditing;
+
+                          const startEdit = () => {
+                            setDraftScale(scale);
+                            setEditingCol(col.key);
+                            setTimeout(() => editInputRef.current?.select(), 0);
+                          };
+                          const commitEdit = (value: number) => {
+                            handleScaleChange(col.key, value);
+                            setEditingCol(null);
+                            skipBlurRef.current = true;
+                          };
+                          const cancelEdit = () => {
+                            setEditingCol(null);
+                            skipBlurRef.current = true;
+                          };
+
+                          return (
+                          <div
                             key={col.key}
+                            onMouseEnter={() => setHoveredCol(col.key)}
+                            onMouseLeave={() => { setHoveredCol(null); }}
+                            onClick={() => toggleColumn(col.key)}
                             className="flex items-center gap-1.5 px-1 py-0.5 rounded hover:bg-blue-50 cursor-pointer text-xs"
                           >
                             <input
                               type="checkbox"
                               checked={selectedColumns.includes(col.key)}
                               onChange={() => toggleColumn(col.key)}
-                              className="rounded w-3 h-3 accent-blue-600"
+                              onClick={(e) => e.stopPropagation()}
+                              className="rounded w-3 h-3 accent-blue-600 shrink-0"
                             />
                             <span className="text-gray-600 truncate flex-1">{col.label}</span>
-                            {col.unit && <span className="text-gray-400 text-[10px]">{col.unit}</span>}
-                          </label>
-                        ))}
+
+                            {/* Scale input — isolated from parent onClick */}
+                            {showInput && (
+                              <span className="flex items-center gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                {/* × button — resets to 1.0 in either mode */}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (isEditing) {
+                                      commitEdit(1.0);
+                                    } else {
+                                      handleScaleChange(col.key, 1.0);
+                                    }
+                                  }}
+                                  className="text-gray-400 hover:text-red-500 text-[10px] leading-none w-3.5 h-3.5 flex items-center justify-center rounded hover:bg-red-50"
+                                  title="重置缩放系数为 1"
+                                >
+                                  ×
+                                </button>
+                                <input
+                                  type="number"
+                                  step="any"
+                                  ref={isEditing ? editInputRef : undefined}
+                                  value={isEditing ? (draftScale || '') : scale}
+                                  onChange={(e) => {
+                                    if (isEditing) {
+                                      const v = parseFloat(e.target.value);
+                                      if (!isNaN(v)) setDraftScale(v);
+                                    }
+                                  }}
+                                  onFocus={() => { if (!isEditing) startEdit(); }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      commitEdit(isNaN(draftScale) || draftScale === 0 ? 1.0 : draftScale);
+                                    }
+                                    if (e.key === 'Escape') cancelEdit();
+                                  }}
+                                  onBlur={() => {
+                                    setTimeout(() => {
+                                      if (skipBlurRef.current) {
+                                        skipBlurRef.current = false;
+                                        return;
+                                      }
+                                      if (editingCol === col.key) {
+                                        handleScaleChange(col.key, isNaN(draftScale) || draftScale === 0 ? 1.0 : draftScale);
+                                        setEditingCol(null);
+                                      }
+                                    }, 0);
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="w-10 px-0.5 py-px border border-gray-300 rounded text-[10px] text-center focus:outline-none focus:border-blue-400"
+                                />
+                              </span>
+                            )}
+
+                            {/* Badge: click to edit */}
+                            {showBadge && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startEdit();
+                                }}
+                                className="text-blue-600 text-[10px] font-medium bg-blue-50 hover:bg-blue-100 px-1 rounded shrink-0"
+                                title="点击编辑缩放系数"
+                              >
+                                ×{Number(scale.toFixed(2))}
+                              </button>
+                            )}
+
+                            {!showInput && col.unit && (
+                              <span className="text-gray-400 text-[10px] shrink-0">{col.unit}</span>
+                            )}
+                          </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

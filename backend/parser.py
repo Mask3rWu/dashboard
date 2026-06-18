@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 from backend.scanner import (
     detect_encoding, has_header, parse_lines, time_to_sec,
     scan_folder, scan_folder_sessions, parse_session_key,
+    _validate_source_path,
 )
 
 # Re-export config helpers
@@ -25,6 +26,25 @@ from backend.format_configs import (
 from backend.importer import (
     import_data_type, import_alerts, import_files_for_session,
 )
+
+
+def _extract_flight_date(source_path):
+    """Extract flight date from directory hierarchy.
+
+    Walks up from source_path to find the first directory whose name
+    starts with an 8-digit YYYYMMDD prefix. Returns 'YYYY-MM-DD' or None.
+    """
+    path = os.path.normpath(source_path)
+    while True:
+        dirname = os.path.basename(path)
+        if len(dirname) >= 8 and dirname[:8].isdigit():
+            ds = dirname[:8]
+            return f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return None
 
 
 def import_session(source_path, aircraft_id, session_key):
@@ -42,6 +62,12 @@ def import_session(source_path, aircraft_id, session_key):
 
     # Normalize path for cross-platform consistency (matches scanner.py:449)
     source_path = os.path.normpath(source_path)
+
+    # Validate directory structure
+    path_error = _validate_source_path(source_path)
+    if path_error:
+        conn.close()
+        return {'error': path_error}
 
     # Resolve aircraft → model → format
     aircraft = conn.execute(
@@ -121,25 +147,9 @@ def import_session(source_path, aircraft_id, session_key):
         conn.close()
         return {'error': f'Flight already exists for session {session_key}'}
 
-    # Determine flight_date from folder name or session key
-    flight_date = None
-    # Try session key first (HHMMSS)
-    if len(session_key) >= 6 and session_key[:6].isdigit():
-        # Need full date from context
-        pass
-
-    # Try folder name (8-digit date)
-    raw_name = os.path.basename(source_path.rstrip('/\\'))
-    if len(raw_name) >= 8:
-        ds = raw_name[:8]
-        if ds.isdigit():
-            flight_date = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
-
-    # Also check parent dir for date (Format B: version/date/ParserData)
-    if not flight_date:
-        parent = os.path.basename(os.path.dirname(source_path.rstrip('/\\')))
-        if len(parent) == 8 and parent.isdigit():
-            flight_date = f"{parent[:4]}-{parent[4:6]}-{parent[6:8]}"
+    # Determine flight_date from directory hierarchy
+    # Standard: first-level dir starts with YYYYMMDD (8-digit date prefix)
+    flight_date = _extract_flight_date(source_path)
 
     # Flight name: use session_key by default (can be renamed by user later)
     flight_name = session_key if session_key else folder_name

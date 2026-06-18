@@ -19,6 +19,8 @@ export interface AircraftModel {
   description: string;
   created_at: string;
   aircraft_count?: number;
+  total_flights?: number;
+  total_flight_hours?: number;
 }
 
 export interface Aircraft {
@@ -101,6 +103,7 @@ export interface ColumnItem {
   key: string;
   label: string;
   unit: string;
+  scale_factor: number;
 }
 
 export interface AlignedData {
@@ -109,6 +112,7 @@ export interface AlignedData {
   series: Record<string, {
     label: string;
     unit: string;
+    scale_factor: number;
     table: string;
     values: (number | null)[];
   }>;
@@ -172,6 +176,7 @@ export interface ColumnDetail {
   column_name: string;
   display_label: string;
   unit: string;
+  scale_factor: number;
   data_type: string;
   ordinal: number;
 }
@@ -201,9 +206,9 @@ export const updateModelColumn = (
   modelId: number,
   dataTypeKey: string,
   columnName: string,
-  updates: { display_label?: string; unit?: string }
+  updates: { display_label?: string; unit?: string; scale_factor?: number }
 ) =>
-  request<{ column_name: string; display_label: string; unit: string }>(
+  request<{ column_name: string; display_label: string; unit: string; scale_factor: number }>(
     `/models/${modelId}/columns?data_type_key=${encodeURIComponent(dataTypeKey)}&column_name=${encodeURIComponent(columnName)}`,
     { method: 'PATCH', body: JSON.stringify(updates) }
   );
@@ -235,6 +240,9 @@ export const importSession = (sourcePath: string, aircraftId: number, sessionKey
 // Folder browser
 export const browseFolder = () =>
   request<{ path: string; cancelled?: boolean }>('/folders/browse');
+
+export const listSubdirs = (path: string) =>
+  request<{ path: string; subdirs: string[] }>(`/folders/subdirs?path=${encodeURIComponent(path)}`);
 
 // Column Registry
 export const getRegistryColumns = (modelId: number) =>
