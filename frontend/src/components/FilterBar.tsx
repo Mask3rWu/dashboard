@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FilterCondition, FilterSpec, FilterPreset, ColumnGroup } from '../api';
 
 interface Props {
@@ -35,58 +35,61 @@ export default function FilterBar({
   );
   const presetNameRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const suppressEmitRef = useRef(false);
 
   // Sync from parent when filterSpec changes externally (e.g. preset loaded)
   useEffect(() => {
     if (filterSpec) {
+      suppressEmitRef.current = true;
       setLogic(filterSpec.logic);
       setConditions(filterSpec.conditions.length ? filterSpec.conditions : []);
     }
-  }, [filterSpec?.logic, filterSpec?.conditions?.length]);
+  }, [filterSpec?.logic, filterSpec?.conditions]); // fix: use array ref, not .length
 
   // Build flat lookup: key → {label, unit}
   const colMap = new Map<string, { label: string; unit: string }>();
   columnGroups.forEach((g) => g.columns.forEach((c) => colMap.set(c.key, { label: c.label, unit: c.unit })));
 
-  // Build and emit valid conditions
-  const emit = useCallback((conds: FilterCondition[], lg: 'and' | 'or') => {
+  // Emit valid conditions when state changes (replaces side effects in state updaters)
+  useEffect(() => {
+    if (suppressEmitRef.current) {
+      suppressEmitRef.current = false;
+      return;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      const valid = conds.filter((c) => {
+      const valid = conditions.filter((c) => {
         if (!c.column) return false;
         if (c.op === 'between') return c.min_val != null && c.max_val != null;
         return c.value != null;
       });
       if (valid.length === 0) {
-        onChange(null);
+        onChangeRef.current(null);
       } else {
-        onChange({ logic: lg, conditions: valid });
+        onChangeRef.current({ logic, conditions: valid });
       }
     }, 400);
-  }, [onChange]);
+  }, [conditions, logic]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const updateCond = (i: number, patch: Partial<FilterCondition>) => {
-    setConditions((prev) => {
-      const next = prev.map((c, j) => (j === i ? { ...c, ...patch } : c));
-      emit(next, logic);
-      return next;
-    });
+    setConditions((prev) => prev.map((c, j) => (j === i ? { ...c, ...patch } : c)));
   };
 
   const removeCond = (i: number) => {
-    setConditions((prev) => {
-      const next = prev.filter((_, j) => j !== i);
-      emit(next, logic);
-      return next;
-    });
+    setConditions((prev) => prev.filter((_, j) => j !== i));
   };
 
   const addCond = () => {
-    setConditions((prev) => {
-      const next = [...prev, emptyCond()];
-      emit(next, logic);
-      return next;
-    });
+    setConditions((prev) => [...prev, emptyCond()]);
     setExpanded(true);
   };
 
@@ -154,13 +157,13 @@ export default function FilterBar({
             {/* Logic toggle */}
             <div className="flex text-xs">
               <button
-                onClick={() => { setLogic('and'); emit(conditions, 'and'); }}
+                onClick={() => setLogic('and')}
                 className={`px-2 py-0.5 rounded-l border ${logic === 'and' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
               >
                 AND（且）
               </button>
               <button
-                onClick={() => { setLogic('or'); emit(conditions, 'or'); }}
+                onClick={() => setLogic('or')}
                 className={`px-2 py-0.5 rounded-r border-t border-b border-r ${logic === 'or' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
               >
                 OR（或）
