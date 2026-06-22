@@ -1,6 +1,6 @@
 @echo off
 echo ========================================
-echo   CR500A Flight Analyzer - Build ^& Run
+echo   Flight Analyzer - Build ^& Run
 echo ========================================
 echo.
 

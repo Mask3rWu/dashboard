@@ -9,7 +9,6 @@ __pycache__/
 venv/
 
 # PyInstaller
-*.spec
 build/
 dist/
 

@@ -1,7 +1,7 @@
 Set-Location $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  CR500A Flight Analyzer - Build & Run" -ForegroundColor Cyan
+Write-Host "  Flight Analyzer - Build & Run" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

@@ -20,7 +20,7 @@ dashboard/
 │   ├── src/             # React 源码
 │   ├── dist/            # Vite 构建产物（打包时嵌入）
 │   └── package.json
-├── CR500A_FlightAnalyzer.spec  # PyInstaller 打包配置
+├── FlightAnalyzer.spec  # PyInstaller 打包配置
 └── requirements.txt     # 最小依赖
 ```
 
@@ -69,9 +69,9 @@ npm run build
 
 # 2. 使用 .venv 中的 Python 打包（确保 .venv 已安装所有依赖）
 cd ..
-.venv/Scripts/pyinstaller CR500A_FlightAnalyzer.spec
+.venv/Scripts/pyinstaller FlightAnalyzer.spec
 
-# 输出：dist/CR500A_FlightAnalyzer.exe
+# 输出：dist/FlightAnalyzer.exe
 ```
 
 ### 打包修复：frozen 环境 uvicorn 日志崩溃
