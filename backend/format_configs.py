@@ -356,50 +356,27 @@ def _detect_has_header(source_path, sample_patterns):
 def _detect_has_uav_send_id(source_path, sample_patterns, has_header_flag):
     """Detect if data files have a UAVSendID column.
 
-    Strategy:
-      - If headers exist: ONLY check header names for UAV/droneid keywords.
-        Do NOT fallback to data-value checks — a numeric second column
-        (e.g. GPS velocity = 0) is NOT a UAV ID.
-      - If no headers: check whether the second data token is a pure integer
-        (not a float/decimal) AND is reasonably small (<= 65535), which is
-        consistent with a UAV ID rather than a sensor reading.
+    Only checks when headers are present — looks at the second header column
+    name for 'uav' or 'droneid' keywords.  Without headers there is no
+    reliable way to tell a UAV ID from a sensor reading (a single-line
+    heuristic like "second token is a small integer" causes false positives
+    on stationary data where PosN/Roll/GPSVel are zero), so we default to
+    False.
     """
+    if not has_header_flag:
+        return False
+
     for entry in sample_patterns[:5]:
         _name, filepath = entry[0], entry[1]
-
-        # If headers exist, ONLY trust header names
-        if has_header_flag:
-            try:
-                from backend.scanner import parse_lines
-                lines = parse_lines(filepath)
-                if lines:
-                    header_tokens = lines[0].split()
-                    if len(header_tokens) >= 2:
-                        second_header = header_tokens[1].lower()
-                        if 'uav' in second_header or 'droneid' in second_header:
-                            return True
-                # No fallback — if header doesn't say UAV, there is no UAV column
-            except Exception:
-                pass
-            continue
-
-        # No headers: check if second data token is a small pure integer (UAV ID)
         try:
             from backend.scanner import parse_lines
             lines = parse_lines(filepath)
             if lines:
-                start = 1 if has_header_flag else 0
-                if start < len(lines):
-                    tokens = lines[start].split()
-                    if len(tokens) >= 2:
-                        v = tokens[1]
-                        if v.lower().startswith('uav') or v.lower().startswith('drone'):
-                            return True
-                        # Must be a pure integer (no decimal, no scientific notation)
-                        if v.lstrip('-').isdigit():
-                            val = int(v)
-                            if 0 <= val <= 65535:
-                                return True
+                header_tokens = lines[0].split()
+                if len(header_tokens) >= 2:
+                    second_header = header_tokens[1].lower()
+                    if 'uav' in second_header or 'droneid' in second_header:
+                        return True
         except Exception:
             pass
     return False
@@ -537,7 +514,7 @@ def generate_config_from_scan(source_path):
         'has_header': has_header_flag,
         'has_uav_send_id': has_uav,
         'extract_serial_from_path': True,  # always extract from standardized dir hierarchy
-        'has_aircraft_prefix': has_uav,
+        'has_aircraft_prefix': False,  # unused, kept for schema compatibility
         'encoding': 'gbk',
         'data_types': data_types,
     }

@@ -776,7 +776,6 @@ def delete_filter_preset(preset_id: int):
         return {"ok": True}
     finally:
         conn.close()
-    return {"ok": True}
 
 
 # ─── Serve Frontend ────────────────────────────────────────
