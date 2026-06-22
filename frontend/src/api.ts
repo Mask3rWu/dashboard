@@ -56,12 +56,14 @@ export interface Flight {
 export interface SessionPreview {
   aircraft_serial: string;
   session_key: string;
+  flight_date?: string | null;
   data_types: Record<string, number>;
   file_count: number;
   import_status: 'new' | 'imported';
   existing_flight_id?: number;
   existing_flight_name?: string;
   aircraft_id?: number;
+  conflicting_aircraft?: { aircraft_serial: string; flight_id: number; flight_name: string }[];
 }
 
 export interface ScanResult {

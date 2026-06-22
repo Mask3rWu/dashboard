@@ -138,7 +138,20 @@ def import_session(source_path, aircraft_id, session_key):
     session_key = canonical_key
     folder_name = os.path.basename(source_path.rstrip('/\\'))
 
-    # Reject if already imported
+    # Determine flight_date from directory hierarchy
+    flight_date = _extract_flight_date(source_path)
+
+    # Reject if already imported — check by aircraft + flight_date + session_key
+    if flight_date:
+        existing = conn.execute(
+            "SELECT id FROM flights WHERE aircraft_id=? AND flight_date=? AND session_key=?",
+            (aircraft_id, flight_date, session_key)
+        ).fetchone()
+        if existing:
+            conn.close()
+            return {'error': f'飞机已有日期 {flight_date} 的架次 {session_key}（flight #{existing["id"]}）'}
+
+    # Fallback: check by source_path (legacy data without flight_date)
     existing = conn.execute(
         "SELECT id FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
         (aircraft_id, source_path, session_key)
@@ -146,10 +159,6 @@ def import_session(source_path, aircraft_id, session_key):
     if existing:
         conn.close()
         return {'error': f'Flight already exists for session {session_key}'}
-
-    # Determine flight_date from directory hierarchy
-    # Standard: first-level dir starts with YYYYMMDD (8-digit date prefix)
-    flight_date = _extract_flight_date(source_path)
 
     # Flight name: use session_key by default (can be renamed by user later)
     flight_name = session_key if session_key else folder_name

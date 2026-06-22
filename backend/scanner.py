@@ -453,6 +453,25 @@ def _validate_source_path(source_path):
     return None
 
 
+def _extract_flight_date(source_path):
+    """Extract flight date from directory hierarchy.
+
+    Walks up from source_path to find the first directory whose name
+    starts with an 8-digit YYYYMMDD prefix. Returns 'YYYY-MM-DD' or None.
+    """
+    path = os.path.normpath(source_path)
+    while True:
+        dirname = os.path.basename(path)
+        if len(dirname) >= 8 and dirname[:8].isdigit():
+            ds = dirname[:8]
+            return f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return None
+
+
 def scan_folder_sessions(source_path, conn=None):
     """Scan, auto-detect format, resolve model (auto-create if new), and
     return session-grouped preview with import status.
@@ -532,50 +551,53 @@ def scan_folder_sessions(source_path, conn=None):
     }
 
     # Step 4 — check import status for each session
-    # Use normalized source_path matching to handle old data with unnormalized paths
-    norm_source = source_path  # already normalized at line 449
-    for sess in result['sessions']:
-        sess['import_status'] = 'new'
-        serial = sess['aircraft_serial']
+    # Duplicate boundary: aircraft + flight_date + session_key.
+    # A session is only a duplicate if the SAME aircraft already has this
+    # date+time combination. Different aircraft with same time = new flights.
+    flight_date = _extract_flight_date(source_path)
 
-        if serial:
-            ac = conn.execute(
-                """SELECT a.id, a.serial_number, am.name as model_name
-                   FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
-                   WHERE am.id=? AND a.serial_number=?""",
-                (model_info['model_id'], serial)
-            ).fetchone()
-            if ac:
-                existing = conn.execute(
-                    "SELECT id, name, source_path FROM flights WHERE aircraft_id=? AND session_key=?",
-                    (ac['id'], sess['session_key'])
-                ).fetchall()
-                # Filter by normalized path to handle normalization mismatches
-                existing = [r for r in existing if os.path.normpath(r['source_path']) == norm_source]
-                if existing:
-                    r = existing[0]
-                    sess['import_status'] = 'imported'
-                    sess['existing_flight_id'] = r['id']
-                    sess['existing_flight_name'] = r['name']
-                    sess['aircraft_id'] = ac['id']
-        else:
-            existing = conn.execute(
-                """SELECT f.id, f.name, f.source_path, f.aircraft_id, a.serial_number as aircraft_serial
-                   FROM flights f
-                   LEFT JOIN aircraft a ON a.id = f.aircraft_id
-                   WHERE f.session_key=?""",
-                (sess['session_key'],)
-            ).fetchall()
-            # Filter by normalized path to handle normalization mismatches
-            existing = [r for r in existing if os.path.normpath(r['source_path']) == norm_source]
-            if existing:
-                r = existing[0]
+    for sess in result['sessions']:
+        sess['flight_date'] = flight_date
+        sess['import_status'] = 'new'
+        auto_serial = sess['aircraft_serial']
+
+        if not flight_date:
+            continue
+
+        # Find ALL flights under this model with the same date+session_key
+        conflicts = conn.execute(
+            """SELECT f.id, f.name, a.serial_number
+               FROM flights f
+               JOIN aircraft a ON a.id = f.aircraft_id
+               WHERE a.model_id = ? AND f.flight_date = ? AND f.session_key = ?""",
+            (model_info['model_id'], flight_date, sess['session_key'])
+        ).fetchall()
+
+        if not conflicts:
+            continue
+
+        # Build conflict list for frontend to use in dynamic status check
+        sess['conflicting_aircraft'] = [
+            {'aircraft_serial': r['serial_number'],
+             'flight_id': r['id'],
+             'flight_name': r['name']}
+            for r in conflicts
+        ]
+
+        # If auto-detected serial matches one of the conflicting aircraft,
+        # mark as already imported
+        for r in conflicts:
+            if r['serial_number'] == auto_serial:
                 sess['import_status'] = 'imported'
                 sess['existing_flight_id'] = r['id']
                 sess['existing_flight_name'] = r['name']
-                sess['aircraft_id'] = r['aircraft_id']
-                if r['aircraft_serial']:
-                    sess['aircraft_serial'] = r['aircraft_serial']
+                sess['aircraft_id'] = conn.execute(
+                    "SELECT id FROM aircraft WHERE model_id=? AND serial_number=?",
+                    (model_info['model_id'], auto_serial)
+                ).fetchone()['id']
+                break
+        # Otherwise import_status stays 'new' — frontend will re-check
+        # when user switches aircraft, using the conflicting_aircraft list.
 
     if close_conn:
         conn.close()

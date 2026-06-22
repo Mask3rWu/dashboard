@@ -187,6 +187,32 @@ export default function ImportPage({ onImported }: Props) {
 
   function sessionKey(serial: string, skey: string) { return `${serial}__${skey}`; }
 
+  // ─── Dynamic duplicate status ──────────────────────────────
+  // Evaluates whether the session is a duplicate based on which
+  // aircraft the user currently has selected. A session is only
+  // "imported" if the SAME aircraft already has this date+time.
+
+  type EffectiveStatus = 'new' | 'imported' | 'conflict';
+
+  function getEffectiveStatus(session: SessionPreview, selectedAircraftSerial: string | null): EffectiveStatus {
+    // Backend already confirmed: auto-detected serial matches an imported flight
+    if (session.import_status === 'imported') return 'imported';
+
+    // No conflicts at all → clean new session
+    if (!session.conflicting_aircraft?.length) return 'new';
+
+    // Has conflicts: check if the user-selected aircraft is the conflicting one
+    if (selectedAircraftSerial) {
+      const match = session.conflicting_aircraft.find(
+        c => c.aircraft_serial === selectedAircraftSerial
+      );
+      if (match) return 'imported';  // same aircraft → duplicate
+    }
+
+    // Different aircraft (or no aircraft selected yet) → new, but warn about conflict
+    return 'conflict';
+  }
+
   // ─── Load context ────────────────────────────────────────
 
   const loadContext = async () => {
@@ -503,29 +529,39 @@ export default function ImportPage({ onImported }: Props) {
               {scanResult.sessions.map((session) => {
                 const key = sessionKey(session.aircraft_serial, session.session_key);
                 const isImporting = importingKeys.has(key);
-                const isImported = importedKeys.has(key) || (session.import_status === 'imported' && !importingKeys.has(key));
-                const errMsg = errorKeys[key];
                 const aid = getAircraftId(session);
+                const selectedSerial = aid
+                  ? (aircraftList.find(a => a.id === aid)?.serial_number ?? session.aircraft_serial)
+                  : session.aircraft_serial;
+                const effStatus = getEffectiveStatus(session, selectedSerial);
+                const isImported = importedKeys.has(key)
+                  || (effStatus === 'imported' && !importingKeys.has(key));
+                const isConflict = effStatus === 'conflict';
+                const errMsg = errorKeys[key];
+
+                // Card border based on effective status
+                const cardBorder = errMsg
+                  ? 'border-red-200 bg-red-50/30'
+                  : isImported
+                    ? 'border-green-200 bg-green-50/20'
+                    : isConflict
+                      ? 'border-amber-200 bg-amber-50/10'
+                      : 'border-gray-200';
 
                 return (
                   <div key={key}
-                    className={`bg-white rounded-lg p-4 border transition-colors ${
-                      errMsg ? 'border-red-200 bg-red-50/30' :
-                      isImported ? 'border-green-200 bg-green-50/20' : 'border-gray-200'
-                    }`}>
+                    className={`bg-white rounded-lg p-4 border transition-colors ${cardBorder}`}>
                     <div className="flex items-start justify-between gap-4">
                       <div className="space-y-2 min-w-0">
                         <div className="flex items-center gap-3 flex-wrap">
                           {/* Aircraft serial / assignment status */}
-                          {session.aircraft_serial ? (
-                            <span className={aid
-                              ? 'px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold border border-blue-200'
-                              : 'px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold border border-amber-200'}>
-                              {aid ? session.aircraft_serial : `${session.aircraft_serial}（将自动创建）`}
-                            </span>
-                          ) : aid ? (
+                          {aid ? (
                             <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold border border-blue-200">
-                              {aircraftList.find((a) => a.id === aid)?.serial_number || aid}
+                              {selectedSerial}
+                            </span>
+                          ) : session.aircraft_serial ? (
+                            <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold border border-amber-200">
+                              {session.aircraft_serial}（将自动创建）
                             </span>
                           ) : selectedModelId ? (
                             <span className="px-2 py-0.5 bg-red-50 text-red-500 rounded text-xs font-medium border border-red-200">
@@ -536,21 +572,32 @@ export default function ImportPage({ onImported }: Props) {
                               请先选择机型
                             </span>
                           )}
+                          {/* Session key + flight date */}
                           <span className="text-sm font-mono text-gray-700">{session.session_key || '(默认场次)'}</span>
+                          {session.flight_date && (
+                            <span className="text-xs text-gray-400">{session.flight_date}</span>
+                          )}
 
-                          {/* Aircraft assignment controls (shown when no aircraft assigned) */}
-                          {!aid && selectedModelId && (
+                          {/* Aircraft assignment controls (always shown when model selected) */}
+                          {selectedModelId && (
                             <div className="flex items-center gap-1">
                               <select
-                                value=""
+                                value={aid ?? ''}
                                 onChange={(e) => {
-                                  const aId = Number(e.target.value);
+                                  const aId = e.target.value ? Number(e.target.value) : null;
                                   if (aId) {
                                     setSessionAircraftMap((prev) => ({ ...prev, [key]: aId }));
-                                    setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
+                                  } else {
+                                    // Revert to auto-detected — remove manual assignment
+                                    setSessionAircraftMap((prev) => {
+                                      const n = { ...prev };
+                                      delete n[key];
+                                      return n;
+                                    });
                                   }
+                                  setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
                                 }}
-                                className="bg-white border border-gray-300 rounded px-2 py-0.5 text-xs"
+                                className="bg-white border border-gray-300 rounded px-1.5 py-0.5 text-xs"
                               >
                                 <option value="">选择已有飞机...</option>
                                 {aircraftList.map((a) => (
@@ -578,12 +625,22 @@ export default function ImportPage({ onImported }: Props) {
 
                           {isImporting && <span className="text-xs text-blue-500 animate-pulse">⏳ 导入中...</span>}
                           {isImported && !isImporting && <span className="text-xs text-green-600 font-medium">✓ 已导入</span>}
+                          {isConflict && !isImported && !isImporting && (
+                            <span className="text-xs text-amber-600 font-medium">⚠ 存在冲突</span>
+                          )}
                           {errMsg && <span className="text-xs text-red-500" title={errMsg}>✗ 失败</span>}
                           <span className="text-xs text-gray-400">{session.file_count} 个文件</span>
-                          {session.import_status === 'imported' && session.existing_flight_name && (
+                          {effStatus === 'imported' && session.existing_flight_name && (
                             <span className="text-[10px] text-gray-400">当前: {session.existing_flight_name}</span>
                           )}
                         </div>
+                        {/* Conflict warning — different aircraft already has this date+time */}
+                        {isConflict && session.conflicting_aircraft && (
+                          <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                            ⚠ 飞机「{session.conflicting_aircraft.map(c => c.aircraft_serial).join('、')}」已导入此日期+时间的飞行。
+                            如当前确认为不同飞机，可继续导入。
+                          </div>
+                        )}
                         {renderBadges(session.data_types)}
                         {errMsg && <p className="text-xs text-red-500">{errMsg}</p>}
                       </div>
@@ -591,7 +648,7 @@ export default function ImportPage({ onImported }: Props) {
                         {!isImported && !isImporting && (
                           <button onClick={() => handleImport(session)} disabled={!selectedModelId && !aid}
                             className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs font-medium"
-                            title={!selectedModelId && !aid ? '请先选择机型' : '导入'}>
+                            title={isConflict ? '该日期+时间已有其他飞机导入，如确认为不同飞机则可导入' : (!selectedModelId && !aid ? '请先选择机型' : '导入')}>
                             导入
                           </button>
                         )}
