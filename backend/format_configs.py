@@ -1,186 +1,205 @@
-"""Format config loader, dynamic table creation, and column registry management.
+"""Format config management — pure database-driven, no JSON files.
 
-Each aircraft model has its own format config JSON (1:1 relationship).
-Configs are stored as configs/model_{id}.json.
+Each aircraft model's configuration is stored in the SQLite database
+(aircraft_models + data_table_registry + column_registry tables).
 
-Legacy format configs (configs/format_A.json, etc.) are supported for backward
-compatibility — they are migrated to per-model configs during v3 migration.
+The ``build_model_config_from_db()`` function constructs a config dict
+from the database that is 100% compatible with the legacy JSON file format.
+All consumers (scanner, importer, parser) receive the same dict shape.
 """
 
-import os
-import sys
 import json
 import logging
-import shutil
+import os
+import re
 
 logger = logging.getLogger(__name__)
 
 
-# ── Config directory resolution ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Build config dict from database (replaces JSON file loading)
+# ══════════════════════════════════════════════════════════════════════════════
 
-def get_config_dir():
-    """Return the config directory path.
+def build_model_config_from_db(conn, model_id):
+    """Construct a format config dict from the database for a given model.
 
-    In frozen (PyInstaller) mode, uses %APPDATA%/FlightAnalyzer/configs/
-    so user edits persist across restarts.  In dev mode, uses the project
-    backend/configs/ directory.
-    """
-    if getattr(sys, 'frozen', False):
-        from backend.database import DATA_DIR
-        return os.path.join(DATA_DIR, 'configs')
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'configs')
-
-
-def _ensure_persistent_configs():
-    """Copy bundled config files to the persistent config directory on first launch.
-
-    Only runs in frozen (PyInstaller) mode.  Existing files in the persistent
-    directory are never overwritten — user edits are preserved.
-    """
-    if not getattr(sys, 'frozen', False):
-        return
-
-    dest_dir = get_config_dir()
-    os.makedirs(dest_dir, exist_ok=True)
-
-    # Bundled configs live at _MEIPASS/backend/configs/
-    bundled_dir = os.path.join(sys._MEIPASS, 'backend', 'configs')
-    if not os.path.isdir(bundled_dir):
-        return
-
-    for fname in os.listdir(bundled_dir):
-        if not fname.endswith('.json'):
-            continue
-        src = os.path.join(bundled_dir, fname)
-        dst = os.path.join(dest_dir, fname)
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            logger.info(f"Copied bundled config: {fname} → {dst}")
-
-
-# ── Config path helpers ──
-
-def model_config_path(model_id):
-    """Generate the config filename for a model: model_{id}.json"""
-    return f"model_{model_id}.json"
-
-
-def legacy_format_path(format_category):
-    """Generate legacy config filename: format_{cat}.json"""
-    return f"format_{format_category}.json"
-
-
-# ── Load functions ──
-
-def load_format_config(format_category):
-    """Load a format config by category string.
-
-    First tries configs/format_{cat}.json (legacy), then configs/model_{cat}.json
-    (if category happens to be a model name that matches a file).
-
-    Args:
-        format_category: e.g. 'A', 'B', 'C' (legacy) or a model name
-
-    Returns:
-        dict: The parsed format config
-
-    Raises:
-        FileNotFoundError: if no config file found
-    """
-    # Try legacy format_{cat}.json
-    legacy = os.path.join(get_config_dir(), legacy_format_path(format_category))
-    if os.path.exists(legacy):
-        with open(legacy, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-    # Try model_{cat}.json
-    model_file = os.path.join(get_config_dir(), f"model_{format_category}.json")
-    if os.path.exists(model_file):
-        with open(model_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-    raise FileNotFoundError(
-        f"Format config not found for '{format_category}': "
-        f"tried {legacy} and {model_file}"
-    )
-
-
-def load_format_config_by_model(conn, model_id):
-    """Load format config for a model by looking up config_path from DB.
+    The returned dict has the same structure as the legacy model_{id}.json files.
 
     Args:
         conn: SQLite connection
         model_id: aircraft_models.id
 
     Returns:
-        dict: The parsed format config, or None if not found
+        dict with keys: format, has_header, has_uav_send_id, encoding,
+                        extract_serial_from_path, has_aircraft_prefix,
+                        description, data_types
+        Returns None if model not found.
     """
-    row = conn.execute(
-        "SELECT config_path, format_category FROM aircraft_models WHERE id=?",
+    # ── Model-level settings ──
+    model = conn.execute(
+        """SELECT name, format_category, description,
+                  has_header, has_uav_send_id, encoding,
+                  extract_serial_from_path, has_aircraft_prefix
+           FROM aircraft_models WHERE id = ?""",
         (model_id,)
     ).fetchone()
-    if not row:
+    if not model:
         return None
 
-    # Try config_path first
-    if row['config_path']:
-        path = os.path.join(get_config_dir(), row['config_path'])
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        logger.warning(f"Config path not found: {path}, falling back to format_category")
+    config = {
+        'format': model['format_category'],
+        'description': model['description'] or '',
+        'has_header': bool(model['has_header']),
+        'has_uav_send_id': bool(model['has_uav_send_id']),
+        'encoding': model['encoding'] or 'utf-8',
+        'extract_serial_from_path': bool(model['extract_serial_from_path']),
+        'has_aircraft_prefix': bool(model['has_aircraft_prefix']),
+        'data_types': {},
+    }
 
-    # Fallback: load by format_category
-    return load_format_config(row['format_category'])
+    # ── Data types and columns ──
+    dtr_rows = conn.execute(
+        """SELECT data_type_key, display_label, file_patterns, is_alert
+           FROM data_table_registry
+           WHERE model_id = ?
+           ORDER BY data_type_key""",
+        (model_id,)
+    ).fetchall()
+
+    for dtr in dtr_rows:
+        dt_key = dtr['data_type_key']
+        try:
+            patterns = json.loads(dtr['file_patterns'] or '[]')
+        except (json.JSONDecodeError, TypeError):
+            patterns = []
+
+        data_type_def = {
+            'display_label': dtr['display_label'],
+            'file_patterns': patterns,
+            'is_alert': bool(dtr['is_alert']),
+            'columns': [],
+        }
+
+        # ── Columns for this data type ──
+        col_rows = conn.execute(
+            """SELECT column_name, display_label, unit, data_type, ordinal, scale_factor
+               FROM column_registry
+               WHERE model_id = ? AND data_type_key = ?
+               ORDER BY ordinal""",
+            (model_id, dt_key)
+        ).fetchall()
+
+        for cr in col_rows:
+            data_type_def['columns'].append({
+                'name': cr['column_name'],
+                'label': cr['display_label'],
+                'unit': cr['unit'] or '',
+                'type': cr['data_type'] or 'REAL',
+                'ordinal': cr['ordinal'],
+                'scale_factor': cr['scale_factor'] if cr['scale_factor'] is not None else 1.0,
+            })
+
+        config['data_types'][dt_key] = data_type_def
+
+    return config
 
 
-def load_format_config_from_path(config_path):
-    """Load a format config from a named path relative to get_config_dir()."""
-    path = os.path.join(get_config_dir(), config_path)
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+# ══════════════════════════════════════════════════════════════════════════════
+# Save config dict to database (replaces save_model_config JSON file write)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_model_config_to_db(conn, model_id, config):
+    """Write model-level and per-data-type config values to the database.
+
+    Column-level config is handled by ``register_model_tables()``.
+
+    Args:
+        conn: SQLite connection
+        model_id: aircraft_models.id
+        config: format config dict (as returned by generate_config_from_scan
+                or build_model_config_from_db)
+    """
+    # ── Model-level settings ──
+    conn.execute(
+        """UPDATE aircraft_models SET
+           has_header = ?, has_uav_send_id = ?, encoding = ?,
+           extract_serial_from_path = ?, has_aircraft_prefix = ?
+           WHERE id = ?""",
+        (
+            1 if config.get('has_header') else 0,
+            1 if config.get('has_uav_send_id') else 0,
+            config.get('encoding', 'utf-8'),
+            1 if config.get('extract_serial_from_path') else 0,
+            1 if config.get('has_aircraft_prefix') else 0,
+            model_id,
+        )
+    )
+
+    # ── Per-data-type settings ──
+    for dt_key, dt_def in config.get('data_types', {}).items():
+        patterns_json = json.dumps(
+            dt_def.get('file_patterns', []), ensure_ascii=False
+        )
+        is_alert = 1 if dt_def.get('is_alert') else 0
+        conn.execute(
+            """UPDATE data_table_registry SET
+               file_patterns = ?, is_alert = ?
+               WHERE model_id = ? AND data_type_key = ?""",
+            (patterns_json, is_alert, model_id, dt_key)
+        )
 
 
-def load_all_format_configs():
-    """Load all known format configs from configs/ directory.
+# ══════════════════════════════════════════════════════════════════════════════
+# Config load functions (API-compatible with legacy JSON-based versions)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_format_config_by_model(conn, model_id):
+    """Load format config for a model from the database.
+
+    Args:
+        conn: SQLite connection
+        model_id: aircraft_models.id
 
     Returns:
-        dict: {format_category: config_dict, ...}
+        dict: The format config, or None if model not found
     """
-    configs = {}
-    if not os.path.isdir(get_config_dir()):
-        return configs
-
-    for fname in os.listdir(get_config_dir()):
-        if not fname.endswith('.json'):
-            continue
-        path = os.path.join(get_config_dir(), fname)
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load config {fname}: {e}")
-            continue
-
-        # Determine key: format_A.json → 'A', model_1.json → config['format']
-        if fname.startswith('format_'):
-            # format_A.json → 'A' (takes priority over model files for same key)
-            key = fname.replace('format_', '').replace('.json', '')
-            configs[key] = config
-        elif fname.startswith('model_'):
-            # model_{id}.json — use the format field from the config
-            # Only add if no format_*.json exists for this key (format files take priority)
-            key = config.get('format', fname.replace('.json', ''))
-            if key not in configs:
-                configs[key] = config
-        else:
-            key = fname.replace('.json', '')
-            configs[key] = config
-
-    return configs
+    return build_model_config_from_db(conn, model_id)
 
 
-# ── Config comparison ──
+def load_format_config_from_db(conn, model_id):
+    """Alias for build_model_config_from_db — used when a config dict is
+    needed but no file path exists.
+
+    Args:
+        conn: SQLite connection
+        model_id: aircraft_models.id
+
+    Returns:
+        dict: The format config, or None if model not found
+    """
+    return build_model_config_from_db(conn, model_id)
+
+
+def load_all_model_configs_with_ids(conn):
+    """Load all existing model configs with their database IDs.
+
+    Returns:
+        list of (model_id, model_name, format_category, config_dict)
+    """
+    models = []
+    rows = conn.execute(
+        "SELECT id, name, format_category FROM aircraft_models"
+    ).fetchall()
+    for row in rows:
+        config = build_model_config_from_db(conn, row['id'])
+        if config:
+            models.append((row['id'], row['name'], row['format_category'], config))
+    return models
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Config comparison
+# ══════════════════════════════════════════════════════════════════════════════
 
 def compare_configs(generated, existing):
     """Compare an auto-generated config against an existing model config.
@@ -218,75 +237,15 @@ def compare_configs(generated, existing):
     return 0.60 * jaccard + 0.25 * structure_score + 0.15 * column_score
 
 
-def load_all_model_configs_with_ids(conn):
-    """Load all existing model configs with their database IDs.
-
-    Returns:
-        list of (model_id, model_name, format_category, config_dict)
-    """
-    models = []
-    rows = conn.execute(
-        "SELECT id, name, format_category, config_path FROM aircraft_models"
-    ).fetchall()
-    for row in rows:
-        try:
-            config = load_format_config_by_model(conn, row['id'])
-            if config:
-                models.append((row['id'], row['name'], row['format_category'], config))
-        except Exception:
-            pass
-    return models
-
-
-# ── Config CRUD ──
-
-def save_model_config(model_id, config_data):
-    """Write a format config JSON to configs/model_{model_id}.json.
-
-    Args:
-        model_id: aircraft_models.id
-        config_data: dict with format config structure
-
-    Returns:
-        str: relative config path (e.g. 'model_1.json')
-    """
-    rel_path = model_config_path(model_id)
-    full_path = os.path.join(get_config_dir(), rel_path)
-    with open(full_path, 'w', encoding='utf-8') as f:
-        json.dump(config_data, f, ensure_ascii=False, indent=2)
-    logger.info(f"Saved config: {full_path}")
-    return rel_path
-
-
-def delete_model_config(config_path):
-    """Delete a model's config file from disk.
-
-    Args:
-        config_path: relative path (e.g. 'model_1.json')
-    """
-    if not config_path:
-        return
-    full_path = os.path.join(get_config_dir(), config_path)
-    if os.path.exists(full_path):
-        try:
-            os.remove(full_path)
-            logger.info(f"Deleted config: {full_path}")
-        except Exception as e:
-            logger.warning(f"Failed to delete config {full_path}: {e}")
-
-
-# ── Column metadata update ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Column metadata update (database only — no JSON file sync)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def update_column_metadata(conn, model_id, data_type_key, column_name,
                            display_label=None, unit=None, scale_factor=None):
     """Update display_label, unit, and/or scale_factor for a column.
 
-    Writes to BOTH the config JSON on disk and the column_registry in SQLite.
-    Only display_label, unit, and scale_factor are editable — the SQL column name
-    never changes.
-
-    If the model doesn't have its own config_path yet (legacy data), a new
-    model_{id}.json file is created automatically from the effective config.
+    Writes ONLY to column_registry in SQLite.  No JSON file sync needed.
 
     Args:
         conn: SQLite connection
@@ -306,14 +265,6 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
     if display_label is None and unit is None and scale_factor is None:
         raise ValueError("At least one of display_label, unit, or scale_factor must be provided")
 
-    # Verify model exists
-    model = conn.execute(
-        "SELECT id, config_path, format_category FROM aircraft_models WHERE id=?",
-        (model_id,)
-    ).fetchone()
-    if not model:
-        raise ValueError(f"Model {model_id} not found")
-
     # Verify column exists in registry
     col_row = conn.execute(
         """SELECT display_label, unit, scale_factor FROM column_registry
@@ -329,51 +280,12 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
     new_unit = unit if unit is not None else col_row['unit']
     new_scale = scale_factor if scale_factor is not None else (col_row['scale_factor'] or 1.0)
 
-    # ── Update column_registry in SQLite ──
+    # Update column_registry only
     conn.execute(
         """UPDATE column_registry SET display_label=?, unit=?, scale_factor=?
            WHERE model_id=? AND data_type_key=? AND column_name=?""",
         (new_label, new_unit, new_scale, model_id, data_type_key, column_name)
     )
-
-    # ── Update config JSON on disk ──
-    # If the model doesn't have its own config_path, create one
-    config_path = model['config_path']
-    if not config_path:
-        config = load_format_config_by_model(conn, model_id)
-        if not config:
-            raise ValueError(f"Could not load config for model {model_id}")
-        config_path = save_model_config(model_id, config)
-        conn.execute(
-            "UPDATE aircraft_models SET config_path=? WHERE id=?",
-            (config_path, model_id)
-        )
-        logger.info(f"Auto-created per-model config: {config_path}")
-
-    config = load_format_config_by_model(conn, model_id)
-    if not config:
-        raise ValueError(f"Could not reload config for model {model_id}")
-
-    # Locate the column in the config
-    dt = config.get('data_types', {}).get(data_type_key)
-    if not dt:
-        raise ValueError(f"Data type '{data_type_key}' not found in config")
-
-    target_col = None
-    for col in dt.get('columns', []):
-        if col.get('name') == column_name:
-            target_col = col
-            break
-    if not target_col:
-        raise ValueError(
-            f"Column '{column_name}' not found in config for data type '{data_type_key}'"
-        )
-
-    target_col['label'] = new_label
-    target_col['unit'] = new_unit
-    target_col['scale_factor'] = new_scale
-
-    save_model_config(model_id, config)
 
     conn.commit()
     logger.info(
@@ -389,7 +301,9 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
     }
 
 
-# ── Auto-generate config from scan ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Auto-generate config from scan
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _discover_file_patterns(source_path):
     """Scan a folder and discover unique file type patterns.
@@ -405,26 +319,20 @@ def _discover_file_patterns(source_path):
             # Extract base pattern: "DroneStateData_114430.txt" → "DroneStateData"
             base = fname.rsplit('.txt', 1)[0]
             # Find the type marker — everything before the last underscore-separated timestamp
-            import re
             match = re.match(r'^(.+?)_(\d{4,})', base)
             pattern_name = match.group(1) if match else base
 
             if pattern_name not in patterns:
                 filepath = os.path.join(root, fname)
                 try:
-                    from backend.scanner import detect_encoding, has_header, parse_lines
+                    from backend.scanner import has_header, parse_lines
                     lines = parse_lines(filepath)
                     if lines:
                         hdr = has_header(filepath)
                         start = 1 if hdr else 0
                         if start < len(lines):
                             token_count = len(lines[start].split())
-                            # Read header names if available
-                            header_names = None
-                            if hdr:
-                                header_tokens = lines[0].split()
-                                # Skip 'Time' and optional 'UAVSendID' for data columns
-                                header_names = header_tokens
+                            header_names = lines[0].split() if hdr else None
                             patterns[pattern_name] = (pattern_name, filepath, token_count, header_names)
                 except Exception:
                     patterns[pattern_name] = (pattern_name, filepath, 0, None)
@@ -500,7 +408,6 @@ def _detect_has_uav_send_id(source_path, sample_patterns, has_header_flag):
 def _sanitize_column_name(name):
     """Sanitize a column name for SQL: only allow alphanumeric and underscore.
     Replaces non-alphanumeric chars with '_', strips leading digits."""
-    import re
     cleaned = re.sub(r'[^\w]', '_', name)
     cleaned = re.sub(r'_+', '_', cleaned)
     cleaned = re.sub(r'^(\d+)', r'c\1', cleaned)
@@ -508,7 +415,7 @@ def _sanitize_column_name(name):
 
 
 def generate_config_from_scan(source_path):
-    """Analyze a folder and generate a format config JSON from discovered file patterns.
+    """Analyze a folder and generate a format config dict from discovered file patterns.
 
     This is used when scanning an unknown format — the config is a best-effort
     auto-detection that the user can refine later.
@@ -638,7 +545,9 @@ def generate_config_from_scan(source_path):
     return config
 
 
-# ── Data type key helpers ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Data type key helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
 def get_data_type_key(filename, format_config):
     """Determine which data_type_key a filename matches.
@@ -649,7 +558,6 @@ def get_data_type_key(filename, format_config):
 
     Returns (data_type_key, config_entry) or (None, None).
     """
-    import re
     for tk, tdef in format_config['data_types'].items():
         for pattern in tdef.get('file_patterns', []):
             # Pattern must be a complete word: preceded by start-of-string or
@@ -659,14 +567,18 @@ def get_data_type_key(filename, format_config):
     return None, None
 
 
-# ── Table name helpers ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Table name helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
 def data_table_name(model_id, data_type_key):
     """Generate the per-model data table name."""
     return f"model_{model_id}_{data_type_key}_data"
 
 
-# ── Dynamic table creation ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Dynamic table creation
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _sql_type(col_type):
     """Map config type to SQLite type."""
@@ -710,24 +622,34 @@ def generate_index_sql(model_id, data_type_key):
     return f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name}(flight_id, time_sec)"
 
 
-# ── Column registry population ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Column registry and data table registration
+# ══════════════════════════════════════════════════════════════════════════════
 
-def register_model_tables(conn, model_id, format_category, config_path=None):
+def register_model_tables(conn, model_id, format_category, config=None):
     """Create all data tables and populate registry for a new model.
+
+    If a ``config`` dict is provided it is used directly; otherwise the
+    config is built from the database (build_model_config_from_db).
 
     Args:
         conn: SQLite connection
         model_id: aircraft_models.id
-        format_category: format category string (used as fallback when no config_path)
-        config_path: optional path to per-model config file
+        format_category: format category string (stored in model record)
+        config: optional format config dict (e.g. from generate_config_from_scan)
 
     Returns:
         int: Number of tables created
     """
-    if config_path:
-        config = load_format_config_from_path(config_path)
-    else:
-        config = load_format_config(format_category)
+    if config is None:
+        config = build_model_config_from_db(conn, model_id)
+
+    if config is None or not config.get('data_types'):
+        logger.warning(
+            f"No config data for model {model_id} — skipping table registration. "
+            f"Tables will be created when data is imported."
+        )
+        return 0
 
     count = 0
 
@@ -742,12 +664,19 @@ def register_model_tables(conn, model_id, format_category, config_path=None):
         index_sql = generate_index_sql(model_id, data_type_key)
         conn.execute(index_sql)
 
+        # Serialize file_patterns for storage
+        patterns_json = json.dumps(
+            tdef.get('file_patterns', []), ensure_ascii=False
+        )
+        is_alert = 1 if tdef.get('is_alert') else 0
+
         # Register in data_table_registry
         conn.execute(
             """INSERT OR REPLACE INTO data_table_registry
-               (model_id, data_type_key, table_name, display_label)
-               VALUES (?, ?, ?, ?)""",
-            (model_id, data_type_key, table_name, tdef['display_label'])
+               (model_id, data_type_key, table_name, display_label, file_patterns, is_alert)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (model_id, data_type_key, table_name,
+             tdef['display_label'], patterns_json, is_alert)
         )
 
         # Register each column in column_registry
@@ -755,7 +684,6 @@ def register_model_tables(conn, model_id, format_category, config_path=None):
             col_type = col.get('type', 'REAL')
             ordinal = col.get('ordinal')
             is_numeric = 1 if col_type.upper() in ('REAL', 'INTEGER', 'FLOAT') else 0
-
             scale_factor = col.get('scale_factor', 1.0)
 
             conn.execute(
@@ -777,7 +705,9 @@ def register_model_tables(conn, model_id, format_category, config_path=None):
     return count
 
 
-# ── Query helpers ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Query helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
 def get_table_name(conn, model_id, data_type_key):
     """Resolve data_type_key to actual table name for a model."""

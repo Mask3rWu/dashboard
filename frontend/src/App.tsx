@@ -3,7 +3,7 @@ import ImportPage from './pages/ImportPage';
 import FlightView from './pages/FlightView';
 import ComparePage from './pages/ComparePage';
 import ModelManager from './pages/ModelManager';
-import { listFlights, type Flight } from './api';
+import { listFlights, listModels, listAircraft, type Flight, type AircraftModel, type Aircraft } from './api';
 
 type Tab = 'import' | 'models' | 'flight' | 'compare';
 
@@ -46,26 +46,108 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [modelsVersion, setModelsVersion] = useState(0);
 
+  // ── Three-level selection: Model → Aircraft → Flight ──
+  const [models, setModels] = useState<AircraftModel[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
+  const [aircraft, setAircraft] = useState<Aircraft[]>([]);
+  const [selectedAircraftId, setSelectedAircraftId] = useState<number | null>(null);
+
   const loadFlights = async () => {
     try {
       const data = await listFlights();
       setFlights(data.flights);
-      if (data.flights.length > 0 && !selectedFlightId) {
-        setSelectedFlightId(data.flights[0].id);
-      }
     } catch (e) {
       console.error('Failed to load flights:', e);
-    } finally {
-      setLoading(false);
+    }
+  };
+
+  const loadModels = async () => {
+    try {
+      const data = await listModels();
+      setModels(data.models);
+      if (data.models.length > 0 && !selectedModelId) {
+        setSelectedModelId(data.models[0].id);
+      }
+    } catch (e) {
+      console.error('Failed to load models:', e);
+    }
+  };
+
+  const loadAircraftForModel = async (modelId: number) => {
+    try {
+      const data = await listAircraft(modelId);
+      setAircraft(data.aircraft);
+      if (data.aircraft.length > 0) {
+        setSelectedAircraftId(data.aircraft[0].id);
+      } else {
+        setSelectedAircraftId(null);
+      }
+    } catch (e) {
+      console.error('Failed to load aircraft:', e);
+      setAircraft([]);
+      setSelectedAircraftId(null);
     }
   };
 
   const onDataChanged = () => {
     loadFlights();
+    loadModels();
     setModelsVersion(v => v + 1);
   };
 
-  useEffect(() => { loadFlights(); }, []);
+  useEffect(() => {
+    const init = async () => {
+      const [modelsData, flightsData] = await Promise.all([listModels(), listFlights()]);
+      setModels(modelsData.models);
+      setFlights(flightsData.flights);
+      // Auto-select first model → first aircraft → first flight
+      if (modelsData.models.length > 0) {
+        const firstModelId = modelsData.models[0].id;
+        setSelectedModelId(firstModelId);
+        try {
+          const acData = await listAircraft(firstModelId);
+          setAircraft(acData.aircraft);
+          if (acData.aircraft.length > 0) {
+            const firstAcId = acData.aircraft[0].id;
+            setSelectedAircraftId(firstAcId);
+            const acFlights = flightsData.flights.filter(f => f.aircraft_id === firstAcId);
+            if (acFlights.length > 0) {
+              setSelectedFlightId(acFlights[0].id);
+            }
+          }
+        } catch { /* aircraft load failed, ignore */ }
+      }
+      setLoading(false);
+    };
+    init();
+  }, []);
+
+  // When model changes, load its aircraft
+  useEffect(() => {
+    if (selectedModelId) {
+      loadAircraftForModel(selectedModelId);
+    } else {
+      setAircraft([]);
+      setSelectedAircraftId(null);
+    }
+  }, [selectedModelId]);
+
+  // When aircraft changes, auto-select first flight under that aircraft
+  useEffect(() => {
+    const acFlights = selectedAircraftId
+      ? flights.filter(f => f.aircraft_id === selectedAircraftId)
+      : selectedModelId
+        ? flights.filter(f => f.model_id === selectedModelId)
+        : flights;
+    if (acFlights.length > 0) {
+      const currentInList = acFlights.some(f => f.id === selectedFlightId);
+      if (!currentInList) {
+        setSelectedFlightId(acFlights[0].id);
+      }
+    } else {
+      setSelectedFlightId(null);
+    }
+  }, [selectedAircraftId, selectedModelId, flights]);
 
   const navigateToFlight = (flightId: number) => {
     setSelectedFlightId(flightId);
@@ -126,12 +208,26 @@ export default function App() {
                   selectedFlightId={selectedFlightId}
                   onSelectFlight={setSelectedFlightId}
                   onFlightsChanged={onDataChanged}
+                  models={models}
+                  selectedModelId={selectedModelId}
+                  onSelectModel={setSelectedModelId}
+                  aircraft={aircraft}
+                  selectedAircraftId={selectedAircraftId}
+                  onSelectAircraft={setSelectedAircraftId}
                 />
               </ErrorBoundary>
             </div>
             <div className={tab === 'compare' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
               <ErrorBoundary>
-                <ComparePage flights={flights} />
+                <ComparePage
+                  flights={flights}
+                  models={models}
+                  selectedModelId={selectedModelId}
+                  onSelectModel={setSelectedModelId}
+                  aircraft={aircraft}
+                  selectedAircraftId={selectedAircraftId}
+                  onSelectAircraft={setSelectedAircraftId}
+                />
               </ErrorBoundary>
             </div>
             <div className={tab === 'models' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>

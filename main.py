@@ -26,10 +26,11 @@ if BASE_DIR not in sys.path:
 from backend.database import init_db, get_db
 from backend.parser import import_session
 from backend.format_configs import (
-    load_format_config, register_model_tables, get_columns_for_model,
+    register_model_tables, get_columns_for_model,
     get_columns_for_flight, get_table_name,
-    save_model_config, delete_model_config, generate_config_from_scan,
+    save_model_config_to_db, generate_config_from_scan,
     update_column_metadata,
+    build_model_config_from_db,
 )
 from backend.scanner import scan_folder_sessions
 from backend import analysis
@@ -226,15 +227,10 @@ def create_model_from_scan(req: CreateModelFromScanRequest):
         )
         model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        config_path = save_model_config(model_id, config_data)
-        conn.execute(
-            "UPDATE aircraft_models SET config_path=? WHERE id=?",
-            (config_path, model_id)
-        )
-        register_model_tables(conn, model_id, req.format_category, config_path=config_path)
+        save_model_config_to_db(conn, model_id, config_data)
+        register_model_tables(conn, model_id, req.format_category, config=config_data)
         conn.commit()
-        return {"id": model_id, "name": req.name, "format_category": req.format_category,
-                "config_path": config_path}
+        return {"id": model_id, "name": req.name, "format_category": req.format_category}
     except Exception as e:
         if 'UNIQUE' in str(e):
             raise HTTPException(400, f"Model name '{req.name}' already exists")
@@ -268,13 +264,9 @@ def delete_model(model_id: int):
     Also deletes the per-model format config file from disk."""
     conn = get_db()
     try:
-        row = conn.execute("SELECT id, config_path FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+        row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Model not found")
-
-        # Delete config file from disk
-        if row['config_path']:
-            delete_model_config(row['config_path'])
 
         # Get table names to drop (before cascade deletes registry rows)
         tables = conn.execute(

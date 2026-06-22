@@ -6,7 +6,7 @@ pattern matching and session key extraction via format config JSONs.
 
 import os
 import re
-from backend.format_configs import load_format_config, get_data_type_key
+from backend.format_configs import get_data_type_key
 
 ENCODINGS = ['gbk', 'gb2312', 'utf-8', 'latin-1']
 
@@ -179,7 +179,7 @@ def resolve_model_for_scan(conn, source_path):
     """
     from backend.format_configs import (
         generate_config_from_scan, load_all_model_configs_with_ids,
-        compare_configs, save_model_config, register_model_tables,
+        compare_configs, save_model_config_to_db, register_model_tables,
     )
 
     # Step 1 — auto-generate config from the folder
@@ -239,13 +239,8 @@ def resolve_model_for_scan(conn, source_path):
     model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     generated['format'] = fmt_cat
-    config_path = save_model_config(model_id, generated)
-    conn.execute(
-        "UPDATE aircraft_models SET config_path=? WHERE id=?",
-        (config_path, model_id),
-    )
-
-    register_model_tables(conn, model_id, fmt_cat, config_path=config_path)
+    save_model_config_to_db(conn, model_id, generated)
+    register_model_tables(conn, model_id, fmt_cat, config=generated)
     conn.commit()
 
     return {

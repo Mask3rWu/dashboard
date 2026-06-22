@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS aircraft_models (
     format_category TEXT NOT NULL CHECK(format_category != ''),
     config_path     TEXT DEFAULT '',
     description     TEXT DEFAULT '',
+    has_header      INTEGER DEFAULT 1,
+    has_uav_send_id INTEGER DEFAULT 0,
+    encoding        TEXT DEFAULT 'utf-8',
+    extract_serial_from_path INTEGER DEFAULT 0,
+    has_aircraft_prefix      INTEGER DEFAULT 0,
     created_at      TEXT DEFAULT (datetime('now','localtime'))
 );
 
@@ -71,6 +76,8 @@ CREATE TABLE IF NOT EXISTS data_table_registry (
     data_type_key   TEXT NOT NULL,
     table_name      TEXT NOT NULL,
     display_label   TEXT NOT NULL,
+    file_patterns   TEXT DEFAULT '[]',
+    is_alert        INTEGER DEFAULT 0,
     UNIQUE(model_id, data_type_key)
 );
 
@@ -137,11 +144,18 @@ def _is_migrated(conn):
 
 
 def _is_migrated_v3(conn):
-    """Check if v3 migration has been applied."""
+    """Check if v3 migration has been applied or table already has the v3 schema."""
+    # Check version tracking first
     rows = conn.execute(
         "SELECT version FROM schema_version WHERE version >= 3"
     ).fetchall()
-    return len(rows) > 0
+    if rows:
+        return True
+    # For fresh installs, the MANAGEMENT_SCHEMA already creates the table with
+    # config_path — check if the column exists in the current table.
+    info = conn.execute("PRAGMA table_info(aircraft_models)").fetchall()
+    col_names = {r['name'] for r in info}
+    return 'config_path' in col_names
 
 
 def _run_v2_migration(conn):
@@ -213,22 +227,51 @@ def _run_v6_migration(conn):
     run_migration(conn)
 
 
+def _is_migrated_v7(conn):
+    """Check if v7 migration has been applied."""
+    rows = conn.execute(
+        "SELECT version FROM schema_version WHERE version >= 7"
+    ).fetchall()
+    return len(rows) > 0
+
+
+def _run_v7_migration(conn):
+    """Run migration from v6 to v7 schema (JSON config → DB).
+
+    This is imported from backend.migrate_v7 at runtime to avoid circular imports.
+    """
+    from backend.migrate_v7 import run_migration
+    run_migration(conn)
+
+
 def init_db():
     """Create all management tables. Run migrations if needed.
 
     Data tables (model_N_*_data) are created dynamically when models
     are registered, not during init.
     """
-    # Ensure persistent config files exist (copied from _MEIPASS in frozen mode)
-    from backend.format_configs import _ensure_persistent_configs
-    _ensure_persistent_configs()
-
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=OFF")
 
     # Always create management tables
     conn.executescript(MANAGEMENT_SCHEMA)
+
+    # For fresh installs (no schema_version entries), mark all versions as applied
+    # since MANAGEMENT_SCHEMA already creates tables with the latest schema
+    existing = conn.execute(
+        "SELECT COUNT(*) as cnt FROM schema_version"
+    ).fetchone()
+    if existing['cnt'] == 0:
+        for v in range(1, 8):
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (v,)
+            )
+        logger.info("Fresh install detected — all schema versions marked as applied")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
+        conn.close()
+        return
 
     # Check if migration is needed
     if _has_old_schema(conn) and not _is_migrated(conn):
@@ -273,6 +316,15 @@ def init_db():
             _run_v6_migration(conn)
         except Exception as e:
             logger.error(f"v6 migration failed: {e}")
+            raise
+
+    # v7 migration: JSON config → DB
+    if not _is_migrated_v7(conn):
+        logger.info("v6 schema detected — running migration to v7 (JSON config → DB)")
+        try:
+            _run_v7_migration(conn)
+        except Exception as e:
+            logger.error(f"v7 migration failed: {e}")
             raise
 
     conn.execute("PRAGMA foreign_keys=ON")

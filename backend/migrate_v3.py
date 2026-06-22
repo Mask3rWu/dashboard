@@ -7,12 +7,19 @@ Migrates:
 """
 
 import os
+import sys
 import shutil
 import logging
 
-from backend.format_configs import CONFIG_DIR
-
 logger = logging.getLogger(__name__)
+
+
+def _get_config_dir():
+    """Resolve config directory (inline to avoid depending on format_configs)."""
+    if getattr(sys, 'frozen', False):
+        from backend.database import DATA_DIR
+        return os.path.join(DATA_DIR, 'configs')
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'configs')
 
 
 def run_migration(conn):
@@ -26,6 +33,8 @@ def run_migration(conn):
     """
     logger.info("Starting v2→v3 migration...")
     conn.execute("PRAGMA foreign_keys=OFF")
+
+    config_dir = _get_config_dir()
 
     # Step 1: Create new table with relaxed CHECK and config_path column
     conn.execute("""
@@ -48,9 +57,9 @@ def run_migration(conn):
         created_at = row['created_at'] if 'created_at' in row.keys() else None
 
         # Copy format config to per-model config
-        src = os.path.join(CONFIG_DIR, f"format_{fmt}.json")
+        src = os.path.join(config_dir, f"format_{fmt}.json")
         dst_name = f"model_{model_id}.json"
-        dst = os.path.join(CONFIG_DIR, dst_name)
+        dst = os.path.join(config_dir, dst_name)
         if os.path.exists(src) and not os.path.exists(dst):
             try:
                 shutil.copy2(src, dst)
