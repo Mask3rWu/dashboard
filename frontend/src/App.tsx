@@ -44,6 +44,7 @@ export default function App() {
   const [flights, setFlights] = useState<Flight[]>([]);
   const [selectedFlightId, setSelectedFlightId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
   const [modelsVersion, setModelsVersion] = useState(0);
 
   // ── Three-level selection: Model → Aircraft → Flight ──
@@ -95,8 +96,10 @@ export default function App() {
     setModelsVersion(v => v + 1);
   };
 
-  useEffect(() => {
-    const init = async () => {
+  const doInit = async () => {
+    setLoading(true);
+    setInitError(null);
+    try {
       const [modelsData, flightsData] = await Promise.all([listModels(), listFlights()]);
       setModels(modelsData.models);
       setFlights(flightsData.flights);
@@ -117,10 +120,15 @@ export default function App() {
           }
         } catch { /* aircraft load failed, ignore */ }
       }
+    } catch (err) {
+      console.error('Failed to initialize', err);
+      setInitError('无法连接到后端服务，请确认应用已启动');
+    } finally {
       setLoading(false);
-    };
-    init();
-  }, []);
+    }
+  };
+
+  useEffect(() => { doInit(); }, []);
 
   // When model changes, load its aircraft
   useEffect(() => {
@@ -189,6 +197,20 @@ export default function App() {
       <main className="flex-1 overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center h-full text-gray-400">加载中...</div>
+        ) : initError ? (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center max-w-md p-8">
+              <div className="text-red-500 text-4xl mb-4">⚠️</div>
+              <h2 className="text-lg font-bold text-gray-800 mb-2">连接失败</h2>
+              <p className="text-sm text-gray-500 mb-4">{initError}</p>
+              <button
+                onClick={doInit}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-500"
+              >
+                重试
+              </button>
+            </div>
+          </div>
         ) : (
           <>
             {/* Use visibility + absolute positioning for keep-alive instead of

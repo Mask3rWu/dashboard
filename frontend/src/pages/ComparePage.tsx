@@ -22,6 +22,7 @@ export default function ComparePage({
   const [columnGroups, setColumnGroups] = useState<ColumnGroup[]>([]);
   const [allColumns, setAllColumns] = useState<{ key: string; label: string; unit: string }[]>([]);
   const [flightSearch, setFlightSearch] = useState('');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
   const yZoomRef = useRef({ start: 0, end: 100 });
@@ -78,8 +79,13 @@ export default function ComparePage({
 
   const handleCompare = async () => {
     if (selectedFlights.length < 2 || !selectedColumn) return;
-    const data = await getCompare(selectedFlights, selectedColumn);
-    renderChart(data.series);
+    try {
+      const data = await getCompare(selectedFlights, selectedColumn);
+      renderChart(data.series);
+    } catch (err) {
+      console.error('Failed to compare flights', err);
+      setErrorMsg('对比分析失败，请重试');
+    }
   };
 
   const renderChart = (series: { name: string; times_sec: number[]; values: number[]; label: string; unit: string }[]) => {
@@ -219,6 +225,19 @@ export default function ComparePage({
   return (
     <div className="h-full flex flex-col p-6">
       <h2 className="text-lg font-semibold text-gray-900 mb-4">多飞行对比</h2>
+
+      {/* Error message banner */}
+      {errorMsg && (
+        <div className="flex items-center gap-2 px-4 py-2 mb-4 bg-red-50 border border-red-200 rounded text-red-700 text-xs">
+          <span>{errorMsg}</span>
+          <button
+            onClick={() => setErrorMsg(null)}
+            className="ml-auto text-red-400 hover:text-red-600 font-bold"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Tree selector: Model → Aircraft */}
       <div className="flex items-center gap-3 mb-3 relative" ref={treeRef}>

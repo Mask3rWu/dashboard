@@ -79,6 +79,7 @@ export default function FlightView({
   const [showMapLegend, setShowMapLegend] = useState(true);
   const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
   const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Per-column scale factor: key -> multiplier (default 1.0)
   const [scaleFactors, setScaleFactors] = useState<Record<string, number>>({});
@@ -629,31 +630,51 @@ export default function FlightView({
   const savePreset = async () => {
     const name = presetNameRef.current?.value?.trim();
     if (!name || selectedColumns.length === 0 || currentModelId == null) return;
-    await createPreset(currentModelId, name, selectedColumns);
-    const data = await listPresets(currentModelId);
-    setPresets(data.presets);
-    if (presetNameRef.current) presetNameRef.current.value = '';
+    try {
+      await createPreset(currentModelId, name, selectedColumns);
+      const data = await listPresets(currentModelId);
+      setPresets(data.presets);
+      if (presetNameRef.current) presetNameRef.current.value = '';
+    } catch (err) {
+      console.error('Failed to save preset', err);
+      setErrorMsg('保存预设失败，请重试');
+    }
   };
 
   const loadPreset = (p: Preset) => setSelectedColumns(p.columns);
   const removePreset = async (id: number) => {
-    await deletePreset(id);
-    setPresets((prev) => prev.filter((p) => p.id !== id));
+    try {
+      await deletePreset(id);
+      setPresets((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      console.error('Failed to delete preset', err);
+      setErrorMsg('删除预设失败，请重试');
+    }
   };
 
   // ─── Analysis actions ──────────────────────────────────
   const loadCorrelation = async () => {
     if (!selectedFlightId || selectedColumns.length < 2) return;
-    const data = await getCorrelation(selectedFlightId, selectedColumns);
-    setCorrData(data);
-    setViewMode('correlation');
+    try {
+      const data = await getCorrelation(selectedFlightId, selectedColumns);
+      setCorrData(data);
+      setViewMode('correlation');
+    } catch (err) {
+      console.error('Failed to load correlation', err);
+      setErrorMsg('加载相关性分析失败，请重试');
+    }
   };
 
   const loadAnomaly = async () => {
     if (!selectedFlightId || !anomalyCol) return;
-    const data = await getAnomaly(selectedFlightId, anomalyCol);
-    setAnomalyData(data);
-    setViewMode('anomaly');
+    try {
+      const data = await getAnomaly(selectedFlightId, anomalyCol);
+      setAnomalyData(data);
+      setViewMode('anomaly');
+    } catch (err) {
+      console.error('Failed to load anomaly', err);
+      setErrorMsg('加载异常检测失败，请重试');
+    }
   };
 
   // ─── Alert grouping ────────────────────────────────────
@@ -667,19 +688,29 @@ export default function FlightView({
   // ─── Flight management helpers ─────────────────────────
   const handleRename = async (id: number) => {
     if (!editName.trim()) { setEditingFlightId(null); return; }
-    await updateFlight(id, editName.trim());
-    setEditingFlightId(null);
-    onFlightsChanged();
+    try {
+      await updateFlight(id, editName.trim());
+      setEditingFlightId(null);
+      onFlightsChanged();
+    } catch (err) {
+      console.error('Failed to rename flight', err);
+      setErrorMsg('重命名失败，请重试');
+    }
   };
 
   const handleDeleteFlight = async (id: number) => {
-    await deleteFlight(id);
-    if (selectedFlightId === id) {
-      const remaining = flights.filter((f) => f.id !== id);
-      onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
+    try {
+      await deleteFlight(id);
+      if (selectedFlightId === id) {
+        const remaining = flights.filter((f) => f.id !== id);
+        onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
+      }
+      setDeletingFlightId(null);
+      onFlightsChanged();
+    } catch (err) {
+      console.error('Failed to delete flight', err);
+      setErrorMsg('删除架次失败，请重试');
     }
-    setDeletingFlightId(null);
-    onFlightsChanged();
   };
 
   const startRename = (f: Flight) => {
@@ -951,6 +982,19 @@ export default function FlightView({
           <option value="pos">基准:位置</option>
         </select>
       </div>
+
+      {/* ── Error message banner ─────────────────────────── */}
+      {errorMsg && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-red-50 border-b border-red-200 text-red-700 text-xs">
+          <span>{errorMsg}</span>
+          <button
+            onClick={() => setErrorMsg(null)}
+            className="ml-auto text-red-400 hover:text-red-600 font-bold"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* ── Filter bar ──────────────────────────────────── */}
       <FilterBar
@@ -1385,8 +1429,11 @@ function CorrelationHeatmap({ data }: { data: { labels: string[]; matrix: number
 function AnomalyChart({ data }: { data: any }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!ref.current || !data.times) return;
+    if (!ref.current || !data.times || !data.values) return;
     const chart = echarts.init(ref.current);
+    const anomalyPoints = data.anomaly_indices && data.values
+      ? data.anomaly_indices.map((i: number) => [i, data.values[i]])
+      : [];
     chart.setOption({
       tooltip: { trigger: 'axis' },
       legend: { data: ['原始值', '上界', '下界', '异常点'], textStyle: { color: '#6b7280' } },
@@ -1404,7 +1451,7 @@ function AnomalyChart({ data }: { data: any }) {
         { name: '下界', type: 'line', data: data.lower_bound, lineStyle: { type: 'dashed', color: '#f59e0b', width: 1 }, showSymbol: false },
         {
           name: '异常点', type: 'scatter',
-          data: data.anomaly_indices.map((i: number) => [i, data.values[i]]),
+          data: anomalyPoints,
           symbolSize: 6, itemStyle: { color: '#ef4444' },
         },
       ],
