@@ -16,6 +16,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo.
 echo [2/2] Starting backend...
 cd /d "%~dp0"
-call .venv\Scripts\activate && python main.py
+call .venv\Scripts\activate.bat
+python main.py
 
 pause
