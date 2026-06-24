@@ -207,17 +207,3 @@ def run_migration(conn):
     conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (2)")
     conn.commit()
     logger.info("Migration v1→v2 complete!")
-
-
-def migrate_standalone():
-    """Run migration outside of normal app init (for testing/CLI use)."""
-    from backend.database import get_db
-    conn = get_db()
-    run_migration(conn)
-    conn.close()
-    print("Migration complete.")
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    migrate_standalone()

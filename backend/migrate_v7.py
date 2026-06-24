@@ -36,9 +36,7 @@ def run_migration(conn):
     model_cols = [
         ("has_header", "INTEGER DEFAULT 1"),
         ("has_uav_send_id", "INTEGER DEFAULT 0"),
-        ("encoding", "TEXT DEFAULT 'utf-8'"),
         ("extract_serial_from_path", "INTEGER DEFAULT 0"),
-        ("has_aircraft_prefix", "INTEGER DEFAULT 0"),
     ]
     for col_name, col_def in model_cols:
         _add_column_if_missing(conn, "aircraft_models", col_name, col_def)
@@ -92,17 +90,12 @@ def run_migration(conn):
             """UPDATE aircraft_models SET
                has_header = ?,
                has_uav_send_id = ?,
-               encoding = ?,
-               extract_serial_from_path = ?,
-               has_aircraft_prefix = ?,
-               config_path = ''
+               extract_serial_from_path = ?
                WHERE id = ?""",
             (
                 1 if config.get('has_header') else 0,
                 1 if config.get('has_uav_send_id') else 0,
-                config.get('encoding', 'utf-8'),
                 1 if config.get('extract_serial_from_path') else 0,
-                1 if config.get('has_aircraft_prefix') else 0,
                 model_id,
             )
         )
