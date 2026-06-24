@@ -255,16 +255,7 @@ function buildChartOption(
         // (Top-level markLine causes "undefined.group" crashes; it
         // must be owned by a series.)
         const isFirst = i === 0;
-        const alertMarkLine = isFirst && (aligned.alerts?.length ?? 0) > 0 ? {
-          markLine: {
-            silent: true,
-            symbol: 'none',
-            lineStyle: { type: 'dashed' as const, color: '#ef4444', width: 1 },
-            data: (aligned.alerts || [])
-              .filter((_, idx) => idx % Math.max(1, Math.floor((aligned.alerts || []).length / 30)) === 0)
-              .map((a) => ({ xAxis: a.time_str, label: { show: false } })),
-          },
-        } : {};
+        const alertMarkLine = {};
         return {
           name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
           type: 'line' as const,

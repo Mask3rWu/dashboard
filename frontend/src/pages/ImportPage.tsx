@@ -491,15 +491,33 @@ export default function ImportPage({ onImported }: Props) {
                       <option key={m.id} value={m.id}>{m.name}</option>
                     ))}
                 </select>
-                {scanResult.model.is_new ? (
-                  <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium border border-green-200">
-                    已自动创建
-                  </span>
-                ) : scanResult.model.match_confidence != null ? (
-                  <span className="px-2 py-0.5 bg-blue-100 text-blue-600 rounded text-xs font-medium border border-blue-200">
-                    匹配度 {(scanResult.model.match_confidence * 100).toFixed(0)}%
-                  </span>
-                ) : null}
+                {(() => {
+                  const resolved = scanResult.model!;
+                  const isResolvedSelected = selectedModelId === resolved.id;
+                  // Find score for the currently selected model from the full score list.
+                  // Falls back to resolved.match_confidence when selection IS the resolved one
+                  // (covers the case where matching_models is missing/empty).
+                  const selectedScore = isResolvedSelected
+                    ? resolved.match_confidence
+                    : scanResult.matching_models?.find((m) => m.id === selectedModelId)?.score ?? null;
+
+                  if (isResolvedSelected && resolved.is_new) {
+                    return (
+                      <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium border border-green-200">
+                        已自动创建
+                      </span>
+                    );
+                  }
+                  if (selectedScore != null) {
+                    return (
+                      <span className="px-2 py-0.5 bg-blue-100 text-blue-600 rounded text-xs font-medium border border-blue-200"
+                        title={isResolvedSelected ? '自动匹配的最佳机型' : '手动选择的机型与扫描结果的相似度'}>
+                        匹配度 {(selectedScore * 100).toFixed(0)}%
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
                 <button
                   onClick={handleCreateModelFromScan}
                   className="px-2 py-1 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded border border-dashed border-blue-300 hover:border-blue-400"
