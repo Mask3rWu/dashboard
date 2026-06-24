@@ -33,13 +33,9 @@ CREATE TABLE IF NOT EXISTS aircraft_models (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
     format_category TEXT NOT NULL CHECK(format_category != ''),
-    config_path     TEXT DEFAULT '',
-    description     TEXT DEFAULT '',
     has_header      INTEGER DEFAULT 1,
     has_uav_send_id INTEGER DEFAULT 0,
-    encoding        TEXT DEFAULT 'utf-8',
     extract_serial_from_path INTEGER DEFAULT 0,
-    has_aircraft_prefix      INTEGER DEFAULT 0,
     created_at      TEXT DEFAULT (datetime('now','localtime'))
 );
 
@@ -144,18 +140,11 @@ def _is_migrated(conn):
 
 
 def _is_migrated_v3(conn):
-    """Check if v3 migration has been applied or table already has the v3 schema."""
-    # Check version tracking first
+    """Check if v3 migration has been applied."""
     rows = conn.execute(
         "SELECT version FROM schema_version WHERE version >= 3"
     ).fetchall()
-    if rows:
-        return True
-    # For fresh installs, the MANAGEMENT_SCHEMA already creates the table with
-    # config_path — check if the column exists in the current table.
-    info = conn.execute("PRAGMA table_info(aircraft_models)").fetchall()
-    col_names = {r['name'] for r in info}
-    return 'config_path' in col_names
+    return len(rows) > 0
 
 
 def _run_v2_migration(conn):
