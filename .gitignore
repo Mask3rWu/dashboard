@@ -25,3 +25,5 @@ frontend/node_modules/
 .DS_Store
 Thumbs.db
 data/
+data.db
+*.export.json
