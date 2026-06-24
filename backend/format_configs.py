@@ -30,16 +30,15 @@ def build_model_config_from_db(conn, model_id):
         model_id: aircraft_models.id
 
     Returns:
-        dict with keys: format, has_header, has_uav_send_id, encoding,
-                        extract_serial_from_path, has_aircraft_prefix,
-                        description, data_types
+        dict with keys: format, has_header, has_uav_send_id,
+                        extract_serial_from_path, data_types
         Returns None if model not found.
     """
     # ── Model-level settings ──
     model = conn.execute(
-        """SELECT name, format_category, description,
-                  has_header, has_uav_send_id, encoding,
-                  extract_serial_from_path, has_aircraft_prefix
+        """SELECT name, format_category,
+                  has_header, has_uav_send_id,
+                  extract_serial_from_path
            FROM aircraft_models WHERE id = ?""",
         (model_id,)
     ).fetchone()
@@ -48,12 +47,9 @@ def build_model_config_from_db(conn, model_id):
 
     config = {
         'format': model['format_category'],
-        'description': model['description'] or '',
         'has_header': bool(model['has_header']),
         'has_uav_send_id': bool(model['has_uav_send_id']),
-        'encoding': model['encoding'] or 'utf-8',
         'extract_serial_from_path': bool(model['extract_serial_from_path']),
-        'has_aircraft_prefix': bool(model['has_aircraft_prefix']),
         'data_types': {},
     }
 
@@ -122,15 +118,13 @@ def save_model_config_to_db(conn, model_id, config):
     # ── Model-level settings ──
     conn.execute(
         """UPDATE aircraft_models SET
-           has_header = ?, has_uav_send_id = ?, encoding = ?,
-           extract_serial_from_path = ?, has_aircraft_prefix = ?
+           has_header = ?, has_uav_send_id = ?,
+           extract_serial_from_path = ?
            WHERE id = ?""",
         (
             1 if config.get('has_header') else 0,
             1 if config.get('has_uav_send_id') else 0,
-            config.get('encoding', 'utf-8'),
             1 if config.get('extract_serial_from_path') else 0,
-            1 if config.get('has_aircraft_prefix') else 0,
             model_id,
         )
     )
@@ -155,20 +149,6 @@ def save_model_config_to_db(conn, model_id, config):
 
 def load_format_config_by_model(conn, model_id):
     """Load format config for a model from the database.
-
-    Args:
-        conn: SQLite connection
-        model_id: aircraft_models.id
-
-    Returns:
-        dict: The format config, or None if model not found
-    """
-    return build_model_config_from_db(conn, model_id)
-
-
-def load_format_config_from_db(conn, model_id):
-    """Alias for build_model_config_from_db — used when a config dict is
-    needed but no file path exists.
 
     Args:
         conn: SQLite connection
@@ -510,12 +490,9 @@ def generate_config_from_scan(source_path):
 
     config = {
         'format': os.path.basename(source_path),
-        'description': f'Auto-generated from {os.path.basename(source_path)}',
         'has_header': has_header_flag,
         'has_uav_send_id': has_uav,
         'extract_serial_from_path': True,  # always extract from standardized dir hierarchy
-        'has_aircraft_prefix': False,  # unused, kept for schema compatibility
-        'encoding': 'gbk',
         'data_types': data_types,
     }
 

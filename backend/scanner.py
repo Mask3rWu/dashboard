@@ -75,7 +75,7 @@ def _get_config_file_patterns(config):
     return patterns
 
 
-def parse_session_key(filename, config, has_aircraft_prefix=False):
+def parse_session_key(filename, config):
     """Extract session key (timestamp[_seq]) from a filename.
 
     Uses the format config's file_patterns to locate the type marker,
@@ -84,7 +84,6 @@ def parse_session_key(filename, config, has_aircraft_prefix=False):
     Args:
         filename: The file basename
         config: The format config dict
-        has_aircraft_prefix: True if filename starts with aircraft ID digits
 
     Returns:
         str: session key, or '' if not found
@@ -230,11 +229,10 @@ def resolve_model_for_scan(conn, source_path):
     ts = datetime.now().strftime('%H%M%S')
     new_name = f"Auto-{folder_name}-{ts}"
     fmt_cat = generated.get('format', folder_name) or folder_name
-    description = f'Auto-generated from {folder_name}'
 
     conn.execute(
-        "INSERT INTO aircraft_models (name, format_category, description) VALUES (?, ?, ?)",
-        (new_name, fmt_cat, description),
+        "INSERT INTO aircraft_models (name, format_category) VALUES (?, ?)",
+        (new_name, fmt_cat),
     )
     model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -294,8 +292,6 @@ def scan_files_recursive(source_path, config):
         return results
 
     extract_serial = config.get('extract_serial_from_path', True)
-    has_prefix = config.get('has_aircraft_prefix',
-                            config.get('has_uav_send_id', False))
 
     for root, _dirs, files in os.walk(source_path):
         # Determine if this is a special directory
@@ -335,7 +331,7 @@ def scan_files_recursive(source_path, config):
             else:
                 aircraft_serial = ''
 
-            session_key = parse_session_key(fname, config, has_aircraft_prefix=has_prefix)
+            session_key = parse_session_key(fname, config)
 
             results.append({
                 'aircraft_serial': aircraft_serial,
@@ -453,25 +449,6 @@ def _validate_source_path(source_path):
     return None
 
 
-def _extract_flight_date(source_path):
-    """Extract flight date from directory hierarchy.
-
-    Walks up from source_path to find the first directory whose name
-    starts with an 8-digit YYYYMMDD prefix. Returns 'YYYY-MM-DD' or None.
-    """
-    path = os.path.normpath(source_path)
-    while True:
-        dirname = os.path.basename(path)
-        if len(dirname) >= 8 and dirname[:8].isdigit():
-            ds = dirname[:8]
-            return f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
-        parent = os.path.dirname(path)
-        if parent == path:
-            break
-        path = parent
-    return None
-
-
 def scan_folder_sessions(source_path, conn=None):
     """Scan, auto-detect format, resolve model (auto-create if new), and
     return session-grouped preview with import status.
@@ -554,6 +531,7 @@ def scan_folder_sessions(source_path, conn=None):
     # Duplicate boundary: aircraft + flight_date + session_key.
     # A session is only a duplicate if the SAME aircraft already has this
     # date+time combination. Different aircraft with same time = new flights.
+    from backend.parser import _extract_flight_date
     flight_date = _extract_flight_date(source_path)
 
     for sess in result['sessions']:
