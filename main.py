@@ -27,13 +27,14 @@ from backend.database import init_db, get_db
 from backend.parser import import_session
 from backend.format_configs import (
     register_model_tables, get_columns_for_model,
-    get_columns_for_flight, get_table_name,
+    get_table_name,
     save_model_config_to_db, generate_config_from_scan,
-    update_column_metadata,
-    build_model_config_from_db,
+    update_column_metadata, data_table_name,
 )
 from backend.scanner import scan_folder_sessions
 from backend import analysis
+
+from datetime import datetime
 
 # ─── App Setup ─────────────────────────────────────────────
 
@@ -66,7 +67,6 @@ class UpdateFlightRequest(BaseModel):
 class CreateModelRequest(BaseModel):
     name: str
     format_category: str
-    description: str = ''
 
 
 class CreateModelFromScanRequest(BaseModel):
@@ -197,8 +197,8 @@ def create_model(req: CreateModelRequest):
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO aircraft_models (name, format_category, description) VALUES (?, ?, ?)",
-            (req.name, req.format_category, req.description)
+            "INSERT INTO aircraft_models (name, format_category) VALUES (?, ?)",
+            (req.name, req.format_category)
         )
         model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         register_model_tables(conn, model_id, req.format_category)
@@ -221,9 +221,8 @@ def create_model_from_scan(req: CreateModelFromScanRequest):
         config_data['format'] = req.format_category
 
         conn.execute(
-            "INSERT INTO aircraft_models (name, format_category, description) VALUES (?, ?, ?)",
-            (req.name, req.format_category,
-             f'Auto-generated from {os.path.basename(req.source_path)}')
+            "INSERT INTO aircraft_models (name, format_category) VALUES (?, ?)",
+            (req.name, req.format_category)
         )
         model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -286,6 +285,268 @@ def delete_model(model_id: int):
 
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ─── Model Export / Import ───────────────────────────────────
+
+class ImportModelRequest(BaseModel):
+    name: str
+    data: dict  # the export JSON
+
+
+@app.get("/api/models/{model_id}/export")
+def export_model(model_id: int):
+    """Export a model's complete configuration as a JSON file.
+
+    Saves to the application directory (next to exe in frozen mode,
+    project root in dev mode). Returns the file path so the user can
+    copy it to another machine.
+    """
+    conn = get_db()
+    try:
+        model = conn.execute(
+            "SELECT name, format_category, has_header, has_uav_send_id, extract_serial_from_path "
+            "FROM aircraft_models WHERE id=?",
+            (model_id,)
+        ).fetchone()
+        if not model:
+            raise HTTPException(404, "Model not found")
+
+        # ── Data types + columns ──
+        data_types = {}
+        dtr_rows = conn.execute(
+            "SELECT data_type_key, display_label, file_patterns, is_alert "
+            "FROM data_table_registry WHERE model_id=? ORDER BY data_type_key",
+            (model_id,)
+        ).fetchall()
+        for dtr in dtr_rows:
+            dt_key = dtr['data_type_key']
+            try:
+                patterns = json.loads(dtr['file_patterns'] or '[]')
+            except (json.JSONDecodeError, TypeError):
+                patterns = []
+
+            col_rows = conn.execute(
+                "SELECT column_name, display_label, unit, data_type, ordinal, scale_factor "
+                "FROM column_registry "
+                "WHERE model_id=? AND data_type_key=? ORDER BY ordinal",
+                (model_id, dt_key)
+            ).fetchall()
+
+            columns = []
+            for cr in col_rows:
+                columns.append({
+                    'name': cr['column_name'],
+                    'label': cr['display_label'],
+                    'unit': cr['unit'] or '',
+                    'type': cr['data_type'] or 'REAL',
+                    'ordinal': cr['ordinal'],
+                    'scale_factor': cr['scale_factor'] if cr['scale_factor'] is not None else 1.0,
+                })
+
+            data_types[dt_key] = {
+                'display_label': dtr['display_label'],
+                'file_patterns': patterns,
+                'is_alert': bool(dtr['is_alert']),
+                'columns': columns,
+            }
+
+        # ── Presets ──
+        presets = []
+        preset_rows = conn.execute(
+            "SELECT name, columns_json FROM presets WHERE model_id=? ORDER BY name",
+            (model_id,)
+        ).fetchall()
+        for pr in preset_rows:
+            try:
+                cols = json.loads(pr['columns_json'] or '[]')
+            except (json.JSONDecodeError, TypeError):
+                cols = []
+            presets.append({'name': pr['name'], 'columns': cols})
+
+        # ── Filter presets ──
+        filter_presets = []
+        fp_rows = conn.execute(
+            "SELECT name, config_json FROM filter_presets WHERE model_id=? ORDER BY name",
+            (model_id,)
+        ).fetchall()
+        for fp in fp_rows:
+            try:
+                cfg = json.loads(fp['config_json'] or '{}')
+            except (json.JSONDecodeError, TypeError):
+                cfg = {}
+            filter_presets.append({'name': fp['name'], 'config': cfg})
+
+        export = {
+            'version': 1,
+            'exported_at': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+            'model': {
+                'name': model['name'],
+                'format_category': model['format_category'],
+                'has_header': bool(model['has_header']),
+                'has_uav_send_id': bool(model['has_uav_send_id']),
+                'extract_serial_from_path': bool(model['extract_serial_from_path']),
+            },
+            'data_types': data_types,
+            'presets': presets,
+            'filter_presets': filter_presets,
+        }
+
+        # Save to disk next to the executable / project root
+        if getattr(sys, 'frozen', False):
+            out_dir = os.path.dirname(sys.executable)
+        else:
+            out_dir = BASE_DIR
+        filename = f"{model['name']}_export.json"
+        filepath = os.path.join(out_dir, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export, f, ensure_ascii=False, indent=2)
+
+        return {"ok": True, "path": filepath, "filename": filename}
+
+    finally:
+        conn.close()
+
+
+@app.post("/api/models/import")
+def import_model(req: ImportModelRequest):
+    """Import a model configuration from an export JSON.
+
+    Creates a new model with the given name and all column definitions,
+    data tables, presets, and filter presets from the export data.
+    """
+    data = req.data
+    if data.get('version') != 1:
+        raise HTTPException(400, f"Unsupported export version: {data.get('version')}")
+
+    model_data = data.get('model', {})
+    data_types = data.get('data_types', {})
+    if not model_data.get('format_category') or not data_types:
+        raise HTTPException(400, "Invalid export data: missing model or data_types")
+
+    conn = get_db()
+    try:
+        name = req.name.strip()
+        if not name:
+            raise HTTPException(400, "Model name must not be empty")
+
+        # Check name uniqueness — auto-suffix if conflict
+        base_name = name
+        suffix = 1
+        while conn.execute("SELECT id FROM aircraft_models WHERE name=?", (name,)).fetchone():
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+
+        fmt_cat = model_data['format_category']
+
+        # ── Create model ──
+        conn.execute(
+            """INSERT INTO aircraft_models
+               (name, format_category, has_header, has_uav_send_id, extract_serial_from_path)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                name,
+                fmt_cat,
+                1 if model_data.get('has_header') else 0,
+                1 if model_data.get('has_uav_send_id') else 0,
+                1 if model_data.get('extract_serial_from_path') else 0,
+            )
+        )
+        model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # ── Insert data_table_registry + column_registry ──
+        for dt_key, dt_def in data_types.items():
+            table_name = data_table_name(model_id, dt_key)
+            patterns_json = json.dumps(
+                dt_def.get('file_patterns', []), ensure_ascii=False
+            )
+            is_alert = 1 if dt_def.get('is_alert') else 0
+
+            conn.execute(
+                """INSERT INTO data_table_registry
+                   (model_id, data_type_key, table_name, display_label, file_patterns, is_alert)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (model_id, dt_key, table_name, dt_def['display_label'], patterns_json, is_alert)
+            )
+
+            for col in dt_def.get('columns', []):
+                col_type = col.get('type', 'REAL')
+                ordinal = col.get('ordinal')
+                is_numeric = 1 if col_type.upper() in ('REAL', 'INTEGER', 'FLOAT') else 0
+                scale_factor = col.get('scale_factor', 1.0)
+
+                conn.execute(
+                    """INSERT INTO column_registry
+                       (model_id, data_type_key, table_name, column_name,
+                        display_label, unit, data_type, ordinal, is_numeric, scale_factor)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        model_id, dt_key, table_name, col['name'],
+                        col.get('label', col['name']), col.get('unit', ''),
+                        col_type, ordinal, is_numeric, scale_factor,
+                    )
+                )
+
+        # ── Import presets ──
+        for preset in data.get('presets', []):
+            cols_json = json.dumps(preset.get('columns', []), ensure_ascii=False)
+            try:
+                conn.execute(
+                    "INSERT INTO presets (model_id, name, columns_json) VALUES (?, ?, ?)",
+                    (model_id, preset['name'], cols_json)
+                )
+            except Exception:
+                pass  # skip duplicates
+
+        # ── Import filter presets ──
+        for fp in data.get('filter_presets', []):
+            cfg_json = json.dumps(fp.get('config', {}), ensure_ascii=False)
+            try:
+                conn.execute(
+                    "INSERT INTO filter_presets (model_id, name, config_json) VALUES (?, ?, ?)",
+                    (model_id, fp['name'], cfg_json)
+                )
+            except Exception:
+                pass  # skip duplicates
+
+        # ── Build config dict for register_model_tables ──
+        config = {
+            'format': fmt_cat,
+            'has_header': bool(model_data.get('has_header')),
+            'has_uav_send_id': bool(model_data.get('has_uav_send_id')),
+            'extract_serial_from_path': bool(model_data.get('extract_serial_from_path')),
+            'data_types': {},
+        }
+        for dt_key, dt_def in data_types.items():
+            config['data_types'][dt_key] = {
+                'display_label': dt_def['display_label'],
+                'file_patterns': dt_def.get('file_patterns', []),
+                'is_alert': dt_def.get('is_alert', False),
+                'columns': [
+                    {
+                        'name': c['name'],
+                        'label': c.get('label', c['name']),
+                        'unit': c.get('unit', ''),
+                        'type': c.get('type', 'REAL'),
+                        'ordinal': c.get('ordinal'),
+                        'scale_factor': c.get('scale_factor', 1.0),
+                    }
+                    for c in dt_def.get('columns', [])
+                ],
+            }
+
+        register_model_tables(conn, model_id, fmt_cat, config=config)
+        conn.commit()
+
+        return {"id": model_id, "name": name, "format_category": fmt_cat}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, str(e))
     finally:
         conn.close()
 
@@ -899,7 +1160,9 @@ def main():
                 width=1400, height=900,
                 min_size=(1024, 680),
             )
-            webview.start()
+            # Enable DevTools (right-click → Inspect, or press F12).
+            # TODO: set to False before shipping a release build.
+            webview.start(debug=True)
         except ImportError:
             import webbrowser
             webbrowser.open(f"http://127.0.0.1:{port}")
