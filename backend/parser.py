@@ -187,36 +187,3 @@ def import_session(source_path, aircraft_id, session_key):
         'rows': import_result.get('rows', 0),
         'details': import_result.get('details', {}),
     }
-
-
-def import_flight(source_path):
-    """Import all sessions in a folder (backward-compatible bulk import).
-
-    This requires the folder structure to already have aircraft/model info
-    (Format A only). For Format B/C, use import_session with explicit aircraft_id.
-    """
-    conn = get_db()
-    preview = scan_folder_sessions(source_path, conn=conn)
-    conn.close()
-
-    if not preview.get('sessions'):
-        return {'error': preview.get('error', 'No sessions found in folder')}
-
-    # For Format A: auto-resolve aircraft_id from serial
-    imported = []
-    for sess in preview['sessions']:
-        if sess.get('aircraft_id'):
-            result = import_session(
-                source_path, sess['aircraft_id'], sess['session_key'],
-                mode='overwrite'
-            )
-        else:
-            # Format B/C without pre-assigned aircraft — need user to provide
-            result = {'error': f"No aircraft assigned for session {sess['session_key']}. Use import_session with aircraft_id."}
-
-        if 'error' not in result:
-            imported.append(result)
-
-    if not imported:
-        return {'error': 'No sessions could be imported'}
-    return {'imported': imported}
