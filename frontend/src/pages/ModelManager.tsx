@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Pencil, Trash2, Download, Upload } from 'lucide-react';
 import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight,
   getModelColumns, updateModelColumn,
+  exportModel, importModel,
   type AircraftModel, type Aircraft, type Flight,
   type DataTypeGroup,
 } from '../api';
@@ -54,6 +55,45 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [isEditingColumns, setIsEditingColumns] = useState(false);
   const [columnEditData, setColumnEditData] = useState<Record<string, { label: string; unit: string }>>({});
   const [showOriginalName, setShowOriginalName] = useState(true);
+
+  // ─── Import / Export ───────────────────────────────────
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importData, setImportData] = useState<any>(null);
+  const [importName, setImportName] = useState('');
+  const [importError, setImportError] = useState('');
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data.version || !data.model) {
+        setImportError('无效的导出文件格式');
+        return;
+      }
+      setImportData(data);
+      setImportName(data.model.name || '');
+      setImportError('');
+      setShowImportModal(true);
+    } catch {
+      setImportError('无法解析文件，请选择有效的 JSON 文件');
+    }
+    e.target.value = ''; // reset so same file can be re-selected
+  };
+
+  const handleImportConfirm = async () => {
+    if (!importData || !importName.trim()) return;
+    try {
+      await importModel(importName.trim(), importData);
+      setShowImportModal(false);
+      setImportData(null);
+      loadModels();
+      onModelsChanged();
+    } catch (err: any) {
+      setImportError(err.message || '导入失败');
+    }
+  };
 
   // ─── Search & Filter state ────────────────────────────
   const [modelSearch, setModelSearch] = useState('');
@@ -272,8 +312,12 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     <div className="h-full flex">
       {/* Left: Model List */}
       <aside className="w-64 shrink-0 border-r border-gray-200 overflow-y-auto bg-gray-50/50 flex flex-col">
-        <div className="p-3 border-b border-gray-200">
+        <div className="p-3 border-b border-gray-200 flex items-center justify-between">
           <span className="text-xs font-medium text-gray-500">机型列表</span>
+          <label className="cursor-pointer text-gray-400 hover:text-blue-500" title="导入机型配置">
+            <Upload className="w-3.5 h-3.5" />
+            <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
+          </label>
         </div>
 
         {/* Global summary stats */}
@@ -338,6 +382,19 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                         title="重命名"
                       >
                         <Pencil className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const r = await exportModel(m.id);
+                            alert(`已导出到:\n${r.path}`);
+                          } catch (e: any) { alert('导出失败: ' + (e.message || e)); }
+                        }}
+                        className="text-gray-300 hover:text-green-500 p-0.5"
+                        title="导出配置"
+                      >
+                        <Download className="w-3 h-3" />
                       </button>
                       {deletingModelId === m.id ? (
                         <span className="text-[10px] text-red-500 whitespace-nowrap">
@@ -738,6 +795,50 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
           </>
         )}
       </main>
+
+      {/* Import Modal */}
+      {showImportModal && importData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setShowImportModal(false)}>
+          <div className="bg-white rounded-lg shadow-xl p-6 w-96 max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-gray-700 mb-4">导入机型配置</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">来源</label>
+                <div className="text-sm text-gray-800 bg-gray-50 rounded px-2 py-1">
+                  {importData.model?.name} ({importData.model?.format_category})
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">新机型名称</label>
+                <input
+                  type="text"
+                  value={importName}
+                  onChange={(e) => setImportName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleImportConfirm(); }}
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-400"
+                  autoFocus
+                />
+              </div>
+              {importError && (
+                <div className="text-xs text-red-500 bg-red-50 rounded px-2 py-1">{importError}</div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => { setShowImportModal(false); setImportData(null); }}
+                className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700"
+              >取消</button>
+              <button
+                type="button"
+                onClick={handleImportConfirm}
+                disabled={!importName.trim()}
+                className="px-3 py-1.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+              >导入</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

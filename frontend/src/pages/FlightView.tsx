@@ -14,6 +14,7 @@ import {
 import FilterBar from '../components/FilterBar';
 
 interface Props {
+  active: boolean;
   flights: Flight[];
   selectedFlightId: number | null;
   onSelectFlight: (id: number) => void;
@@ -55,7 +56,259 @@ function explainAlert(desc: string): string {
   return '飞行状态告警，需结合前后数据综合判断';
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Chart option builder — pure function, hoisted out of the
+// component so it allocates fresh each call and isn't recreated
+// on every render. Computes a complete ECharts option from current
+// aligned data + normalization + per-column scale factors.
+// ═══════════════════════════════════════════════════════════════
+function buildChartOption(
+  aligned: AlignedData,
+  normalize: boolean,
+  scaleFactors: Record<string, number>,
+): echarts.EChartsOption {
+  const times = aligned.times || [];
+  const seriesList = Object.entries(aligned.series || {});
+
+  const getValues = (vals: (number | null)[], key: string) => {
+    const sf = scaleFactors[key] ?? 1.0;
+    const scaled = vals.map((v) => (v !== null ? v * sf : null));
+    if (!normalize) return scaled;
+    const nums = scaled.filter((v) => v !== null) as number[];
+    if (nums.length === 0) return scaled;
+    const min = Math.min(...nums);
+    const max = Math.max(...nums);
+    const range = max - min || 1;
+    return scaled.map((v) => (v !== null ? (v - min) / range : null));
+  };
+
+  const colors = ['#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#7c3aed', '#0891b2', '#db2777', '#ea580c'];
+  const isNorm = normalize;
+
+  // Group series by semantic unit (e.g. ° → °_pos vs °_angle)
+  type UnitGroup = { unit: string; items: [string, typeof aligned.series[string]][] };
+  const unitMap = new Map<string, UnitGroup['items']>();
+  seriesList.forEach(([key, s]) => {
+    const raw = s.unit || '-';
+    let u = raw;
+    if (raw === '°') {
+      const col = key.split('.').pop()?.toLowerCase() || '';
+      if (col.includes('lat') || col.includes('lng')) u = '° (经纬度)';
+      else u = '° (角度)';
+    }
+    if (!unitMap.has(u)) unitMap.set(u, []);
+    unitMap.get(u)!.push([key, s]);
+  });
+  const unitGroups: UnitGroup[] = Array.from(unitMap.entries()).map(([unit, items]) => ({ unit, items }));
+
+  const seriesColor = (si: number) => colors[si % colors.length];
+  const unitColor = (gi: number) => colors[gi % colors.length];
+
+  const yAxes: any[] = [];
+  const keyToGroup = new Map<string, number>();
+
+  if (isNorm) {
+    yAxes.push({
+      type: 'value',
+      name: '归一化 (0~1)',
+      nameTextStyle: { color: '#6b7280', fontSize: 11 },
+      axisLabel: { color: '#9ca3af', fontSize: 10 },
+      splitLine: { lineStyle: { color: '#f3f4f6' } },
+    });
+    seriesList.forEach(([key]) => keyToGroup.set(key, 0));
+  } else {
+    const AXIS_W = 50;
+    unitGroups.forEach((g, gi) => {
+      const side = gi % 2 === 0 ? 'left' : 'right';
+      const sameSide = unitGroups.filter((_, i) => i % 2 === gi % 2 && i < gi).length;
+      const color = unitColor(gi);
+      yAxes.push({
+        type: 'value',
+        name: g.unit,
+        nameTextStyle: { color, fontSize: 10, fontWeight: 'bold' as const },
+        axisLabel: { color: '#9ca3af', fontSize: 10 },
+        axisLine: { lineStyle: { color } },
+        position: side as 'left' | 'right',
+        offset: sameSide * AXIS_W,
+        splitLine: { show: gi === 0, lineStyle: { color: '#f3f4f6' } },
+      });
+      g.items.forEach(([key]) => keyToGroup.set(key, gi));
+    });
+  }
+  const seriesYIndex = seriesList.map(([key]) => keyToGroup.get(key)!);
+
+  const leftUnits = isNorm ? 0 : unitGroups.filter((_, i) => i % 2 === 0).length;
+  const rightUnits = isNorm ? 0 : unitGroups.filter((_, i) => i % 2 === 1).length;
+  const AXIS_WIDTH = 50;
+  const YZOOM_W = 24;
+  const leftPad = isNorm ? 60 : 80 + (leftUnits > 0 ? (leftUnits - 1) * AXIS_WIDTH : 0);
+  const rightPad = (isNorm ? 40 : 80 + (rightUnits > 0 ? (rightUnits - 1) * AXIS_WIDTH : 0)) + YZOOM_W;
+
+  const segments = aligned.segments || [];
+  const hasFilter = segments.length > 0;
+  const dzIndicatorData = hasFilter
+    ? times.map((_, i) => (aligned.mask?.[i] ? 1 : 0))
+    : [];
+
+  // Always use array form for grid/xAxis/yAxis. Mixing object-form
+  // and array-form between consecutive setOption calls is one of the
+  // triggers for the "__ec_inner_*" / "group" undefined crashes
+  // in ECharts 6.1 — keeping the shape stable avoids the diff path.
+  const grid = hasFilter ? [
+    { left: leftPad, right: rightPad, top: 40, bottom: 60 },
+    { left: leftPad, right: rightPad, bottom: 6, height: 18 },
+  ] : [
+    { left: leftPad, right: rightPad, top: 40, bottom: 60 },
+  ];
+
+  const xAxisArr = hasFilter ? [
+    {
+      type: 'category' as const, data: times, gridIndex: 0,
+      axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
+      axisLine: { lineStyle: { color: '#e5e7eb' } },
+    },
+    {
+      type: 'category' as const, data: times, gridIndex: 1,
+      axisLabel: { show: false }, axisTick: { show: false },
+      axisLine: { show: false }, splitLine: { show: false },
+    },
+  ] : [
+    {
+      type: 'category' as const, data: times, gridIndex: 0,
+      axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
+      axisLine: { lineStyle: { color: '#e5e7eb' } },
+    },
+  ];
+
+  const mainYAxes = yAxes.map((a) => ({ ...a, gridIndex: 0 }));
+  const yAxisArr = hasFilter ? [
+    ...mainYAxes,
+    { type: 'value', gridIndex: 1, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
+    { type: 'value', gridIndex: 0, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
+  ] : mainYAxes;
+
+  // dataZoom must explicitly list the main yAxis indices.
+  // Using `yAxisIndex: 'all'` crashes ECharts when yAxis contains
+  // helper axes on a different grid.
+  // ECharts 6.1 has an additional quirk: a single-element array
+  // `yAxisIndex: [0]` triggers a different (apparently buggy)
+  // internal code path that crashes during render when other
+  // components (markLine, multi-grid xAxis) are present. Use a
+  // plain number when there's only one main yAxis.
+  const yAxisIndexForDZ: number | number[] = mainYAxes.length === 1
+    ? 0
+    : mainYAxes.map((_, i) => i);
+
+  return {
+    color: seriesList.map((_, i) => seriesColor(i)),
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#fff',
+      borderColor: '#e5e7eb',
+      textStyle: { color: '#374151', fontSize: 12 },
+      formatter: (params: any) => {
+        if (!Array.isArray(params)) return '';
+        const mainParams = params.filter((p: any) =>
+          p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__');
+        if (mainParams.length === 0) return '';
+        const time = mainParams[0]?.name || '';
+        let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
+        mainParams.forEach((p: any) => {
+          if (p.value?.[1] != null) {
+            const sIdx = p.seriesIndex;
+            const key = seriesList[sIdx]?.[0] || '';
+            const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
+            const displayVal = Number(p.value[1]).toFixed(2);
+            html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
+            if (sf !== 1.0) {
+              const rawVal = (Number(p.value[1]) / sf).toFixed(3);
+              html += ` <span style="color:#9ca3af;font-size:10px">(原始: ${rawVal}×${sf})</span>`;
+            }
+            html += `</div>`;
+          }
+        });
+        return html;
+      },
+    },
+    legend: {
+      type: 'scroll', top: 0,
+      textStyle: { color: '#6b7280', fontSize: 11 },
+      data: seriesList.map(([, s]) => isNorm ? s.label : `${s.label} (${s.unit || '-'})`),
+    },
+    grid,
+    xAxis: xAxisArr,
+    yAxis: yAxisArr,
+    dataZoom: [
+      { type: 'slider', start: 0, end: 100, height: 18, bottom: 6,
+        backgroundColor: 'rgba(249,250,251,0.55)',
+      },
+      { type: 'inside', xAxisIndex: 0 },
+      { type: 'inside', yAxisIndex: yAxisIndexForDZ, zoomOnMouseWheel: 'ctrl', id: 'yInside' },
+      { type: 'slider', yAxisIndex: yAxisIndexForDZ, start: 0, end: 100, right: 2, width: 18,
+        backgroundColor: 'rgba(249,250,251,0.55)', id: 'ySlider',
+      },
+    ],
+    series: [
+      ...seriesList.map(([key, s], i) => {
+        const values = getValues(s.values, key);
+        // Attach the alert markLine to the first line series only.
+        // (Top-level markLine causes "undefined.group" crashes; it
+        // must be owned by a series.)
+        const isFirst = i === 0;
+        const alertMarkLine = isFirst && (aligned.alerts?.length ?? 0) > 0 ? {
+          markLine: {
+            silent: true,
+            symbol: 'none',
+            lineStyle: { type: 'dashed' as const, color: '#ef4444', width: 1 },
+            data: (aligned.alerts || [])
+              .filter((_, idx) => idx % Math.max(1, Math.floor((aligned.alerts || []).length / 30)) === 0)
+              .map((a) => ({ xAxis: a.time_str, label: { show: false } })),
+          },
+        } : {};
+        return {
+          name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
+          type: 'line' as const,
+          yAxisIndex: seriesYIndex[i],
+          xAxisIndex: 0,
+          data: times.map((t, j) => [t, values[j]]),
+          smooth: true,
+          showSymbol: false,
+          z: 1,
+          lineStyle: { width: 1.5, color: seriesColor(i) },
+          ...alertMarkLine,
+        };
+      }),
+      ...(hasFilter ? [{
+        name: '__filter_bg__',
+        type: 'bar' as const,
+        xAxisIndex: 0,
+        yAxisIndex: mainYAxes.length + 1,
+        data: dzIndicatorData,
+        itemStyle: { color: 'rgba(147, 197, 253, 0.22)' },
+        barWidth: '100%',
+        barCategoryGap: '0%',
+        tooltip: { show: false },
+        silent: true,
+        z: -1,
+      }] : []),
+      ...(hasFilter ? [{
+        name: '__dz_indicator__',
+        type: 'bar' as const,
+        xAxisIndex: 1,
+        yAxisIndex: mainYAxes.length,
+        data: dzIndicatorData,
+        itemStyle: { color: '#3b82f6', borderColor: '#3b82f6', opacity: 0.5 },
+        barWidth: '100%',
+        tooltip: { show: false },
+        silent: true,
+        z: 0,
+      }] : []),
+    ],
+  };
+}
+
 export default function FlightView({
+  active,
   flights, selectedFlightId, onSelectFlight, onFlightsChanged,
   models, selectedModelId, onSelectModel,
   aircraft, selectedAircraftId, onSelectAircraft,
@@ -181,8 +434,14 @@ export default function FlightView({
 
   // ─── Load flight data ──────────────────────────────────
   useEffect(() => {
-    if (!selectedFlightId) return;
+    // Always update the ref so stale in-flight requests are aborted
+    // when selectedFlightId becomes null (otherwise they'd write
+    // data for a flight that is no longer selected).
     latestFlightRef.current = selectedFlightId;
+    if (!selectedFlightId) {
+      setAligned(null);
+      return;
+    }
     setLoading(true);
     setAligned(null);  // clear chart immediately when flight changes
     Promise.all([
@@ -254,29 +513,42 @@ export default function FlightView({
       });
   }, [selectedFlightId, selectedColumns, refTable, filterSpec]);
 
-  // ─── Chart: init once, update on data change ──────────────
-  // Init / dispose based on viewMode
+  // ─── Chart: lifecycle ──────────────────────────────────
+  //
+  // Why one effect, not two:
+  // Previously we had two effects — one for init/dispose (keyed on
+  // viewMode/active) and one for setOption (keyed on data). The split
+  // caused crashes ("Cannot read properties of undefined (reading
+  // 'group')" / "__ec_inner_*") because the update effect would call
+  // setOption on an instance whose internal component tree carried
+  // residue from the previous flight. ECharts 6.1 + notMerge=true
+  // doesn't handle dramatic shape changes (different yAxis count, unit
+  // groups, hasFilter on/off) cleanly.
+  //
+  // The fix: dispose and re-init the chart from scratch on every
+  // significant change. Implementation note: zrender dblclick handler
+  // is re-bound after each init (cheap, single listener).
+  //
+  // Container size handling: ResizeObserver still drives resize() on
+  // an existing instance, and re-init when the container first gains
+  // dimensions (deferred init for keep-alive tabs).
   useEffect(() => {
-    if (viewMode !== 'chart' || !chartRef.current) {
+    if (!active || viewMode !== 'chart' || !chartRef.current) {
       if (chartInst.current) {
         try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
         chartInst.current = null;
       }
       return;
     }
-    if (chartRef.current.clientWidth === 0 || chartRef.current.clientHeight === 0) return;
-    if (chartInst.current) return; // already initialized
 
-    try {
-      chartInst.current = echarts.init(chartRef.current);
+    const container = chartRef.current;
 
-      // Double-click to zoom in centered on click position (X+Y)
-      // Use zrender-level event to avoid ECharts dataZoom-inside interception
-      const zr = chartInst.current.getZr();
+    const bindDblClick = (inst: echarts.ECharts) => {
+      const zr = inst.getZr();
       zr.on('dblclick', (e: any) => {
         const ZOOM = 2;
         const MIN_RANGE = 2;
-        const opt = chartInst.current?.getOption();
+        const opt = inst.getOption();
         const dzList = (opt?.dataZoom as any[]) || [];
         const xSlider = dzList.find((d: any) => d.type === 'slider' && d.yAxisIndex === undefined);
         const ySlider = dzList.find((d: any) => d.type === 'slider' && (d.yAxisIndex !== undefined));
@@ -285,301 +557,107 @@ export default function FlightView({
         const yStart: number = ySlider?.start ?? 0;
         const yEnd: number = ySlider?.end ?? 100;
 
-        // Get grid pixel bounds to map click position → zoom center
-        const gridModel = (chartInst.current as any)?.getModel().getComponent('grid', 0);
+        const gridModel = (inst as any)?.getModel().getComponent('grid', 0);
         const rect = (gridModel as any)?.coordinateSystem?.getRect?.();
-        // Fraction within grid: 0=left/bottom, 1=right/top
         const fx = rect ? Math.max(0, Math.min(1, (e.offsetX - rect.x) / rect.width)) : 0.5;
         const fy = rect ? 1 - Math.max(0, Math.min(1, (e.offsetY - rect.y) / rect.height)) : 0.5;
         const xCenter = xStart + fx * (xEnd - xStart);
         const yCenter = yStart + fy * (yEnd - yStart);
 
-        // X-axis: halve the range, centered on click position
         const xRange = xEnd - xStart;
         if (xRange > MIN_RANGE) {
           const newXRange = xRange / ZOOM;
-          const newXStart = Math.max(0, xCenter - newXRange / 2);
-          const newXEnd = Math.min(100, xCenter + newXRange / 2);
-          chartInst.current?.dispatchAction({
+          inst.dispatchAction({
             type: 'dataZoom',
             dataZoomIndex: 0,
-            start: newXStart,
-            end: newXEnd,
+            start: Math.max(0, xCenter - newXRange / 2),
+            end: Math.min(100, xCenter + newXRange / 2),
           });
         }
 
-        // Y-axis: halve the range, centered on click position
         const yRange = yEnd - yStart;
         if (yRange > MIN_RANGE) {
           const newYRange = yRange / ZOOM;
-          const newYStart = Math.max(0, yCenter - newYRange / 2);
-          const newYEnd = Math.min(100, yCenter + newYRange / 2);
-          yZoomRef.current = { start: newYStart, end: newYEnd };
-          chartInst.current?.dispatchAction({
+          yZoomRef.current = {
+            start: Math.max(0, yCenter - newYRange / 2),
+            end: Math.min(100, yCenter + newYRange / 2),
+          };
+          inst.dispatchAction({
             type: 'dataZoom',
             dataZoomId: 'ySlider',
-            start: newYStart,
-            end: newYEnd,
+            start: yZoomRef.current.start,
+            end: yZoomRef.current.end,
           });
         }
       });
-    } catch (e) {
-      console.error('ECharts init failed:', e);
-      return;
+    };
+
+    // Build option for the current data state. Computed inside the
+    // effect so it captures the latest aligned/normalize/scaleFactors
+    // without needing a separate effect.
+    const buildAndApply = (inst: echarts.ECharts) => {
+      if (!aligned) return;
+      try {
+        const option = buildChartOption(aligned, normalize, scaleFactors);
+        inst.setOption(option, true);
+        // WebView2 quirk: canvas size sometimes lags one frame behind
+        // layout when the container has just become visible. Force a
+        // resize on the next frame so ECharts paints against the
+        // now-flushed dimensions.
+        requestAnimationFrame(() => {
+          try { inst.resize(); } catch (e) { /* ignore */ }
+        });
+      } catch (e) {
+        console.error('setOption failed:', e);
+      }
+    };
+
+    // Create a fresh instance every time this effect runs. This is the
+    // cornerstone of the fix: ECharts 6.1 cannot reliably diff between
+    // option shapes that differ in yAxis count / unit groups / hasFilter,
+    // so we never reuse an instance across data changes.
+    const createInstance = () => {
+      if (container.clientWidth === 0 || container.clientHeight === 0) return null;
+      try {
+        const inst = echarts.init(container);
+        bindDblClick(inst);
+        return inst;
+      } catch (e) {
+        console.error('ECharts init failed:', e);
+        return null;
+      }
+    };
+
+    // Dispose any existing instance from a previous effect run
+    // (shouldn't normally happen — cleanup below handles it — but
+    // defensive against StrictMode double-invoke).
+    if (chartInst.current) {
+      try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
+      chartInst.current = null;
     }
 
-    const handleResize = () => {
-      try { chartInst.current?.resize(); } catch (e) { /* ignore */ }
-    };
-    window.addEventListener('resize', handleResize);
+    chartInst.current = createInstance();
+    if (chartInst.current) buildAndApply(chartInst.current);
+
+    const ro = new ResizeObserver(() => {
+      if (!chartInst.current) {
+        // Deferred init for keep-alive: container just gained dimensions.
+        chartInst.current = createInstance();
+        if (chartInst.current) buildAndApply(chartInst.current);
+      } else {
+        try { chartInst.current.resize(); } catch (e) { /* ignore */ }
+      }
+    });
+    ro.observe(container);
+
     return () => {
-      window.removeEventListener('resize', handleResize);
+      ro.disconnect();
       if (chartInst.current) {
         try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
         chartInst.current = null;
       }
     };
-  }, [viewMode]);
-
-  // Update chart options when data or scale changes
-  useEffect(() => {
-    if (!chartInst.current || !aligned || viewMode !== 'chart') return;
-
-    const times = aligned.times || [];
-    const seriesList = Object.entries(aligned.series || {});
-
-    const getValues = (vals: (number | null)[], key: string) => {
-      const sf = scaleFactors[key] ?? 1.0;
-      const scaled = vals.map((v) => (v !== null ? v * sf : null));
-      if (!normalize) return scaled;
-      const nums = scaled.filter((v) => v !== null) as number[];
-      if (nums.length === 0) return scaled;
-      const min = Math.min(...nums);
-      const max = Math.max(...nums);
-      const range = max - min || 1;
-      return scaled.map((v) => (v !== null ? (v - min) / range : null));
-    };
-
-    const colors = ['#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#7c3aed', '#0891b2', '#db2777', '#ea580c'];
-    const isNorm = normalize;
-
-    // Group series by semantic unit (e.g. ° → °_pos vs °_angle)
-    type UnitGroup = { unit: string; items: [string, typeof aligned.series[string]][] };
-    const unitMap = new Map<string, UnitGroup['items']>();
-    seriesList.forEach(([key, s]) => {
-      const raw = s.unit || '-';
-      // Distinguish ° by semantics: lat/lng vs attitude angles
-      let u = raw;
-      if (raw === '°') {
-        const col = key.split('.').pop()?.toLowerCase() || '';
-        if (col.includes('lat') || col.includes('lng')) u = '° (经纬度)';
-        else u = '° (角度)';
-      }
-      if (!unitMap.has(u)) unitMap.set(u, []);
-      unitMap.get(u)!.push([key, s]);
-    });
-    const unitGroups: UnitGroup[] = Array.from(unitMap.entries()).map(([unit, items]) => ({ unit, items }));
-
-    // Color assignment:
-    //   - Per-series: each line gets a unique color so they're distinguishable
-    //   - Per-unit-group: y-axis name/line uses the unit group's color so you can
-    //     tell which axis a line belongs to (axis color = legend marker for that unit)
-    const seriesColor = (si: number) => colors[si % colors.length];
-    const unitColor = (gi: number) => colors[gi % colors.length];
-
-    // Build yAxis and yAxisIndex map: each unit group gets one axis
-    const yAxes: echarts.EChartsOption['yAxis'] = [];
-    const keyToGroup = new Map<string, number>();
-
-    if (isNorm) {
-      yAxes.push({
-        type: 'value',
-        name: '归一化 (0~1)',
-        nameTextStyle: { color: '#6b7280', fontSize: 11 },
-        axisLabel: { color: '#9ca3af', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#f3f4f6' } },
-      });
-      seriesList.forEach(([key]) => keyToGroup.set(key, 0));
-    } else {
-      const AXIS_W = 50;
-      unitGroups.forEach((g, gi) => {
-        const side = gi % 2 === 0 ? 'left' : 'right';
-        const sameSide = unitGroups.filter((_, i) => i % 2 === gi % 2 && i < gi).length;
-        const color = unitColor(gi);
-        yAxes.push({
-          type: 'value',
-          name: g.unit,
-          nameTextStyle: { color, fontSize: 10, fontWeight: 'bold' as const },
-          axisLabel: { color: '#9ca3af', fontSize: 10 },
-          axisLine: { lineStyle: { color } },
-          position: side as 'left' | 'right',
-          offset: sameSide * AXIS_W,
-          splitLine: { show: gi === 0, lineStyle: { color: '#f3f4f6' } },
-        });
-        g.items.forEach(([key]) => keyToGroup.set(key, gi));
-      });
-    }
-    const seriesYIndex = seriesList.map(([key]) => keyToGroup.get(key)!);
-
-    // Dynamic grid margins
-    const leftUnits = isNorm ? 0 : unitGroups.filter((_, i) => i % 2 === 0).length;
-    const rightUnits = isNorm ? 0 : unitGroups.filter((_, i) => i % 2 === 1).length;
-    const AXIS_WIDTH = 50;
-    const YZOOM_W = 24; // Y-axis zoom slider width
-    const leftPad = isNorm ? 60 : 80 + (leftUnits > 0 ? (leftUnits - 1) * AXIS_WIDTH : 0);
-    const rightPad = (isNorm ? 40 : 80 + (rightUnits > 0 ? (rightUnits - 1) * AXIS_WIDTH : 0)) + YZOOM_W;
-
-    const segments = aligned.segments || [];
-    const hasFilter = segments.length > 0;
-
-    // Background bar data for dataZoom-area overlay (1 = matched)
-    const dzIndicatorData = hasFilter
-      ? times.map((_, i) => (aligned.mask?.[i] ? 1 : 0))
-      : [];
-
-    const option: echarts.EChartsOption = {
-      color: seriesList.map((_, i) => seriesColor(i)),
-      tooltip: {
-        trigger: 'axis',
-        backgroundColor: '#fff',
-        borderColor: '#e5e7eb',
-        textStyle: { color: '#374151', fontSize: 12 },
-        formatter: (params: any) => {
-          if (!Array.isArray(params)) return '';
-          // Filter out helper series (dataZoom overlay)
-          const mainParams = params.filter((p: any) =>
-            p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__');
-          if (mainParams.length === 0) return '';
-          const time = mainParams[0]?.name || '';
-          let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
-          mainParams.forEach((p: any) => {
-            if (p.value?.[1] != null) {
-              const sIdx = p.seriesIndex;
-              const key = seriesList[sIdx]?.[0] || '';
-              const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
-              const displayVal = Number(p.value[1]).toFixed(2);
-              html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
-              if (sf !== 1.0) {
-                const rawVal = (Number(p.value[1]) / sf).toFixed(3);
-                html += ` <span style="color:#9ca3af;font-size:10px">(原始: ${rawVal}×${sf})</span>`;
-              }
-              html += `</div>`;
-            }
-          });
-          return html;
-        },
-      },
-      legend: {
-        type: 'scroll', top: 0,
-        textStyle: { color: '#6b7280', fontSize: 11 },
-        data: seriesList.map(([, s]) => isNorm ? s.label : `${s.label} (${s.unit || '-'})`),
-      },
-      // Grid[0]=main chart, Grid[1]=thin overlay at exact dataZoom position
-      grid: hasFilter ? [
-        { left: leftPad, right: rightPad, top: 40, bottom: 60 },
-        { left: leftPad, right: rightPad, bottom: 6, height: 18 },
-      ] : { left: leftPad, right: rightPad, top: 40, bottom: 60 },
-      xAxis: hasFilter ? [
-        {
-          type: 'category', data: times, gridIndex: 0,
-          axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
-          axisLine: { lineStyle: { color: '#e5e7eb' } },
-        },
-        {
-          type: 'category', data: times, gridIndex: 1,
-          axisLabel: { show: false }, axisTick: { show: false },
-          axisLine: { show: false }, splitLine: { show: false },
-        },
-      ] : {
-        type: 'category', data: times,
-        axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
-        axisLine: { lineStyle: { color: '#e5e7eb' } },
-      },
-      yAxis: hasFilter ? [
-        ...(Array.isArray(yAxes) ? (yAxes as any[]).map((a: any) => ({ ...a, gridIndex: 0 })) : [{ ...yAxes as any, gridIndex: 0 }]),
-        { type: 'value', gridIndex: 1, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
-        { type: 'value', gridIndex: 0, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
-      ] : yAxes,
-      dataZoom: [
-        { type: 'slider', start: 0, end: 100, height: 18, bottom: 6,
-          backgroundColor: 'rgba(249,250,251,0.55)',
-        },
-        { type: 'inside', xAxisIndex: 0 },
-        { type: 'inside', yAxisIndex: 'all', zoomOnMouseWheel: 'ctrl', id: 'yInside' },
-        { type: 'slider', yAxisIndex: 'all', start: 0, end: 100, right: 2, width: 18,
-          backgroundColor: 'rgba(249,250,251,0.55)', id: 'ySlider',
-        },
-      ],
-      series: [
-        // ── Line series ──
-        ...seriesList.map(([key, s], i) => {
-          const values = getValues(s.values, key);
-          return {
-            name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
-            type: 'line',
-            yAxisIndex: seriesYIndex[i],
-            xAxisIndex: 0,
-            data: times.map((t, j) => [t, values[j]]),
-            smooth: true,
-            showSymbol: false,
-            z: 1,
-            lineStyle: { width: 1.5, color: seriesColor(i) },
-          };
-        }),
-        // ── Full-height background bar (grid 0) — highlights matching regions ──
-        ...(hasFilter ? [{
-          name: '__filter_bg__',
-          type: 'bar',
-          xAxisIndex: 0,
-          yAxisIndex: (Array.isArray(yAxes) ? (yAxes as any[]).length : 1) + 1,
-          data: dzIndicatorData,
-          itemStyle: { color: 'rgba(147, 197, 253, 0.22)' },
-          barWidth: '100%',
-          barCategoryGap: '0%',
-          tooltip: { show: false },
-          silent: true,
-          z: -1,
-        }] : []),
-        // ── DataZoom overlay bar (grid 1) — colors matching regions in slider ──
-        ...(hasFilter ? [{
-          name: '__dz_indicator__',
-          type: 'bar',
-          xAxisIndex: 1,
-          yAxisIndex: Array.isArray(yAxes) ? (yAxes as any[]).length : 1,
-          data: dzIndicatorData,
-          itemStyle: { color: '#3b82f6', borderColor: '#3b82f6', opacity: 0.5 },
-          barWidth: '100%',
-          tooltip: { show: false },
-          silent: true,
-          z: 0,
-        }] : []),
-      ],
-      ...((aligned.alerts?.length ?? 0) > 0 ? {
-        markLine: {
-          silent: true,
-          symbol: 'none',
-          lineStyle: { type: 'dashed', color: '#ef4444', width: 1 },
-          data: (aligned.alerts || [])
-            .filter((_, idx) => idx % Math.max(1, Math.floor((aligned.alerts || []).length / 30)) === 0)
-            .map((a) => ({ xAxis: a.time_str, label: { show: false } })),
-        },
-      } as any : {}),
-    };
-
-    try {
-      chartInst.current.setOption(option, true);
-    } catch (e) {
-      console.error('ECharts setOption failed:', e);
-    }
-  }, [aligned, normalize, scaleFactors]);
-
-  // Resize chart when sidebar toggles
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      try { chartInst.current?.resize(); } catch (e) { /* ignore */ }
-    }, 100);
-    return () => clearTimeout(timer);
-  }, [sidebarOpen]);
+  }, [viewMode, active, aligned, normalize, scaleFactors]);
 
   // ─── Column toggle ─────────────────────────────────────
   const toggleColumn = (key: string) => {
@@ -1250,10 +1328,19 @@ export default function FlightView({
         )}
 
         {/* ── Content Area ────────────────────────────── */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 relative">
           {/* Chart Tab */}
           {viewMode === 'chart' && (
-            <div ref={chartRef} className="flex-1 min-h-0" />
+            <>
+              <div ref={chartRef} className="flex-1 min-h-0" />
+              <ChartDebugBadge
+                active={active}
+                chartRef={chartRef}
+                chartInst={chartInst}
+                aligned={aligned}
+                selectedColumns={selectedColumns}
+              />
+            </>
           )}
 
           {/* Map Tab */}
@@ -1390,6 +1477,61 @@ export default function FlightView({
 // ═══════════════════════════════════════════════════════════
 // Sub-components
 // ═══════════════════════════════════════════════════════════
+
+// In-app debug HUD — no DevTools needed.
+// Sticks to the bottom-right of the chart area, updates ~4×/sec,
+// shows the values needed to diagnose the "chart blank after tab
+// switch" bug: container dimensions, instance liveness, data
+// presence, etc. Click to force a resize.
+function ChartDebugBadge({
+  active,
+  chartRef,
+  chartInst,
+  aligned,
+  selectedColumns,
+}: {
+  active: boolean;
+  chartRef: React.RefObject<HTMLDivElement | null>;
+  chartInst: React.MutableRefObject<echarts.ECharts | null>;
+  aligned: AlignedData | null;
+  selectedColumns: string[];
+}) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 250);
+    return () => clearInterval(id);
+  }, []);
+
+  const el = chartRef.current;
+  const w = el?.clientWidth ?? 0;
+  const h = el?.clientHeight ?? 0;
+  const visible = el ? (el.offsetParent !== null) : false;
+  const inst = chartInst.current;
+  const instW = inst ? (inst.getWidth?.() ?? -1) : -1;
+  const instH = inst ? (inst.getHeight?.() ?? -1) : -1;
+  const seriesCount = aligned ? Object.keys(aligned.series || {}).length : 0;
+  const timesCount = aligned?.times?.length ?? 0;
+
+  const forceResize = () => {
+    if (inst) {
+      try { inst.resize(); } catch { /* ignore */ }
+    }
+  };
+
+  return (
+    <div
+      onClick={forceResize}
+      title="Click to force chart.resize()"
+      className="absolute bottom-2 right-2 z-50 bg-black/75 text-white text-[10px] font-mono px-2 py-1 rounded leading-tight cursor-pointer hover:bg-black/90 select-none"
+      style={{ pointerEvents: 'auto' }}
+    >
+      <div>active:{String(active)} vis:{String(visible)}</div>
+      <div>DOM:{w}×{h} inst:{inst ? `${instW}×${instH}` : 'null'}</div>
+      <div>data:{seriesCount}s/{timesCount}p cols:{selectedColumns.length}</div>
+      <div>tick:{tick} (click→resize)</div>
+    </div>
+  );
+}
 
 function CorrelationHeatmap({ data }: { data: { labels: string[]; matrix: number[][] } }) {
   const ref = useRef<HTMLDivElement>(null);

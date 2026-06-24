@@ -16,7 +16,6 @@ export interface AircraftModel {
   id: number;
   name: string;
   format_category: string;
-  description: string;
   created_at: string;
   aircraft_count?: number;
   total_flights?: number;
@@ -192,13 +191,22 @@ export interface DataTypeGroup {
 
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');
-export const createModel = (name: string, formatCategory: string, description?: string) =>
-  request<AircraftModel>('/models', { method: 'POST', body: JSON.stringify({ name, format_category: formatCategory, description: description || '' }) });
+export const createModel = (name: string, formatCategory: string) =>
+  request<AircraftModel>('/models', { method: 'POST', body: JSON.stringify({ name, format_category: formatCategory }) });
 export const createModelFromScan = (name: string, sourcePath: string, formatCategory: string) =>
   request<AircraftModel>('/models/from-scan', { method: 'POST', body: JSON.stringify({ name, source_path: sourcePath, format_category: formatCategory }) });
 export const updateModel = (id: number, name: string) =>
   request('/models/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const deleteModel = (id: number) => request('/models/' + id, { method: 'DELETE' });
+
+export const exportModel = (modelId: number) =>
+  request<{ ok: boolean; path: string; filename: string }>(`/models/${modelId}/export`);
+
+export const importModel = (name: string, data: object) =>
+  request<AircraftModel>('/models/import', {
+    method: 'POST',
+    body: JSON.stringify({ name, data }),
+  });
 
 // Model Columns
 export const getModelColumns = (modelId: number) =>

@@ -53,7 +53,11 @@ export default function ComparePage({
     } catch { setTreeAircraftList([]); }
   };
 
-  const openTreeAircraft = (acId: number) => {
+  // Click (not hover) to commit selection — hover would close the popover
+  // before the user can click, and would also leak the hovered aircraft id
+  // into App-level state, which can change selectedFlightId via the
+  // aircraft→flight auto-pick effect.
+  const selectTreeAircraft = (acId: number) => {
     onSelectModel(treeModelId!);
     onSelectAircraft(acId);
     setTreeOpen(false);
@@ -162,6 +166,11 @@ export default function ComparePage({
         nameTextStyle: { color: '#6b7280' },
         axisLabel: { color: '#9ca3af' },
         splitLine: { lineStyle: { color: '#f3f4f6' } },
+        // Snap the axis to actual data extents so the curve reaches the
+        // right edge (default 'value' axis rounds up to a nice number,
+        // leaving empty space on the right).
+        min: 'dataMin',
+        max: 'dataMax',
       },
       yAxis: {
         type: 'value',
@@ -296,7 +305,7 @@ export default function ComparePage({
                   visibleTreeAircraft.map((a) => (
                     <button
                       key={a.id}
-                      onMouseEnter={() => openTreeAircraft(a.id)}
+                      onClick={() => selectTreeAircraft(a.id)}
                       className={`w-full text-left px-3 py-1.5 text-sm ${
                         a.id === selectedAircraftId
                           ? 'bg-blue-50 text-blue-700'

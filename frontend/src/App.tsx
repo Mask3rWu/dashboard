@@ -78,11 +78,16 @@ export default function App() {
     try {
       const data = await listAircraft(modelId);
       setAircraft(data.aircraft);
-      if (data.aircraft.length > 0) {
-        setSelectedAircraftId(data.aircraft[0].id);
-      } else {
-        setSelectedAircraftId(null);
-      }
+      // Use functional update to avoid overwriting a user selection
+      // that was set concurrently (e.g. from ComparePage tree selector).
+      // Only auto-select the first aircraft if the current selection does
+      // not belong to this model.
+      setSelectedAircraftId((prev) => {
+        if (prev != null && data.aircraft.some((a) => a.id === prev)) {
+          return prev; // preserve user's explicit selection
+        }
+        return data.aircraft.length > 0 ? data.aircraft[0].id : null;
+      });
     } catch (e) {
       console.error('Failed to load aircraft:', e);
       setAircraft([]);
@@ -194,7 +199,7 @@ export default function App() {
           <span className="text-xs text-gray-400">{flights.length} 架次已导入</span>
         )}
       </header>
-      <main className="flex-1 overflow-hidden">
+      <main className="flex-1 overflow-hidden relative">
         {loading ? (
           <div className="flex items-center justify-center h-full text-gray-400">加载中...</div>
         ) : initError ? (
@@ -226,6 +231,7 @@ export default function App() {
             <div className={tab === 'flight' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
               <ErrorBoundary>
                 <FlightView
+                  active={tab === 'flight'}
                   flights={flights}
                   selectedFlightId={selectedFlightId}
                   onSelectFlight={setSelectedFlightId}
