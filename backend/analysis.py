@@ -55,15 +55,20 @@ def _resolve_table_col(conn, model_id, col_key):
 
 
 def _get_column_info(conn, model_id, dt_key, col_name):
-    """Get display label, unit, and scale_factor for a column from the registry."""
+    """Get display label, unit, scale_factor, and is_numeric for a column from the registry."""
     row = conn.execute(
-        "SELECT display_label, unit, scale_factor FROM column_registry "
+        "SELECT display_label, unit, scale_factor, is_numeric FROM column_registry "
         "WHERE model_id=? AND data_type_key=? AND column_name=?",
         (model_id, dt_key, col_name)
     ).fetchone()
     if row:
-        return row['display_label'], row['unit'] or '', row['scale_factor'] or 1.0
-    return col_name, '', 1.0
+        return (
+            row['display_label'],
+            row['unit'] or '',
+            row['scale_factor'] or 1.0,
+            bool(row['is_numeric']),
+        )
+    return col_name, '', 1.0, True
 
 
 # ── Column listing ──
@@ -253,7 +258,7 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
         # Align to reference times
         for col in cols:
             full_key = f"{dt_key}.{col}"
-            label, unit, scale_factor = _get_column_info(conn, model_id, dt_key, col)
+            label, unit, scale_factor, is_numeric = _get_column_info(conn, model_id, dt_key, col)
             values = []
 
             ti = 0
@@ -268,13 +273,20 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
                 else:
                     values.append(None)
 
-            series[full_key] = {
+            entry = {
                 'label': label,
                 'unit': unit,
                 'scale_factor': scale_factor,
+                'is_numeric': is_numeric,
                 'table': table_name,
-                'values': values,
             }
+            if is_numeric:
+                entry['values'] = values
+            else:
+                # Text columns: return raw string values, skip chart rendering
+                entry['values'] = []
+                entry['text_values'] = values
+            series[full_key] = entry
 
     # Get alerts — use column_registry for actual column names
     alert_table = get_table_name(conn, model_id, 'alert')

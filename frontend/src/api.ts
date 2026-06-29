@@ -1,15 +1,44 @@
 const BASE = '/api';
 
+function parseErrorBody(text: string, fallback: string): string {
+  if (!text) return fallback;
+  try {
+    const body = JSON.parse(text);
+    const detail = body.detail || body.error || fallback;
+    const errorType = body.error_type ? ` (${body.error_type})` : '';
+    return `${detail}${errorType}`;
+  } catch {
+    return text || fallback;
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`无法连接到后端服务，请确认应用已正常启动。网络错误：${msg}`);
+  }
+
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || res.statusText);
+    const text = await res.text();
+    const detail = parseErrorBody(text, res.statusText);
+    throw new Error(`${detail || '请求失败'} (HTTP ${res.status})`);
   }
   return res.json();
+}
+
+export interface HealthStatus {
+  status: string;
+  version: string;
+  data_dir: string;
+  db_path: string;
+  db_exists: boolean;
+  frontend_dir_exists: boolean;
 }
 
 export interface AircraftModel {
@@ -132,8 +161,10 @@ export interface AlignedData {
     label: string;
     unit: string;
     scale_factor: number;
+    is_numeric: boolean;
     table: string;
     values: (number | null)[];
+    text_values?: (string | null)[];
   }>;
   alerts: AlertItem[];
   mask?: boolean[];
@@ -206,6 +237,9 @@ export interface DataTypeGroup {
   label: string;
   columns: ColumnDetail[];
 }
+
+// Health
+export const checkHealth = () => request<HealthStatus>('/health');
 
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');

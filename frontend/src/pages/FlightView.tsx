@@ -79,7 +79,11 @@ function buildChartOption(
   scaleFactors: Record<string, number>,
 ): echarts.EChartsOption {
   const times = aligned.times || [];
-  const seriesList = Object.entries(aligned.series || {});
+  const allSeries = Object.entries(aligned.series || {});
+  // Split: numeric series go to chart, text series are tooltip-only
+  const numericSeries = allSeries.filter(([, s]) => s.is_numeric !== false);
+  const textSeries = allSeries.filter(([, s]) => s.is_numeric === false);
+  const seriesList = numericSeries; // chart uses only numeric
 
   const getValues = (vals: (number | null)[], key: string) => {
     const sf = scaleFactors[key] ?? 1.0;
@@ -221,13 +225,19 @@ function buildChartOption(
         if (!Array.isArray(params)) return '';
         const mainParams = params.filter((p: any) =>
           p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__');
-        if (mainParams.length === 0) return '';
-        const time = mainParams[0]?.name || '';
+        if (mainParams.length === 0 && textSeries.length === 0) return '';
+        const timeIdx = mainParams[0]?.dataIndex ?? -1;
+        const time = mainParams[0]?.name || (timeIdx >= 0 ? (times[timeIdx] || '') : '');
         let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
+        // Deduplicate by seriesName (ECharts may return the same series twice
+        // when multiple yAxes share data — filter keeps only the first occurrence)
+        const seenNames = new Set<string>();
         mainParams.forEach((p: any) => {
+          if (!p.seriesName || seenNames.has(p.seriesName)) return;
+          seenNames.add(p.seriesName);
           if (p.value?.[1] != null) {
             const sIdx = p.seriesIndex;
-            const key = seriesList[sIdx]?.[0] || '';
+            const key = numericSeries[sIdx]?.[0] || '';
             const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
             const displayVal = Number(p.value[1]).toFixed(2);
             html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
@@ -238,13 +248,21 @@ function buildChartOption(
             html += `</div>`;
           }
         });
+        if (timeIdx >= 0) {
+          textSeries.forEach(([, s]) => {
+            const textVal = s.text_values?.[timeIdx];
+            if (textVal != null && textVal !== '') {
+              html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#9ca3af;margin-right:4px"></span> ${s.label}: <strong>${textVal}</strong></div>`;
+            }
+          });
+        }
         return html;
       },
     },
     legend: {
       type: 'scroll', top: 0,
       textStyle: { color: '#6b7280', fontSize: 11 },
-      data: seriesList.map(([, s]) => isNorm ? s.label : `${s.label} (${s.unit || '-'})`),
+      data: numericSeries.map(([, s]) => isNorm ? s.label : `${s.label} (${s.unit || '-'})`),
     },
     grid,
     xAxis: xAxisArr,

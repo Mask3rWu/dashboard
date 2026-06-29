@@ -371,6 +371,36 @@ def _sanitize_column_name(name):
     return cleaned
 
 
+def _detect_column_types(filepath, has_header, has_uav, num_columns):
+    """Sample one data row and detect TEXT vs REAL columns.
+
+    Reads the first non-header row from filepath and tries float() on
+    each token.  Returns a list of types (one per column), defaulting to 'REAL'.
+    Falls back to all 'REAL' on any read error.
+    """
+    types = ['REAL'] * num_columns
+    try:
+        from backend.scanner import parse_lines, has_header as _has_header
+        lines = parse_lines(filepath)
+        if not lines:
+            return types
+        start = 1 if _has_header(filepath) else 0
+        if start >= len(lines):
+            return types
+        tokens = lines[start].split()
+        offset = 1 + (1 if has_uav else 0)  # skip Time + optional UAVSendID
+        for i in range(num_columns):
+            idx = offset + i
+            if idx < len(tokens):
+                try:
+                    float(tokens[idx])
+                except (ValueError, TypeError):
+                    types[i] = 'TEXT'
+    except Exception:
+        pass
+    return types
+
+
 def generate_config_from_scan(source_path):
     """Analyze a folder and generate a format config dict from discovered file patterns.
 
@@ -453,17 +483,20 @@ def generate_config_from_scan(source_path):
         # Data tokens:    time [uavid] val1 val2 ... valN
         offset = 1 if has_uav else 0
         if has_header_flag and header_names and len(header_names) >= 2:
-            # Skip Time(0) and optional UAVSendID(1), rest are data columns
             hdr_offset = 1 + (1 if has_uav else 0)
+            num_cols = len(header_names) - hdr_offset
+            # Sample first data row to detect TEXT vs REAL columns
+            col_types = _detect_column_types(filepath, has_header_flag, has_uav, num_cols)
             columns = []
             for i in range(hdr_offset, len(header_names)):
                 col_name = _sanitize_column_name(header_names[i])
                 col_label = header_names[i]  # Keep original for display
+                col_type = col_types[i - hdr_offset] if (i - hdr_offset) < len(col_types) else 'REAL'
                 columns.append({
                     'name': col_name,
                     'label': col_label,
                     'unit': '',
-                    'type': 'REAL',
+                    'type': col_type,
                     'ordinal': i,
                 })
         else:
