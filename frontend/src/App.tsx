@@ -3,7 +3,7 @@ import ImportPage from './pages/ImportPage';
 import FlightView from './pages/FlightView';
 import ComparePage from './pages/ComparePage';
 import ModelManager from './pages/ModelManager';
-import { listFlights, listModels, listAircraft, type Flight, type AircraftModel, type Aircraft } from './api';
+import { checkHealth, listFlights, listModels, listAircraft, type Flight, type AircraftModel, type Aircraft } from './api';
 
 type Tab = 'import' | 'models' | 'flight' | 'compare';
 
@@ -105,6 +105,7 @@ export default function App() {
     setLoading(true);
     setInitError(null);
     try {
+      await checkHealth();
       const [modelsData, flightsData] = await Promise.all([listModels(), listFlights()]);
       setModels(modelsData.models);
       setFlights(flightsData.flights);
@@ -127,7 +128,10 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to initialize', err);
-      setInitError('无法连接到后端服务，请确认应用已启动');
+      const message = err instanceof Error ? err.message : String(err);
+      setInitError(
+        `${message}\n\n如问题持续，请查看日志：%APPDATA%\\FlightAnalyzer\\startup.log`
+      );
     } finally {
       setLoading(false);
     }
@@ -207,7 +211,7 @@ export default function App() {
             <div className="text-center max-w-md p-8">
               <div className="text-red-500 text-4xl mb-4">⚠️</div>
               <h2 className="text-lg font-bold text-gray-800 mb-2">连接失败</h2>
-              <p className="text-sm text-gray-500 mb-4">{initError}</p>
+              <p className="text-sm text-gray-500 mb-4 whitespace-pre-line">{initError}</p>
               <button
                 onClick={doInit}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-500"

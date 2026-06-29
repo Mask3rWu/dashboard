@@ -8,8 +8,9 @@ import time as _time
 import traceback
 import ctypes
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -23,7 +24,7 @@ else:
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from backend.database import init_db, get_db
+from backend.database import init_db, get_db, DATA_DIR, DB_PATH
 from backend.parser import import_session
 from backend.format_configs import (
     register_model_tables, get_columns_for_model,
@@ -36,6 +37,29 @@ from backend import analysis
 
 from datetime import datetime
 
+
+# ─── Serve Frontend ────────────────────────────────────────
+
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+
+
+# ─── Startup Logging ─────────────────────────────────────────
+
+STARTUP_LOG_PATH = os.path.join(DATA_DIR, "startup.log")
+
+
+def _startup_log(msg):
+    """Append a timestamped message to the startup log."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        with open(STARTUP_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        # Startup logging must never prevent the app from starting.
+        pass
+
+
 # ─── App Setup ─────────────────────────────────────────────
 
 app = FastAPI(title="Flight Analyzer", version="2.0.0")
@@ -45,6 +69,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Log unhandled API errors and return a structured response."""
+    _startup_log(
+        f"UNHANDLED API ERROR {request.method} {request.url.path}: "
+        f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+    )
+    detail = str(exc) or "Internal Server Error"
+    if len(detail) > 1000:
+        detail = detail[:1000] + "..."
+    return JSONResponse(
+        status_code=500,
+        content={"detail": detail, "error_type": type(exc).__name__},
+    )
+
+
+@app.get("/api/health")
+def health_check():
+    """Health check used by the frontend before loading data."""
+    return {
+        "status": "ok",
+        "version": app.version,
+        "data_dir": DATA_DIR,
+        "db_path": DB_PATH,
+        "db_exists": os.path.exists(DB_PATH),
+        "frontend_dir_exists": os.path.isdir(FRONTEND_DIR),
+    }
 
 
 # ─── Pydantic Models ───────────────────────────────────────
@@ -1041,7 +1094,6 @@ def delete_filter_preset(preset_id: int):
 
 # ─── Serve Frontend ────────────────────────────────────────
 
-FRONTEND_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
@@ -1049,14 +1101,20 @@ if os.path.isdir(FRONTEND_DIR):
 # ─── Entry Point ───────────────────────────────────────────
 
 def _show_error(title, msg):
-    """Show error to user — MessageBox in GUI mode, print otherwise."""
+    """Show error to user — MessageBox in GUI mode, stderr otherwise."""
+    full_msg = f"{msg}\n\n日志文件: {STARTUP_LOG_PATH}"
+    _startup_log(f"{title}: {msg}")
     if sys.platform == 'win32':
         try:
-            ctypes.windll.user32.MessageBoxW(0, str(msg), str(title), 0x10)
+            ctypes.windll.user32.MessageBoxW(0, str(full_msg), str(title), 0x10)
             return
         except Exception:
             pass
-    print(f"[{title}] {msg}", file=sys.stderr)
+    try:
+        if sys.stderr:
+            print(f"[{title}] {full_msg}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 _server_error = None
@@ -1099,10 +1157,36 @@ def _build_log_config():
     }
 
 
+def _find_available_port(start=18520, max_attempts=10):
+    """Return the first available localhost port in a small range."""
+    import socket
+    for offset in range(max_attempts):
+        port = start + offset
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            _startup_log(f"Port {port} is available")
+            return port
+        except OSError as e:
+            _startup_log(f"Port {port} is unavailable: {e}")
+        finally:
+            sock.close()
+    return None
+
+
+def _sleep_forever():
+    try:
+        while True:
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
 def run_server(port=18520):
     """Start uvicorn in a daemon thread."""
     global _server_error
     import uvicorn
+    _startup_log(f"Starting uvicorn on http://127.0.0.1:{port}")
     try:
         if getattr(sys, 'frozen', False):
             uvicorn.run(
@@ -1113,6 +1197,7 @@ def run_server(port=18520):
             uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
     except Exception as e:
         _server_error = f"{e}\n{traceback.format_exc()}"
+        _startup_log(f"Server failed to start: {_server_error}")
         _show_error("Server Error", f"Server failed to start:\n{_server_error}")
 
 
@@ -1133,9 +1218,35 @@ def _wait_for_server(server_thread, port, timeout=10):
 
 
 def main():
-    print("Starting Flight Analyzer...")
-    init_db()
-    port = 18520
+    _startup_log("=== Starting Flight Analyzer ===")
+    _startup_log(f"BASE_DIR={BASE_DIR}")
+    _startup_log(f"FRONTEND_DIR={FRONTEND_DIR} exists={os.path.isdir(FRONTEND_DIR)}")
+    _startup_log(f"DATA_DIR={DATA_DIR}")
+    _startup_log(f"DB_PATH={DB_PATH}")
+
+    try:
+        db_result = init_db()
+        _startup_log(f"Database initialized: {db_result}")
+    except Exception as e:
+        details = f"{e}\n{traceback.format_exc()}"
+        _startup_log(f"Database initialization failed: {details}")
+        _show_error(
+            "Database Error",
+            "数据库初始化失败，应用无法启动。\n\n"
+            f"数据目录: {DATA_DIR}\n"
+            f"数据库: {DB_PATH}\n\n"
+            f"错误: {e}",
+        )
+        sys.exit(1)
+
+    port = _find_available_port(18520, 10)
+    if port is None:
+        _show_error(
+            "Startup Error",
+            "无法找到可用的本地端口（18520-18529）。\n"
+            "请关闭其他实例或占用这些端口的程序后重试。",
+        )
+        sys.exit(1)
 
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
     server_thread.start()
@@ -1145,46 +1256,41 @@ def main():
         if _server_error:
             msg += f"Server error:\n{_server_error}"
         else:
-            msg += "Check that the backend modules can be imported correctly."
+            msg += "Check startup.log for backend import or startup errors."
+        _startup_log(msg)
         _show_error("Startup Error", msg)
         sys.exit(1)
 
-    print(f"Server ready at http://127.0.0.1:{port}")
+    app_url = f"http://127.0.0.1:{port}"
+    _startup_log(f"Server ready at {app_url}")
 
     if os.path.isdir(FRONTEND_DIR):
         try:
             import webview
+            _startup_log("Opening pywebview window")
             webview.create_window(
                 "Flight Analyzer",
-                f"http://127.0.0.1:{port}",
+                app_url,
                 width=1400, height=900,
                 min_size=(1024, 680),
             )
             # Enable DevTools (right-click → Inspect, or press F12).
             # TODO: set to False before shipping a release build.
             webview.start(debug=True)
-        except ImportError:
+        except ImportError as e:
+            _startup_log(f"pywebview unavailable, falling back to browser: {e}")
             import webbrowser
-            webbrowser.open(f"http://127.0.0.1:{port}")
-            print(f"Server running at http://127.0.0.1:{port}")
-            print("Press Ctrl+C to exit.")
-            try:
-                while True:
-                    _time.sleep(1)
-            except KeyboardInterrupt:
-                pass
+            webbrowser.open(app_url)
+            _sleep_forever()
+        except Exception as e:
+            _startup_log(f"pywebview failed: {e}\n{traceback.format_exc()}")
+            _show_error("WebView Error", f"桌面窗口启动失败：\n{e}")
+            sys.exit(1)
     else:
+        _startup_log("Frontend dist not found, falling back to browser")
         import webbrowser
-        webbrowser.open(f"http://127.0.0.1:{port}")
-        print(f"Server running at http://127.0.0.1:{port}")
-        print("Run: cd frontend && npm run build   to build the frontend")
-        print("Then: cd frontend && npm run dev    for dev mode")
-        print("Press Ctrl+C to exit.")
-        try:
-            while True:
-                _time.sleep(1)
-        except KeyboardInterrupt:
-            pass
+        webbrowser.open(app_url)
+        _sleep_forever()
 
 
 if __name__ == "__main__":

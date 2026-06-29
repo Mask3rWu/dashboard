@@ -4,6 +4,8 @@ import os
 import sys
 import sqlite3
 import logging
+import shutil
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +15,112 @@ if sys.platform == 'win32':
 else:
     DATA_DIR = os.path.join(os.path.expanduser('~'), '.flightanalyzer')
 
-os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
+CURRENT_SCHEMA_VERSION = 7
+CORE_TABLES = {
+    'schema_version', 'aircraft_models', 'aircraft', 'flights',
+    'data_table_registry', 'column_registry', 'presets', 'filter_presets',
+}
+REQUIRED_COLUMNS = {
+    'aircraft_models': {
+        'id', 'name', 'format_category', 'has_header', 'has_uav_send_id',
+        'extract_serial_from_path', 'created_at',
+    },
+    'flights': {
+        'id', 'aircraft_id', 'name', 'source_path', 'session_key',
+        'flight_date', 'start_time', 'end_time', 'duration_sec',
+        'total_rows', 'import_time',
+    },
+    'data_table_registry': {
+        'id', 'model_id', 'data_type_key', 'table_name', 'display_label',
+        'file_patterns', 'is_alert',
+    },
+    'column_registry': {
+        'id', 'model_id', 'data_type_key', 'table_name', 'column_name',
+        'display_label', 'unit', 'data_type', 'ordinal', 'is_numeric',
+        'scale_factor',
+    },
+}
+
+def ensure_data_dir():
+    """Create the application data directory with contextual errors."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(
+            f"Cannot create data directory: {DATA_DIR}. "
+            f"Check folder permissions and disk space. Original error: {e}"
+        ) from e
+
+
+def _table_names(conn):
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _table_columns(conn, table_name):
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def _max_schema_version(conn):
+    row = conn.execute(
+        "SELECT MAX(version) FROM schema_version"
+    ).fetchone()
+    return row[0] if row and row[0] is not None else 0
+
+
+def _validate_current_schema(conn):
+    """Return a reason string when the DB is not compatible with this build."""
+    tables = _table_names(conn)
+    missing_tables = sorted(CORE_TABLES - tables)
+    if missing_tables:
+        return f"missing tables: {', '.join(missing_tables)}"
+
+    version = _max_schema_version(conn)
+    if version < CURRENT_SCHEMA_VERSION:
+        return f"schema version {version} < required {CURRENT_SCHEMA_VERSION}"
+
+    for table_name, required in REQUIRED_COLUMNS.items():
+        columns = _table_columns(conn, table_name)
+        missing_columns = sorted(required - columns)
+        if missing_columns:
+            return f"table {table_name} missing columns: {', '.join(missing_columns)}"
+
+    return None
+
+
+def _backup_existing_database():
+    """Move an incompatible DB aside and return the backup path."""
+    if not os.path.exists(DB_PATH):
+        return None
+
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_path = f"{DB_PATH}.backup_{stamp}"
+    counter = 1
+    while os.path.exists(backup_path):
+        backup_path = f"{DB_PATH}.backup_{stamp}_{counter}"
+        counter += 1
+
+    suffixes = ['', '-wal', '-shm']
+    for suffix in suffixes:
+        src = DB_PATH + suffix
+        if os.path.exists(src):
+            dst = backup_path + suffix
+            shutil.move(src, dst)
+    return backup_path
+
+
+def _create_fresh_schema(conn):
+    """Create the current management schema and mark it as current."""
+    conn.executescript(MANAGEMENT_SCHEMA)
+    for v in range(1, CURRENT_SCHEMA_VERSION + 1):
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (v,)
+        )
+
 
 # ── Schema fragments ──
 
@@ -234,88 +340,57 @@ def _run_v7_migration(conn):
 
 
 def init_db():
-    """Create all management tables. Run migrations if needed.
+    """Create a current-version database, replacing incompatible old DBs.
 
-    Data tables (model_N_*_data) are created dynamically when models
-    are registered, not during init.
+    The app is still iterating quickly, so old schemas are not migrated during
+    normal startup. Instead, an incompatible database is moved aside as a
+    timestamped backup and a clean current schema is created.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=OFF")
+    ensure_data_dir()
+    db_existed = os.path.exists(DB_PATH)
 
-    # Always create management tables
-    conn.executescript(MANAGEMENT_SCHEMA)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=OFF")
+    except sqlite3.Error as e:
+        raise RuntimeError(f"Cannot open SQLite database: {DB_PATH}. Error: {e}") from e
 
-    # For fresh installs (no schema_version entries), mark all versions as applied
-    # since MANAGEMENT_SCHEMA already creates tables with the latest schema
-    existing = conn.execute(
-        "SELECT COUNT(*) as cnt FROM schema_version"
-    ).fetchone()
-    if existing['cnt'] == 0:
-        for v in range(1, 8):
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (v,)
-            )
-        logger.info("Fresh install detected — all schema versions marked as applied")
+    try:
+        if db_existed:
+            reason = _validate_current_schema(conn)
+            if reason:
+                logger.warning(
+                    "Incompatible database detected — backing up and rebuilding: %s",
+                    reason,
+                )
+                conn.close()
+                backup_path = _backup_existing_database()
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys=OFF")
+                _create_fresh_schema(conn)
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.commit()
+                logger.warning("Old database backed up to: %s", backup_path)
+                return {"created": True, "rebuilt": True, "backup_path": backup_path, "reason": reason}
+
+            logger.info("Current database schema verified at %s", DB_PATH)
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.commit()
+            return {"created": False, "rebuilt": False, "backup_path": None, "reason": None}
+
+        _create_fresh_schema(conn)
+        logger.info("Fresh database created at %s", DB_PATH)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.commit()
-        conn.close()
-        return
-
-    # Check if migration is needed
-    if _has_old_schema(conn) and not _is_migrated(conn):
-        logger.info("v1 schema detected — running migration to v2")
+        return {"created": True, "rebuilt": False, "backup_path": None, "reason": None}
+    except sqlite3.Error as e:
+        raise RuntimeError(
+            f"Database initialization failed at {DB_PATH}. Error: {e}"
+        ) from e
+    finally:
         try:
-            _run_v2_migration(conn)
-        except Exception as e:
-            logger.error(f"Migration failed: {e}")
-            raise
-
-    # v3 migration: relax format_category, add config_path
-    if not _is_migrated_v3(conn):
-        logger.info("v2 schema detected — running migration to v3")
-        try:
-            _run_v3_migration(conn)
-        except Exception as e:
-            logger.error(f"v3 migration failed: {e}")
-            raise
-
-    # v4 migration: model-scoped presets
-    if not _is_migrated_v4(conn):
-        logger.info("v3 schema detected — running migration to v4")
-        try:
-            _run_v4_migration(conn)
-        except Exception as e:
-            logger.error(f"v4 migration failed: {e}")
-            raise
-
-    # v5 migration: column scale_factor
-    if not _is_migrated_v5(conn):
-        logger.info("v4 schema detected — running migration to v5")
-        try:
-            _run_v5_migration(conn)
-        except Exception as e:
-            logger.error(f"v5 migration failed: {e}")
-            raise
-
-    # v6 migration: full datetime in flights
-    if not _is_migrated_v6(conn):
-        logger.info("v5 schema detected — running migration to v6")
-        try:
-            _run_v6_migration(conn)
-        except Exception as e:
-            logger.error(f"v6 migration failed: {e}")
-            raise
-
-    # v7 migration: JSON config → DB
-    if not _is_migrated_v7(conn):
-        logger.info("v6 schema detected — running migration to v7 (JSON config → DB)")
-        try:
-            _run_v7_migration(conn)
-        except Exception as e:
-            logger.error(f"v7 migration failed: {e}")
-            raise
-
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.commit()
-    conn.close()
+            conn.close()
+        except Exception:
+            pass

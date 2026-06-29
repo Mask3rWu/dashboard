@@ -1,9 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
+
 datas = [('frontend/dist', 'frontend/dist'), ('backend', 'backend')]
 datas += collect_data_files('fastapi')
 datas += collect_data_files('uvicorn')
+
+hiddenimports = [
+    'uvicorn.logging',
+    'uvicorn.loops.auto',
+    'uvicorn.loops.asyncio',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.http.h11_impl',
+    'uvicorn.lifespan.on',
+    'tkinter',
+    'tkinter.filedialog',
+    'webview',
+    'webview.platforms.edgechromium',
+    'webview.platforms.winforms',
+]
 
 
 a = Analysis(
@@ -11,7 +26,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=['uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'webview'],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
