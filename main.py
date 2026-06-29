@@ -96,8 +96,8 @@ class UpdateAircraftRequest(BaseModel):
 
 class AlignedRequest(BaseModel):
     column_keys: list[str]
-    ref_table: str = "gps"
-    tolerance: float = 0.5
+    ref_table: str | None = None
+    tolerance: float | None = None
     filter: dict | None = None
 
 

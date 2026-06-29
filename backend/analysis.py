@@ -79,15 +79,91 @@ def get_columns_for_flight_api(flight_id):
     return result
 
 
+def _get_table_stats(conn, table_name, flight_id):
+    """Return row count, time span, and estimated sampling rate for a flight table."""
+    row = conn.execute(
+        f"""SELECT COUNT(*) as row_count,
+                  MIN(time_sec) as start_sec,
+                  MAX(time_sec) as end_sec
+           FROM {table_name} WHERE flight_id=?""",
+        (flight_id,)
+    ).fetchone()
+    row_count = row['row_count'] if row else 0
+    start_sec = row['start_sec'] if row else None
+    end_sec = row['end_sec'] if row else None
+    duration = (end_sec - start_sec) if start_sec is not None and end_sec is not None else 0
+    sample_hz = ((row_count - 1) / duration) if row_count > 1 and duration > 0 else None
+    return {
+        'row_count': row_count,
+        'start_sec': start_sec,
+        'end_sec': end_sec,
+        'duration_sec': duration,
+        'sample_hz': sample_hz,
+    }
+
+
+def _get_available_ref_tables(conn, model_id, flight_id):
+    """Return registered data tables that actually contain rows for this flight."""
+    rows = conn.execute(
+        """SELECT data_type_key, display_label, table_name, is_alert
+           FROM data_table_registry WHERE model_id=? ORDER BY data_type_key""",
+        (model_id,)
+    ).fetchall()
+
+    refs = []
+    for row in rows:
+        stats = _get_table_stats(conn, row['table_name'], flight_id)
+        if stats['row_count'] == 0:
+            continue
+        refs.append({
+            'data_type_key': row['data_type_key'],
+            'label': row['display_label'],
+            'table_name': row['table_name'],
+            'is_alert': bool(row['is_alert']),
+            **stats,
+        })
+    return refs
+
+
+def _pick_reference_table(ref_tables, requested_ref_table=None):
+    """Pick a reference table, preferring the request then the highest-rate data table."""
+    if requested_ref_table:
+        requested = next(
+            (r for r in ref_tables if r['data_type_key'] == requested_ref_table),
+            None,
+        )
+        if requested:
+            return requested
+
+    non_alert = [r for r in ref_tables if not r['is_alert']]
+    candidates = non_alert or ref_tables
+    if not candidates:
+        return None
+    return max(candidates, key=lambda r: (r['sample_hz'] or 0, r['row_count']))
+
+
+def _auto_tolerance(ref_info, selected_infos):
+    """Choose a nearest-neighbor tolerance from the slowest selected sampling period."""
+    periods = []
+    for info in [ref_info, *selected_infos]:
+        hz = info.get('sample_hz') if info else None
+        if hz and hz > 0:
+            periods.append(1 / hz)
+    if not periods:
+        return 0.5
+    return max(0.5, min(5.0, max(periods) * 0.6))
+
+
 # ── Aligned data ──
 
-def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filter_spec=None):
+def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, filter_spec=None):
     """Align selected columns to a reference time series.
 
     Args:
         flight_id: Flight ID
         column_keys: List of "data_type_key.column_name" strings
-        ref_table: Reference data_type_key for time base ("gps" default)
+        ref_table: Reference data_type_key for time base. If omitted, the
+                   highest-rate data table in the current flight is used.
         tolerance: Max time difference for nearest-neighbor matching
         filter_spec: Optional filter with {logic, conditions}
 
@@ -100,15 +176,12 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
         conn.close()
         return {'times': [], 'series': {}, 'alerts': [], 'error': 'Flight not found'}
 
-    # Determine reference table
-    if ref_table is None:
-        ref_table = 'gps'
-    ref_table_name = get_table_name(conn, model_id, ref_table)
-    if ref_table_name is None:
-        ref_table_name = get_table_name(conn, model_id, 'gps')
-    if ref_table_name is None:
+    ref_tables = _get_available_ref_tables(conn, model_id, flight_id)
+    ref_info = _pick_reference_table(ref_tables, ref_table)
+    if ref_info is None:
         conn.close()
-        return {'times': [], 'series': {}, 'alerts': [], 'error': 'No reference table found'}
+        return {'times': [], 'series': {}, 'alerts': []}
+    ref_table_name = ref_info['table_name']
 
     # Get reference times
     ref_rows = conn.execute(
@@ -117,26 +190,17 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
     ).fetchall()
 
     if not ref_rows:
-        # Try gps as fallback
-        gps_table = get_table_name(conn, model_id, 'gps')
-        if gps_table and gps_table != ref_table_name:
+        # Fall back to another populated table for this flight.
+        for candidate in ref_tables:
+            if candidate['table_name'] == ref_table_name:
+                continue
             ref_rows = conn.execute(
-                f"SELECT time_str, time_sec FROM {gps_table} WHERE flight_id=? ORDER BY time_sec",
-                (flight_id,)
-            ).fetchall()
-
-    if not ref_rows:
-        # Try any available table
-        tables = conn.execute(
-            "SELECT table_name FROM data_table_registry WHERE model_id=?",
-            (model_id,)
-        ).fetchall()
-        for t in tables:
-            ref_rows = conn.execute(
-                f"SELECT time_str, time_sec FROM {t['table_name']} WHERE flight_id=? ORDER BY time_sec LIMIT 1",
+                f"SELECT time_str, time_sec FROM {candidate['table_name']} WHERE flight_id=? ORDER BY time_sec",
                 (flight_id,)
             ).fetchall()
             if ref_rows:
+                ref_info = candidate
+                ref_table_name = candidate['table_name']
                 break
 
     if not ref_rows:
@@ -152,6 +216,13 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
         if '.' in key:
             dt_key, col_name = key.split('.', 1)
             by_dt[dt_key].append(col_name)
+
+    selected_table_infos = []
+    for dt_key in by_dt:
+        selected_info = next((r for r in ref_tables if r['data_type_key'] == dt_key), None)
+        if selected_info:
+            selected_table_infos.append(selected_info)
+    effective_tolerance = tolerance if tolerance is not None else _auto_tolerance(ref_info, selected_table_infos)
 
     # Fetch and align data for each data type
     series = {}
@@ -192,7 +263,7 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
                     table_data[ti + 1][0] == table_data[ti][0]
                 ):
                     ti += 1
-                if ti < len(table_data) and abs(table_data[ti][0] - ref_t) <= tolerance:
+                if ti < len(table_data) and abs(table_data[ti][0] - ref_t) <= effective_tolerance:
                     values.append(table_data[ti][1].get(col))
                 else:
                     values.append(None)
@@ -247,6 +318,18 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=0.5, filt
     conn.close()
 
     result = {
+        'ref_table': ref_info['data_type_key'],
+        'ref_label': ref_info['label'],
+        'ref_sample_hz': ref_info['sample_hz'],
+        'tolerance': effective_tolerance,
+        'ref_tables': [{
+            'data_type_key': r['data_type_key'],
+            'label': r['label'],
+            'row_count': r['row_count'],
+            'sample_hz': r['sample_hz'],
+            'duration_sec': r['duration_sec'],
+            'is_alert': r['is_alert'],
+        } for r in ref_tables],
         'times': times,
         'ref_secs': ref_secs,
         'series': series,

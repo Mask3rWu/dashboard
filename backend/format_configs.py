@@ -739,21 +739,45 @@ def get_columns_for_flight(conn, flight_id):
         (model_id,)
     ).fetchall()
 
+    table_stats = {}
     groups = OrderedDict()
     for row in rows:
-        # Check if this table has data
-        cnt = conn.execute(
-            f"SELECT COUNT(*) as cnt FROM {row['table_name']} WHERE flight_id=? LIMIT 1",
-            (flight_id,)
-        ).fetchone()
-        if not cnt or cnt['cnt'] == 0:
+        tk = row['data_type_key']
+        table_name = row['table_name']
+
+        if tk not in table_stats:
+            stat = conn.execute(
+                f"""SELECT COUNT(*) as row_count,
+                          MIN(time_sec) as start_sec,
+                          MAX(time_sec) as end_sec
+                   FROM {table_name} WHERE flight_id=?""",
+                (flight_id,)
+            ).fetchone()
+            row_count = stat['row_count'] if stat else 0
+            start_sec = stat['start_sec'] if stat else None
+            end_sec = stat['end_sec'] if stat else None
+            duration = (end_sec - start_sec) if start_sec is not None and end_sec is not None else 0
+            sample_hz = ((row_count - 1) / duration) if row_count > 1 and duration > 0 else None
+            table_stats[tk] = {
+                'row_count': row_count,
+                'start_sec': start_sec,
+                'end_sec': end_sec,
+                'duration_sec': duration,
+                'sample_hz': sample_hz,
+            }
+
+        stats = table_stats[tk]
+        if stats['row_count'] == 0:
             continue
 
-        tk = row['data_type_key']
         if tk not in groups:
             groups[tk] = {
-                'table': row['table_name'],
+                'data_type_key': tk,
+                'table': table_name,
                 'label': row['display_label'],
+                'row_count': stats['row_count'],
+                'sample_hz': stats['sample_hz'],
+                'duration_sec': stats['duration_sec'],
                 'columns': [],
             }
         groups[tk]['columns'].append({
