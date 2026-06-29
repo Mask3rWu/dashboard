@@ -228,6 +228,66 @@ def import_alerts(conn, flight_id, filepath, data_type_key, format_config, model
     return len(data)
 
 
+def _fix_duplicate_seconds(conn, table_name, flight_id):
+    """Fix duplicate integer-seconds in ~1Hz data by shifting repeated timestamps.
+
+    Pattern [a, b, b, c] with c - b >= 2 → second b becomes b+1 to fill the gap.
+    Pattern [a, b, b, b+1] → no change (next second is already continuous).
+
+    Only applies to tables with sample rate in [0.9, 1.1] Hz.
+    """
+    rows = conn.execute(
+        f"SELECT id, time_sec FROM {table_name} WHERE flight_id=? ORDER BY time_sec",
+        (flight_id,)
+    ).fetchall()
+
+    if len(rows) < 3:
+        return
+
+    # Check sample rate
+    min_sec = rows[0]['time_sec']
+    max_sec = rows[-1]['time_sec']
+    duration = max_sec - min_sec
+    if duration <= 0:
+        return
+    sample_hz = (len(rows) - 1) / duration
+    if not (0.9 <= sample_hz <= 1.1):
+        return
+
+    # Scan for duplicate integer-second groups with a gap ahead
+    updates = []
+    i = 0
+    while i < len(rows):
+        curr_int = int(rows[i]['time_sec'])
+        j = i + 1
+        while j < len(rows) and int(rows[j]['time_sec']) == curr_int:
+            j += 1
+
+        count = j - i  # rows with this integer second
+        if count >= 2 and j < len(rows):
+            next_int = int(rows[j]['time_sec'])
+            gap = next_int - curr_int
+            if gap >= 2:
+                # Shift excess rows forward: 2nd row → curr_int+1, 3rd → curr_int+2, etc.
+                for k in range(1, count):
+                    new_sec = float(curr_int + k)
+                    if new_sec < float(next_int):
+                        updates.append((new_sec, rows[i + k]['id']))
+
+        i = j
+
+    if updates:
+        conn.executemany(
+            f"UPDATE {table_name} SET time_sec=? WHERE id=?",
+            updates
+        )
+        conn.commit()
+        logger.info(
+            "Fixed %d duplicate second(s) in %s for flight %d",
+            len(updates), table_name, flight_id,
+        )
+
+
 def _batch_insert(conn, sql, data, batch_size=1000):
     """Batch insert with commit."""
     for i in range(0, len(data), batch_size):
@@ -271,6 +331,9 @@ def import_files_for_session(conn, flight_id, files_info, model_id):
                 count = import_alerts(conn, flight_id, filepath, dt_key, format_config, model_id)
             else:
                 count = import_data_type(conn, flight_id, filepath, dt_key, format_config, model_id)
+                if count > 0:
+                    table_name = data_table_name(model_id, dt_key)
+                    _fix_duplicate_seconds(conn, table_name, flight_id)
             details[dt_key] = count
             total_rows += count
         except Exception as e:

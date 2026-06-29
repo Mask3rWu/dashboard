@@ -1705,7 +1705,8 @@ function TrajectoryMap({ aligned, alerts }: { aligned: AlignedData; alerts: Aler
       .addTo(map).bindPopup('终点');
 
     alerts.forEach((a) => {
-      const idx = aligned.times.indexOf(a.time_str);
+      const sec = Math.floor(a.time_sec ?? 0);
+      const idx = aligned.ref_secs.indexOf(sec);
       if (idx >= 0 && idx < points.length) {
         L.circleMarker(points[idx], { radius: 4, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.8 })
           .addTo(map).bindPopup(a.desc || '告警');
@@ -1791,7 +1792,8 @@ function renderCanvasMapFull(
 
   // Alerts
   alerts.forEach((a) => {
-    const idx = aligned.times.indexOf(a.time_str);
+    const sec = Math.floor(a.time_sec ?? 0);
+    const idx = aligned.ref_secs.indexOf(sec);
     if (idx >= 0 && idx < points.length) {
       ctx.fillStyle = '#f59e0b';
       ctx.beginPath(); ctx.arc(sx(points[idx][1]), sy(points[idx][0]), 3, 0, Math.PI * 2); ctx.fill();

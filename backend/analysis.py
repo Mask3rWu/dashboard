@@ -10,6 +10,24 @@ from backend.database import get_db
 from backend.format_configs import get_table_name, get_columns_for_flight
 
 
+def time_to_sec(t_str):
+    """Convert HH:MM:SS[.f] to float seconds since midnight."""
+    try:
+        parts = t_str.strip().split(':')
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def sec_to_time_str(sec):
+    """Convert float seconds since midnight to HH:MM:SS string."""
+    total = max(0, int(round(sec)))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 # ── Registry helpers ──
 
 def _get_model_id(conn, flight_id):
@@ -161,6 +179,38 @@ def _auto_tolerance(ref_info, selected_infos):
 
 # ── Aligned data ──
 
+def _generate_uniform_grid(conn, ref_info, flight_id):
+    """Generate a uniform 1-second integer grid as the alignment reference.
+
+    Args:
+        conn: SQLite connection
+        ref_info: Reference table info dict (must have table_name)
+        flight_id: Flight ID
+
+    Returns:
+        (ref_secs, times) — both lists of equal length:
+            ref_secs: list of int (0, 1, 2, ...)
+            times: list of str ("HH:MM:SS")
+        Returns ([], []) if no data.
+    """
+    row = conn.execute(
+        f"SELECT MIN(time_sec) as start_sec, MAX(time_sec) as end_sec, "
+        f"MIN(time_str) as start_str "
+        f"FROM {ref_info['table_name']} WHERE flight_id=?",
+        (flight_id,)
+    ).fetchone()
+    if not row or row['start_sec'] is None or row['end_sec'] is None:
+        return [], []
+
+    start_int = int(math.floor(row['start_sec']))
+    end_int = int(math.floor(row['end_sec']))
+    base_sec = time_to_sec(row['start_str'])
+
+    ref_secs = list(range(start_int, end_int + 1))
+    times = [sec_to_time_str(base_sec + (s - start_int)) for s in ref_secs]
+    return ref_secs, times
+
+
 def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, filter_spec=None):
     """Align selected columns to a reference time series.
 
@@ -188,32 +238,23 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
         return {'times': [], 'series': {}, 'alerts': []}
     ref_table_name = ref_info['table_name']
 
-    # Get reference times
-    ref_rows = conn.execute(
-        f"SELECT time_str, time_sec FROM {ref_table_name} WHERE flight_id=? ORDER BY time_sec",
-        (flight_id,)
-    ).fetchall()
+    # Generate uniform 1s integer grid as the reference time axis
+    ref_secs, times = _generate_uniform_grid(conn, ref_info, flight_id)
 
-    if not ref_rows:
+    if not ref_secs:
         # Fall back to another populated table for this flight.
         for candidate in ref_tables:
             if candidate['table_name'] == ref_table_name:
                 continue
-            ref_rows = conn.execute(
-                f"SELECT time_str, time_sec FROM {candidate['table_name']} WHERE flight_id=? ORDER BY time_sec",
-                (flight_id,)
-            ).fetchall()
-            if ref_rows:
+            ref_secs, times = _generate_uniform_grid(conn, candidate, flight_id)
+            if ref_secs:
                 ref_info = candidate
                 ref_table_name = candidate['table_name']
                 break
 
-    if not ref_rows:
+    if not ref_secs:
         conn.close()
         return {'times': [], 'series': {}, 'alerts': []}
-
-    times = [r['time_str'] for r in ref_rows]
-    ref_secs = [r['time_sec'] for r in ref_rows]
 
     # Group column_keys by data_type_key
     by_dt = defaultdict(list)
@@ -255,23 +296,52 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
             d = {c: row[c] for c in cols}
             table_data.append((row['time_sec'], d))
 
-        # Align to reference times
+        # Determine this table's sample rate for frequency-dependent alignment
+        dt_stats = _get_table_stats(conn, table_name, flight_id)
+        dt_hz = dt_stats['sample_hz']
+
+        # Align to uniform integer-second grid
         for col in cols:
             full_key = f"{dt_key}.{col}"
             label, unit, scale_factor, is_numeric = _get_column_info(conn, model_id, dt_key, col)
             values = []
 
-            ti = 0
-            for ref_t in ref_secs:
-                while ti < len(table_data) - 1 and (
-                    abs(table_data[ti + 1][0] - ref_t) < abs(table_data[ti][0] - ref_t) or
-                    table_data[ti + 1][0] == table_data[ti][0]
-                ):
-                    ti += 1
-                if ti < len(table_data) and abs(table_data[ti][0] - ref_t) <= effective_tolerance:
-                    values.append(table_data[ti][1].get(col))
-                else:
-                    values.append(None)
+            if dt_hz is not None and dt_hz >= 1.1:
+                # ── >1Hz: take first row within each integer second ──
+                row_idx = 0
+                for s in ref_secs:
+                    # Advance to first row >= s
+                    while row_idx < len(table_data) and table_data[row_idx][0] < s:
+                        row_idx += 1
+                    if row_idx < len(table_data) and table_data[row_idx][0] < s + 1:
+                        values.append(table_data[row_idx][1].get(col))
+                        # Skip remaining rows in this integer second
+                        while row_idx + 1 < len(table_data) and table_data[row_idx + 1][0] < s + 1:
+                            row_idx += 1
+                    else:
+                        values.append(None)
+            elif dt_hz is not None and 0.9 <= dt_hz <= 1.1:
+                # ── ~1Hz: exact integer-second match (duplicate seconds already fixed at import) ──
+                row_idx = 0
+                for s in ref_secs:
+                    while row_idx < len(table_data) and table_data[row_idx][0] < s:
+                        row_idx += 1
+                    if row_idx < len(table_data) and abs(table_data[row_idx][0] - s) <= 0.05:
+                        values.append(table_data[row_idx][1].get(col))
+                    else:
+                        values.append(None)
+            else:
+                # ── <1Hz or unknown: nearest-neighbor within tolerance ──
+                ti = 0
+                for ref_t in ref_secs:
+                    while ti < len(table_data) - 1 and (
+                        abs(table_data[ti + 1][0] - ref_t) < abs(table_data[ti][0] - ref_t)
+                    ):
+                        ti += 1
+                    if ti < len(table_data) and abs(table_data[ti][0] - ref_t) <= effective_tolerance:
+                        values.append(table_data[ti][1].get(col))
+                    else:
+                        values.append(None)
 
             entry = {
                 'label': label,
