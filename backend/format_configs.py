@@ -371,6 +371,15 @@ def _sanitize_column_name(name):
     return cleaned
 
 
+def _sanitize_data_type_key(pattern_name):
+    """Convert filename pattern to a lowercase SQL-safe data_type_key.
+    Used for unknown file types where no known mapping exists."""
+    cleaned = re.sub(r'[^\w]', '_', pattern_name)
+    cleaned = re.sub(r'_+', '_', cleaned)
+    cleaned = re.sub(r'^(\d+)', r'c\1', cleaned)
+    return cleaned.lower()
+
+
 def _detect_column_types(filepath, has_header, has_uav, num_columns):
     """Sample one data row and detect TEXT vs REAL columns.
 
@@ -432,7 +441,8 @@ def generate_config_from_scan(source_path):
     # Step 1: discover all file patterns
     all_patterns = _discover_file_patterns(source_path)
 
-    # Step 2: filter to known data types only
+    # Step 2: classify all discovered patterns — keep everything,
+    #           matched_type is None for unknown patterns
     filtered = []
     for p_name, fp, tc, hdr in all_patterns:
         matched = None
@@ -440,43 +450,49 @@ def generate_config_from_scan(source_path):
             if p_name.endswith(kt):
                 matched = kt
                 break
-        if matched:
-            filtered.append((p_name, fp, tc, hdr))
-        else:
-            logger.info(f"Skipping unknown file pattern: {p_name}")
+        filtered.append((p_name, fp, tc, hdr, matched))
 
-    # Step 3: detect header and UAV from FILTERED, non-alert patterns
-    non_alert = [(n, fp, tc, hdr) for n, fp, tc, hdr in filtered
+    # Step 3: detect header and UAV from non-alert patterns
+    non_alert = [(n, fp, tc, hdr) for n, fp, tc, hdr, mt in filtered
                  if not n.endswith('FlightAlertInfo')]
     has_header_flag = _detect_has_header(source_path, non_alert) if non_alert else False
     has_uav = _detect_has_uav_send_id(source_path, non_alert, has_header_flag) if non_alert else False
 
-    # Step 4: build data types from filtered patterns
+    # Step 4: build data types from ALL patterns
     data_types = {}
-    for pattern_name, filepath, token_count, header_names in filtered:
-        matched_type = None
-        for kt in KNOWN_TYPES:
-            if pattern_name.endswith(kt):
-                matched_type = kt
-                break
-        dt_key = KNOWN_TYPES[matched_type]
+    for pattern_name, filepath, token_count, header_names, matched_type in filtered:
+        if matched_type:
+            # Known type — use predefined key and Chinese label
+            dt_key = KNOWN_TYPES[matched_type]
+            display_label = {
+                'drone_state': '飞控状态',
+                'gps': 'GPS',
+                'imu': 'IMU',
+                'pos': '位置',
+                'engine': '发动机',
+                'powerbox': '电源',
+                'dual_antenna': '双天线',
+                'avionics': '航电',
+                'controller': '舵机',
+                'fan_control': '风扇',
+                'alert': '告警',
+                'gps_compare': 'GPS对比',
+            }.get(dt_key, pattern_name)
+            is_alert = (matched_type == 'FlightAlertInfo')
+            file_pattern = matched_type
+        else:
+            # Unknown pattern — auto-generate key and use pattern name as label
+            dt_key = _sanitize_data_type_key(pattern_name)
+            display_label = pattern_name
+            is_alert = False
+            file_pattern = pattern_name
 
-        display_label = {
-            'drone_state': '飞控状态',
-            'gps': 'GPS',
-            'imu': 'IMU',
-            'pos': '位置',
-            'engine': '发动机',
-            'powerbox': '电源',
-            'dual_antenna': '双天线',
-            'avionics': '航电',
-            'controller': '舵机',
-            'fan_control': '风扇',
-            'alert': '告警',
-            'gps_compare': 'GPS对比',
-        }.get(dt_key, pattern_name)
-
-        is_alert = (matched_type == 'FlightAlertInfo')
+        # Handle key collision: two patterns may sanitize to the same key
+        if dt_key in data_types:
+            suffix = 1
+            while f"{dt_key}_{suffix}" in data_types:
+                suffix += 1
+            dt_key = f"{dt_key}_{suffix}"
 
         # Determine column names from header if available
         # Header format: Time [UAVSendID] col1 col2 ... colN
@@ -514,9 +530,13 @@ def generate_config_from_scan(source_path):
                     'ordinal': ordinal,
                 })
 
+        # Skip types with no usable columns
+        if not columns:
+            continue
+
         data_types[dt_key] = {
             'display_label': display_label,
-            'file_patterns': [matched_type],  # generic name, not folder-specific prefix
+            'file_patterns': [file_pattern],
             'is_alert': is_alert,
             'columns': columns,
         }

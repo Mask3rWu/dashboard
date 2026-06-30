@@ -138,6 +138,10 @@ class UpdateColumnRequest(BaseModel):
     scale_factor: float | None = None
 
 
+class UpdateDataTypeLabelRequest(BaseModel):
+    display_label: str
+
+
 class CreateAircraftRequest(BaseModel):
     serial_number: str
     name: str = ''
@@ -682,6 +686,35 @@ def update_model_column(
         raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
+    finally:
+        conn.close()
+
+
+@app.patch("/api/models/{model_id}/data-types/{data_type_key}")
+def update_data_type_label(
+    model_id: int, data_type_key: str, req: UpdateDataTypeLabelRequest
+):
+    """Update the display_label for a data type group in data_table_registry."""
+    if not req.display_label.strip():
+        raise HTTPException(400, "display_label must not be empty")
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM data_table_registry WHERE model_id=? AND data_type_key=?",
+            (model_id, data_type_key)
+        ).fetchone()
+        if not row:
+            raise HTTPException(
+                404, f"Data type '{data_type_key}' not found for model {model_id}"
+            )
+
+        conn.execute(
+            "UPDATE data_table_registry SET display_label=? WHERE model_id=? AND data_type_key=?",
+            (req.display_label.strip(), model_id, data_type_key)
+        )
+        conn.commit()
+        return {"ok": True, "data_type_key": data_type_key, "display_label": req.display_label.strip()}
     finally:
         conn.close()
 

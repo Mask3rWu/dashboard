@@ -4,7 +4,7 @@ import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight,
-  getModelColumns, updateModelColumn,
+  getModelColumns, updateModelColumn, updateModelDataTypeLabel,
   exportModel, importModel,
   type AircraftModel, type Aircraft, type Flight,
   type DataTypeGroup,
@@ -55,6 +55,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [isEditingColumns, setIsEditingColumns] = useState(false);
   const [columnEditData, setColumnEditData] = useState<Record<string, { label: string; unit: string }>>({});
   const [showOriginalName, setShowOriginalName] = useState(true);
+
+  // Group label editing
+  const [editingGroupLabel, setEditingGroupLabel] = useState<string | null>(null);
+  const [editGroupLabelValue, setEditGroupLabelValue] = useState('');
 
   // ─── Import / Export ───────────────────────────────────
   const [showImportModal, setShowImportModal] = useState(false);
@@ -256,6 +260,18 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     setColumnEditData({});
     const d = await getModelColumns(selectedModelId);
     setColumnGroups(d.data_types);
+  };
+
+  const saveGroupLabel = async (dataTypeKey: string) => {
+    if (!selectedModelId || !editGroupLabelValue.trim()) return;
+    try {
+      await updateModelDataTypeLabel(selectedModelId, dataTypeKey, editGroupLabelValue.trim());
+      setEditingGroupLabel(null);
+      const d = await getModelColumns(selectedModelId);
+      setColumnGroups(d.data_types);
+    } catch (e: any) {
+      alert('保存失败: ' + (e.message || e));
+    }
   };
 
   const toggleExpand = (acId: number) => {
@@ -734,8 +750,37 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                   <div className="space-y-3">
                     {columnGroups.map((group) => (
                       <div key={group.data_type_key} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                        <div className="px-3 py-2 bg-gray-50 text-xs font-medium text-gray-600">
-                          {group.label}
+                        <div className="px-3 py-2 bg-gray-50 text-xs font-medium text-gray-600 flex items-center justify-between">
+                          {editingGroupLabel === group.data_type_key ? (
+                            <div className="flex items-center gap-1 flex-1">
+                              <input
+                                type="text"
+                                value={editGroupLabelValue}
+                                onChange={(e) => setEditGroupLabelValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') saveGroupLabel(group.data_type_key);
+                                  if (e.key === 'Escape') setEditingGroupLabel(null);
+                                }}
+                                className="flex-1 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs focus:outline-none"
+                                autoFocus
+                              />
+                              <button onClick={() => saveGroupLabel(group.data_type_key)}
+                                className="text-[10px] px-1.5 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">✓</button>
+                              <button onClick={() => setEditingGroupLabel(null)}
+                                className="text-[10px] px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">✕</button>
+                            </div>
+                          ) : (
+                            <>
+                              <span>{group.label}</span>
+                              <button
+                                onClick={() => { setEditingGroupLabel(group.data_type_key); setEditGroupLabelValue(group.label); }}
+                                className="text-gray-300 hover:text-blue-500 text-[10px] ml-2"
+                                title="编辑组名称"
+                              >
+                                <Pencil className="w-3 h-3 inline" />
+                              </button>
+                            </>
+                          )}
                         </div>
                         <div className="divide-y divide-gray-100">
                           {group.columns.map((col) => {

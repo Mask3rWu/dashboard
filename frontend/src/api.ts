@@ -275,6 +275,16 @@ export const updateModelColumn = (
     { method: 'PATCH', body: JSON.stringify(updates) }
   );
 
+export const updateModelDataTypeLabel = (
+  modelId: number,
+  dataTypeKey: string,
+  displayLabel: string
+) =>
+  request<{ ok: boolean; data_type_key: string; display_label: string }>(
+    `/models/${modelId}/data-types/${encodeURIComponent(dataTypeKey)}`,
+    { method: 'PATCH', body: JSON.stringify({ display_label: displayLabel }) }
+  );
+
 // Aircraft
 export const listAircraft = (modelId: number) =>
   request<{ aircraft: Aircraft[] }>(`/models/${modelId}/aircraft`);

@@ -6,12 +6,6 @@ import {
   type AircraftModel, type Aircraft,
 } from '../api';
 
-const DATA_TYPE_LABELS: Record<string, string> = {
-  gps: 'GPS', imu: 'IMU', drone_state: '飞控状态', pos: '位置',
-  engine: '发动机', powerbox: '电源', dual_antenna: '双天线', alert: '告警',
-  avionics: '航电', controller: '舵机', fan_control: '风扇', gps_compare: 'GPS对比',
-};
-
 function formatBadgeStyle(fmt: string): string {
   const colors = [
     'bg-blue-100 text-blue-700 border-blue-200',
@@ -419,7 +413,7 @@ export default function ImportPage({ onImported }: Props) {
     <div className="flex flex-wrap gap-1">
       {Object.entries(dataTypes).map(([type, count]) => (
         <span key={type} className="px-1.5 py-0.5 bg-gray-100 rounded text-xs text-gray-600">
-          {DATA_TYPE_LABELS[type] || type} {count > 1 && `×${count}`}
+          {type} {count > 1 && `×${count}`}
         </span>
       ))}
     </div>
