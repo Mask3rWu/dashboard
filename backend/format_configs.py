@@ -498,6 +498,7 @@ def generate_config_from_scan(source_path):
         # Header format: Time [UAVSendID] col1 col2 ... colN
         # Data tokens:    time [uavid] val1 val2 ... valN
         offset = 1 if has_uav else 0
+        used_col_names = set()
         if has_header_flag and header_names and len(header_names) >= 2:
             hdr_offset = 1 + (1 if has_uav else 0)
             num_cols = len(header_names) - hdr_offset
@@ -506,6 +507,13 @@ def generate_config_from_scan(source_path):
             columns = []
             for i in range(hdr_offset, len(header_names)):
                 col_name = _sanitize_column_name(header_names[i])
+                # Deduplicate column names
+                if col_name in used_col_names:
+                    suffix = 1
+                    while f"{col_name}_{suffix}" in used_col_names:
+                        suffix += 1
+                    col_name = f"{col_name}_{suffix}"
+                used_col_names.add(col_name)
                 col_label = header_names[i]  # Keep original for display
                 col_type = col_types[i - hdr_offset] if (i - hdr_offset) < len(col_types) else 'REAL'
                 columns.append({
