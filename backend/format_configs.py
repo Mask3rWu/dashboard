@@ -30,15 +30,13 @@ def build_model_config_from_db(conn, model_id):
         model_id: aircraft_models.id
 
     Returns:
-        dict with keys: format, has_header, has_uav_send_id,
+        dict with keys: has_header, has_uav_send_id,
                         extract_serial_from_path, data_types
         Returns None if model not found.
     """
     # ── Model-level settings ──
     model = conn.execute(
-        """SELECT name, format_category,
-                  has_header, has_uav_send_id,
-                  extract_serial_from_path
+        """SELECT name, has_header, has_uav_send_id, extract_serial_from_path
            FROM aircraft_models WHERE id = ?""",
         (model_id,)
     ).fetchone()
@@ -46,7 +44,6 @@ def build_model_config_from_db(conn, model_id):
         return None
 
     config = {
-        'format': model['format_category'],
         'has_header': bool(model['has_header']),
         'has_uav_send_id': bool(model['has_uav_send_id']),
         'extract_serial_from_path': bool(model['extract_serial_from_path']),
@@ -164,16 +161,14 @@ def load_all_model_configs_with_ids(conn):
     """Load all existing model configs with their database IDs.
 
     Returns:
-        list of (model_id, model_name, format_category, config_dict)
+        list of (model_id, model_name, config_dict)
     """
     models = []
-    rows = conn.execute(
-        "SELECT id, name, format_category FROM aircraft_models"
-    ).fetchall()
+    rows = conn.execute("SELECT id, name FROM aircraft_models").fetchall()
     for row in rows:
         config = build_model_config_from_db(conn, row['id'])
         if config:
-            models.append((row['id'], row['name'], row['format_category'], config))
+            models.append((row['id'], row['name'], config))
     return models
 
 
@@ -187,17 +182,20 @@ def compare_configs(generated, existing):
     Returns a similarity score 0.0–1.0.  Score >= 0.95 is considered a match.
 
     Components (data types are the core dimension):
-      - Data type Jaccard (0.60): overlap of data_type_keys
+      - Data type recall (0.60): fraction of the existing model's data types
+        present in the generated config. Extra unknown types in the generated
+        config do NOT penalize — this is what lets new .txt types be accepted
+        on equal footing. Missing existing types still lower the score.
       - Structure flags (0.25): has_header + has_uav_send_id exact match
       - Column count agreement (0.15): average ratio per shared data type
     """
-    # ── Data type Jaccard (0.60) — core dimension ──
+    # ── Data type recall (0.60) — core dimension ──
     gen_keys = set(generated.get('data_types', {}).keys())
     exist_keys = set(existing.get('data_types', {}).keys())
-    if gen_keys | exist_keys:
-        jaccard = len(gen_keys & exist_keys) / len(gen_keys | exist_keys)
+    if exist_keys:
+        recall = len(gen_keys & exist_keys) / len(exist_keys)
     else:
-        jaccard = 0.0
+        recall = 0.0
 
     # ── Structure flags (0.25) ──
     hh_match = 1.0 if generated.get('has_header') == existing.get('has_header') else 0.0
@@ -214,7 +212,7 @@ def compare_configs(generated, existing):
             col_ratios.append(min(gen_cols, exist_cols) / max(gen_cols, exist_cols))
     column_score = sum(col_ratios) / len(col_ratios) if col_ratios else 0.0
 
-    return 0.60 * jaccard + 0.25 * structure_score + 0.15 * column_score
+    return 0.60 * recall + 0.25 * structure_score + 0.15 * column_score
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -301,6 +299,14 @@ def _discover_file_patterns(source_path):
             # Find the type marker — everything before the last underscore-separated timestamp
             match = re.match(r'^(.+?)_(\d{4,})', base)
             pattern_name = match.group(1) if match else base
+            # Strip a leading aircraft-serial prefix (digits before a CamelCase
+            # type name: "24DroneStateData" → "DroneStateData"). The serial is
+            # already encoded in the directory hierarchy, so the filename prefix
+            # is redundant; keeping it would split one logical type into one key
+            # per aircraft (drone_state, drone_state_1, …) and inflate the
+            # comparison union. Keying the dict on the stripped name also
+            # merges per-aircraft samples into a single entry.
+            pattern_name = re.sub(r'^\d+(?=[A-Z])', '', pattern_name)
 
             if pattern_name not in patterns:
                 filepath = os.path.join(root, fname)
@@ -380,6 +386,84 @@ def _sanitize_data_type_key(pattern_name):
     return cleaned.lower()
 
 
+# Threshold for the "1-2 digit hex token" ratio that flags a raw byte dump.
+# Sensor data maxes out around 0.69; the three known dump types (AllReceivedData,
+# HandlePacket, SendCommand) are all >= 0.90. 0.85 sits in the clean gap.
+_RAW_HEX_RATIO_THRESHOLD = 0.85
+# Bytes sampled for the binary check. Reading the whole multi-MB file just to
+# sniff the first bytes is wasteful; the head carries enough signal.
+_RAW_SNIFF_BYTES = 8192
+
+
+def _is_raw_dump(filepath):
+    """Detect whether a .txt file is a raw byte dump rather than sensor data.
+
+    Dump files (e.g. HandlePacket, AllReceivedData, SendCommand) are textual
+    hex byte listings like "EE FF 7E 01 18 3E ..." — they decode as ASCII (no
+    NUL bytes), so a naive binary check misses them. They are recognized by two
+    content-driven signals:
+
+      1. Binary content: NUL bytes or a high share of non-printable bytes in the
+         head (catches true binary .txt that may appear in future formats).
+      2. Hex-dump structure: across sampled rows, the share of tokens that are
+         1-2 hex-digit strings (matching [0-9A-Fa-f]{1,2}) is >= 0.85. Sensor
+         readings max out around 0.69 because their numeric fields have more
+         digits; raw dumps are dominated by byte pairs.
+
+    This is content analysis, not a filename whitelist — future unknown dump
+    types are flagged the same way. The flag is advisory only (drives the
+    default checkbox state during model creation); the file is never silently
+    dropped and the user can still opt in.
+
+    Returns:
+        bool: True if the file looks like a raw byte dump.
+    """
+    import re as _re
+    hex_token = _re.compile(r'^[0-9A-Fa-f]{1,2}$')
+
+    # ── Signal 1: binary content in the file head ──
+    # NUL bytes are an unambiguous binary marker. For the share signal we count
+    # only C0 control chars (< 0x20, excluding \t \r \n) — bytes >= 0x80 are
+    # UTF-8 continuation bytes that legitimately appear in Chinese labels, so
+    # counting them would misflag localized text files as binary.
+    try:
+        with open(filepath, 'rb') as bf:
+            head = bf.read(_RAW_SNIFF_BYTES)
+    except OSError:
+        return False
+    if b'\x00' in head:
+        return True
+    ctrl = sum(1 for b in head if b < 0x20 and b not in (0x09, 0x0a, 0x0d))
+    if ctrl / max(len(head), 1) > 0.10:
+        return True
+
+    # ── Signal 2: hex-dump token ratio across sampled data rows ──
+    try:
+        from backend.scanner import parse_lines, has_header
+        lines = parse_lines(filepath)
+    except Exception:
+        return False
+    if not lines:
+        return False
+    start = 1 if has_header(filepath) else 0
+    sample = lines[start:start + 50]
+    total = 0
+    hexish = 0
+    for line in sample:
+        # Skip the leading Time (and optional UAVSendID) token — those are never
+        # hex bytes and would dilute the ratio. A conservative skip of just the
+        # first token (Time) keeps the dump signal strong while not over-stripping
+        # for headerless files where the leading field is itself data.
+        tokens = line.split()
+        # Skip Time + an optional UAV id token if it's not hex-like
+        body = tokens[1:]
+        total += len(body)
+        hexish += sum(1 for t in body if hex_token.match(t))
+    if total == 0:
+        return False
+    return (hexish / total) >= _RAW_HEX_RATIO_THRESHOLD
+
+
 def _detect_column_types(filepath, has_header, has_uav, num_columns):
     """Sample one data row and detect TEXT vs REAL columns.
 
@@ -413,8 +497,11 @@ def _detect_column_types(filepath, has_header, has_uav, num_columns):
 def generate_config_from_scan(source_path):
     """Analyze a folder and generate a format config dict from discovered file patterns.
 
-    This is used when scanning an unknown format — the config is a best-effort
-    auto-detection that the user can refine later.
+    All discovered .txt patterns are treated uniformly: every pattern becomes a
+    data type keyed by a deterministic sanitization of its filename. There is no
+    hardcoded type whitelist — future unknown file types are accepted on equal
+    footing with known ones, and their keys/labels derive from the filename. The
+    user can refine labels later.
 
     Args:
         source_path: Root folder to analyze
@@ -422,70 +509,29 @@ def generate_config_from_scan(source_path):
     Returns:
         dict: A format config structure
     """
-    # Map known patterns to data type keys
-    KNOWN_TYPES = {
-        'DroneStateData': 'drone_state',
-        'GPSData': 'gps',
-        'IMUData': 'imu',
-        'PosData': 'pos',
-        'EngineData': 'engine',
-        'PowerBoxData': 'powerbox',
-        'DualAntennaData': 'dual_antenna',
-        'AvionicsData': 'avionics',
-        'ControllerData': 'controller',
-        'FanControlData': 'fan_control',
-        'FlightAlertInfo': 'alert',
-        'GPSCompareData': 'gps_compare',
-    }
-
     # Step 1: discover all file patterns
     all_patterns = _discover_file_patterns(source_path)
 
-    # Step 2: classify all discovered patterns — keep everything,
-    #           matched_type is None for unknown patterns
-    filtered = []
-    for p_name, fp, tc, hdr in all_patterns:
-        matched = None
-        for kt in KNOWN_TYPES:
-            if p_name.endswith(kt):
-                matched = kt
-                break
-        filtered.append((p_name, fp, tc, hdr, matched))
-
-    # Step 3: detect header and UAV from non-alert patterns
-    non_alert = [(n, fp, tc, hdr) for n, fp, tc, hdr, mt in filtered
-                 if not n.endswith('FlightAlertInfo')]
+    # Step 2: detect header and UAV from non-alert patterns.
+    # A pattern is "alert-like" if its name contains 'alert' (case-insensitive);
+    # alert files use multi-word descriptions and would skew token-count
+    # heuristics, so they are excluded from header/UAV detection.
+    non_alert = [(n, fp, tc, hdr) for n, fp, tc, hdr in all_patterns
+                 if 'alert' not in n.lower()]
     has_header_flag = _detect_has_header(source_path, non_alert) if non_alert else False
     has_uav = _detect_has_uav_send_id(source_path, non_alert, has_header_flag) if non_alert else False
 
-    # Step 4: build data types from ALL patterns
+    # Step 3: build data types from ALL patterns uniformly.
+    # Every discovered .txt pattern becomes a data type keyed by a deterministic
+    # sanitization of its filename — there is no hardcoded type whitelist. Future
+    # unknown file types are accepted on equal footing with known ones. is_alert
+    # is derived from the pattern name (contains 'alert'), not from a lookup table.
     data_types = {}
-    for pattern_name, filepath, token_count, header_names, matched_type in filtered:
-        if matched_type:
-            # Known type — use predefined key and Chinese label
-            dt_key = KNOWN_TYPES[matched_type]
-            display_label = {
-                'drone_state': '飞控状态',
-                'gps': 'GPS',
-                'imu': 'IMU',
-                'pos': '位置',
-                'engine': '发动机',
-                'powerbox': '电源',
-                'dual_antenna': '双天线',
-                'avionics': '航电',
-                'controller': '舵机',
-                'fan_control': '风扇',
-                'alert': '告警',
-                'gps_compare': 'GPS对比',
-            }.get(dt_key, pattern_name)
-            is_alert = (matched_type == 'FlightAlertInfo')
-            file_pattern = matched_type
-        else:
-            # Unknown pattern — auto-generate key and use pattern name as label
-            dt_key = _sanitize_data_type_key(pattern_name)
-            display_label = pattern_name
-            is_alert = False
-            file_pattern = pattern_name
+    for pattern_name, filepath, token_count, header_names in all_patterns:
+        dt_key = _sanitize_data_type_key(pattern_name)
+        display_label = pattern_name
+        is_alert = 'alert' in pattern_name.lower()
+        file_pattern = pattern_name
 
         # Handle key collision: two patterns may sanitize to the same key
         if dt_key in data_types:
@@ -546,11 +592,11 @@ def generate_config_from_scan(source_path):
             'display_label': display_label,
             'file_patterns': [file_pattern],
             'is_alert': is_alert,
+            'is_raw': _is_raw_dump(filepath),
             'columns': columns,
         }
 
     config = {
-        'format': os.path.basename(source_path),
         'has_header': has_header_flag,
         'has_uav_send_id': has_uav,
         'extract_serial_from_path': True,  # always extract from standardized dir hierarchy
@@ -641,7 +687,7 @@ def generate_index_sql(model_id, data_type_key):
 # Column registry and data table registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-def register_model_tables(conn, model_id, format_category, config=None):
+def register_model_tables(conn, model_id, config=None):
     """Create all data tables and populate registry for a new model.
 
     If a ``config`` dict is provided it is used directly; otherwise the
@@ -650,7 +696,6 @@ def register_model_tables(conn, model_id, format_category, config=None):
     Args:
         conn: SQLite connection
         model_id: aircraft_models.id
-        format_category: format category string (stored in model record)
         config: optional format config dict (e.g. from generate_config_from_scan)
 
     Returns:

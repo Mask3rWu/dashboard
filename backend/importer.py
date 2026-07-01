@@ -5,6 +5,7 @@ import_data_type() that reads column definitions from a format config.
 """
 
 import logging
+import sqlite3
 from backend.format_configs import (
     load_format_config_by_model, data_table_name, get_data_type_key,
 )
@@ -295,26 +296,32 @@ def _batch_insert(conn, sql, data, batch_size=1000):
     conn.commit()
 
 
-def import_files_for_session(conn, flight_id, files_info, model_id):
+def import_files_for_session(conn, flight_id, files_info, model_id, format_config=None):
     """Import all files for a flight session.
 
     Args:
         conn: SQLite connection
         flight_id: flights.id
         files_info: list of dicts from scanner (with filepath, data_type_key, is_alert)
-        model_id: aircraft_models.id (to determine format_category and table names)
+        model_id: aircraft_models.id (determines table names)
+        format_config: the SAME generated config used to scan the files. When
+            provided it is used directly (column / table definitions match the
+            files_info data_type_keys exactly, since both derive from one scan).
+            When omitted, the model's stored config is loaded — only correct when
+            the stored config still matches the folder's actual file patterns.
 
     Returns:
         dict: {data_type_key: row_count, ...}
     """
-    # Get format category from model
+    # Verify the model exists
     model = conn.execute(
-        "SELECT format_category FROM aircraft_models WHERE id=?", (model_id,)
+        "SELECT id FROM aircraft_models WHERE id=?", (model_id,)
     ).fetchone()
     if not model:
         return {'error': f'Model {model_id} not found'}
 
-    format_config = load_format_config_by_model(conn, model_id)
+    if format_config is None:
+        format_config = load_format_config_by_model(conn, model_id)
     if not format_config:
         return {'error': f'Format config not found for model {model_id}'}
 
@@ -350,51 +357,50 @@ def import_files_for_session(conn, flight_id, files_info, model_id):
 
 
 def _update_flight_meta(conn, flight_id, total_rows, format_config, model_id):
-    """Update flight duration, times, and row count from imported data."""
+    """Update flight duration, times, and row count from imported data.
+
+    The time range is taken from the data type with the most rows (best time
+    coverage). This is type-agnostic — no hardcoded data-type key — so unknown
+    .txt types contribute on equal footing. Tables that do not exist (e.g. a
+    type with no usable columns) are skipped.
+    """
     # Fetch flight_date to build full datetime strings
     flight = conn.execute(
         "SELECT flight_date FROM flights WHERE id=?", (flight_id,)
     ).fetchone()
     flight_date = flight['flight_date'] if flight else None
 
-    # Try gps data first for time range
-    gps_table = data_table_name(model_id, 'gps')
-    time_info = conn.execute(
-        f"SELECT MIN(time_sec) as start_sec, MAX(time_sec) as end_sec, "
-        f"MIN(time_str) as start_str, MAX(time_str) as end_str "
-        f"FROM {gps_table} WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
+    best = None
+    best_rows = -1
+    for dt_key in format_config['data_types']:
+        table = data_table_name(model_id, dt_key)
+        try:
+            info = conn.execute(
+                f"SELECT MIN(time_sec) as start_sec, MAX(time_sec) as end_sec, "
+                f"MIN(time_str) as start_str, MAX(time_str) as end_str, "
+                f"COUNT(*) as n "
+                f"FROM {table} WHERE flight_id=?",
+                (flight_id,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if not info or info['end_sec'] is None:
+            continue
+        n = info['n'] or 0
+        if n > best_rows:
+            best_rows = n
+            best = info
 
-    if time_info and time_info['end_sec'] is not None:
-        duration = time_info['end_sec'] - time_info['start_sec']
-        start_dt = f"{flight_date} {time_info['start_str']}" if flight_date else time_info['start_str']
-        end_dt = f"{flight_date} {time_info['end_str']}" if flight_date else time_info['end_str']
+    if best:
+        duration = best['end_sec'] - best['start_sec']
+        start_dt = f"{flight_date} {best['start_str']}" if flight_date else best['start_str']
+        end_dt = f"{flight_date} {best['end_str']}" if flight_date else best['end_str']
         conn.execute(
             "UPDATE flights SET start_time=?, end_time=?, duration_sec=?, total_rows=? WHERE id=?",
             (start_dt, end_dt, duration, total_rows, flight_id)
         )
     else:
-        # Try any available data type
-        for dt_key in format_config['data_types']:
-            table = data_table_name(model_id, dt_key)
-            time_info = conn.execute(
-                f"SELECT MIN(time_sec) as start_sec, MAX(time_sec) as end_sec, "
-                f"MIN(time_str) as start_str, MAX(time_str) as end_str "
-                f"FROM {table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            if time_info and time_info['end_sec'] is not None:
-                duration = time_info['end_sec'] - time_info['start_sec']
-                start_dt = f"{flight_date} {time_info['start_str']}" if flight_date else time_info['start_str']
-                end_dt = f"{flight_date} {time_info['end_str']}" if flight_date else time_info['end_str']
-                conn.execute(
-                    "UPDATE flights SET start_time=?, end_time=?, duration_sec=?, total_rows=? WHERE id=?",
-                    (start_dt, end_dt, duration, total_rows, flight_id)
-                )
-                break
-        else:
-            conn.execute(
-                "UPDATE flights SET total_rows=? WHERE id=?", (total_rows, flight_id)
-            )
+        conn.execute(
+            "UPDATE flights SET total_rows=? WHERE id=?", (total_rows, flight_id)
+        )
     conn.commit()

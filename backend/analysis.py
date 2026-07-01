@@ -39,6 +39,25 @@ def _get_model_id(conn, flight_id):
     return row['model_id'] if row else None
 
 
+def _get_alert_data_type(conn, model_id):
+    """Find a model's alert data type by its is_alert flag (not by name).
+
+    Returns (data_type_key, table_name) for the first data type with is_alert=1,
+    or (None, None) if the model has no alert type. Type-agnostic — works for
+    auto-generated keys like 'flightalertinfo' as well as any future alert-named
+    pattern, since alertness is a flag set during config generation, not a
+    reserved key.
+    """
+    row = conn.execute(
+        "SELECT data_type_key, table_name FROM data_table_registry "
+        "WHERE model_id=? AND is_alert=1 ORDER BY data_type_key LIMIT 1",
+        (model_id,)
+    ).fetchone()
+    if not row:
+        return None, None
+    return row['data_type_key'], row['table_name']
+
+
 def _resolve_table_col(conn, model_id, col_key):
     """Resolve "data_type_key.column_name" → (table_name, column_name).
 
@@ -358,16 +377,17 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
                 entry['text_values'] = values
             series[full_key] = entry
 
-    # Get alerts — use column_registry for actual column names
-    alert_table = get_table_name(conn, model_id, 'alert')
+    # Get alerts — locate the alert data type by its is_alert flag
+    # (type-agnostic; works for any alert-named file pattern).
+    alert_dt_key, alert_table = _get_alert_data_type(conn, model_id)
     alerts = []
     if alert_table:
         # Read alert columns from column_registry (ordered by ordinal)
         alert_col_rows = conn.execute(
             "SELECT column_name FROM column_registry "
-            "WHERE model_id=? AND data_type_key='alert' AND ordinal IS NOT NULL "
+            "WHERE model_id=? AND data_type_key=? AND ordinal IS NOT NULL "
             "ORDER BY ordinal",
-            (model_id,)
+            (model_id, alert_dt_key)
         ).fetchall()
 
         if alert_col_rows:
@@ -497,19 +517,23 @@ def apply_filter(aligned, filter_spec):
 # ── Flight stats ──
 
 def get_flight_stats(flight_id):
-    """Compute summary statistics for a flight."""
+    """Compute summary statistics for a flight.
+
+    Returns only flight-level metadata (duration, times, drone id, name).
+    Domain-specific stats (max altitude / speed / rpm / fuel / battery / alert
+    count) were removed: they depended on hardcoded data-type keys and column
+    names that no longer exist under the uniform, type-agnostic config model.
+    The alert count is still available per-flight via the /alerts endpoint.
+    """
     conn = get_db()
-    model_id = _get_model_id(conn, flight_id)
 
     flight = conn.execute("SELECT * FROM flights WHERE id=?", (flight_id,)).fetchone()
     if not flight:
         conn.close()
         return {}
 
-    # Get aircraft and model info
     ac = conn.execute(
-        "SELECT a.serial_number, am.name as model_name FROM aircraft a "
-        "JOIN aircraft_models am ON am.id = a.model_id WHERE a.id=?",
+        "SELECT name FROM aircraft WHERE id=?",
         (flight['aircraft_id'],)
     ).fetchone()
 
@@ -517,114 +541,9 @@ def get_flight_stats(flight_id):
         'duration_sec': flight['duration_sec'],
         'start_time': flight['start_time'],
         'end_time': flight['end_time'],
-        'drone_id': ac['serial_number'] if ac else '',
+        'drone_id': ac['name'] if ac else '',
         'name': flight['name'],
     }
-
-    if model_id is None:
-        conn.close()
-        return stats
-
-    # Max altitude from gps or pos
-    gps_table = get_table_name(conn, model_id, 'gps')
-    pos_table = get_table_name(conn, model_id, 'pos')
-    drone_table = get_table_name(conn, model_id, 'drone_state')
-    engine_table = get_table_name(conn, model_id, 'engine')
-
-    # Try gps for altitude
-    max_alt = None
-    if gps_table:
-        try:
-            row = conn.execute(
-                f"SELECT MAX(nava_alt) as max_alt FROM {gps_table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            max_alt = row['max_alt']
-        except Exception:
-            pass
-
-    if max_alt is None and pos_table:
-        try:
-            row = conn.execute(
-                f"SELECT MAX(rel_alt) as max_alt FROM {pos_table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            max_alt = row['max_alt']
-        except Exception:
-            pass
-    stats['max_altitude'] = max_alt
-
-    # Max speed from drone_state
-    max_speed = None
-    if drone_table:
-        try:
-            row = conn.execute(
-                f"SELECT MAX(ABS(fwd_vel)) as max_fwd FROM {drone_table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            max_speed = row['max_fwd']
-        except Exception:
-            pass
-    stats['max_speed'] = max_speed
-
-    # Engine stats
-    if engine_table:
-        try:
-            row = conn.execute(
-                f"SELECT AVG(engine_rpm) as avg_rpm, MAX(engine_rpm) as max_rpm "
-                f"FROM {engine_table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            stats['avg_rpm'] = round(row['avg_rpm'], 1) if row and row['avg_rpm'] else 0
-            stats['max_rpm'] = row['max_rpm'] if row else 0
-        except Exception:
-            stats['avg_rpm'] = 0
-            stats['max_rpm'] = 0
-
-        try:
-            row = conn.execute(
-                f"SELECT MIN(fuel_remaining) as min_fuel, MAX(fuel_remaining) as max_fuel "
-                f"FROM {engine_table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            stats['fuel_start'] = row['max_fuel'] if row else None
-            stats['fuel_end'] = row['min_fuel'] if row else None
-        except Exception:
-            stats['fuel_start'] = None
-            stats['fuel_end'] = None
-    else:
-        stats['avg_rpm'] = 0
-        stats['max_rpm'] = 0
-        stats['fuel_start'] = None
-        stats['fuel_end'] = None
-
-    # Battery
-    if drone_table:
-        try:
-            row = conn.execute(
-                f"SELECT MIN(battery_pct) as min_bat, MAX(battery_pct) as max_bat "
-                f"FROM {drone_table} WHERE flight_id=?",
-                (flight_id,)
-            ).fetchone()
-            stats['battery_start'] = row['max_bat'] if row else None
-            stats['battery_end'] = row['min_bat'] if row else None
-        except Exception:
-            stats['battery_start'] = None
-            stats['battery_end'] = None
-    else:
-        stats['battery_start'] = None
-        stats['battery_end'] = None
-
-    # Alert count
-    alert_table = get_table_name(conn, model_id, 'alert')
-    if alert_table:
-        row = conn.execute(
-            f"SELECT COUNT(*) as cnt FROM {alert_table} WHERE flight_id=?",
-            (flight_id,)
-        ).fetchone()
-        stats['alert_count'] = row['cnt'] if row else 0
-    else:
-        stats['alert_count'] = 0
 
     conn.close()
     return stats
@@ -733,7 +652,7 @@ def get_compare(flight_ids, column_key):
     for fid in flight_ids:
         conn = get_db()
         flight = conn.execute(
-            "SELECT f.name, a.serial_number, f.duration_sec "
+            "SELECT f.name, a.name as aircraft_name, f.duration_sec "
             "FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.id=?",
             (fid,)
         ).fetchone()
@@ -751,7 +670,7 @@ def get_compare(flight_ids, column_key):
 
         results.append({
             'flight_id': fid,
-            'name': f"{flight['name']} UAV{flight['serial_number']}",
+            'name': f"{flight['name']} UAV{flight['aircraft_name']}",
             'times_sec': ref_secs,
             'values': entry['values'],
             'label': entry['label'],

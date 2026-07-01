@@ -69,9 +69,9 @@ def import_session(source_path, aircraft_id, session_key):
         conn.close()
         return {'error': path_error}
 
-    # Resolve aircraft → model → format
+    # Resolve aircraft → model
     aircraft = conn.execute(
-        """SELECT a.id, a.serial_number, am.id as model_id, am.format_category, am.name as model_name
+        """SELECT a.id, a.name, am.id as model_id, am.name as model_name
            FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
            WHERE a.id=?""",
         (aircraft_id,)
@@ -82,25 +82,32 @@ def import_session(source_path, aircraft_id, session_key):
         return {'error': f'Aircraft {aircraft_id} not found'}
 
     model_id = aircraft['model_id']
-    format_category = aircraft['format_category']
 
-    # Load model-specific config (model_{id}.json), not raw format_category
-    fmt_config = load_format_config_by_model(conn, model_id)
-    if not fmt_config:
+    # Load the model's STORED config and use it for BOTH scanning and importing.
+    # Serial-prefix stripping (in _discover_file_patterns) plus word-boundary
+    # matching (in get_data_type_key) means the stored file_patterns
+    # (e.g. "DroneStateData") match any aircraft's prefixed file
+    # (e.g. "24DroneStateData_…"), so there is no longer a reason to rescan with
+    # a freshly-generated config. Using the stored config here also means types
+    # the user deselected at model-creation time (raw byte dumps) are never
+    # scanned in — their files are skipped cleanly instead of producing 0-row
+    # imports and "No config for data type" noise.
+    stored_config = load_format_config_by_model(conn, model_id)
+    if not stored_config or not stored_config.get('data_types'):
         conn.close()
         return {'error': f'Format config not found for model {model_id}'}
 
-    # Scan files using the model's config
     from backend.scanner import scan_files_recursive
     try:
-        all_files = scan_files_recursive(source_path, fmt_config)
+        all_files = scan_files_recursive(source_path, stored_config)
     except FileNotFoundError as e:
         conn.close()
         return {'error': str(e)}
 
-    # Filter to this aircraft and cluster by time
-    target_serial = aircraft['serial_number']
-    if fmt_config.get('extract_serial_from_path', False):
+    # Filter to this aircraft and cluster by time. The aircraft's `name` is
+    # matched against the serial extracted from the directory hierarchy.
+    target_serial = aircraft['name']
+    if stored_config.get('extract_serial_from_path', False):
         drone_files = [f for f in all_files if f['aircraft_serial'] == target_serial]
         # Fallback: if source_path IS the aircraft folder, serial extraction
         # returns empty; use all files in this case
@@ -141,7 +148,9 @@ def import_session(source_path, aircraft_id, session_key):
     # Determine flight_date from directory hierarchy
     flight_date = _extract_flight_date(source_path)
 
-    # Reject if already imported — check by aircraft + flight_date + session_key
+    # Reject if already imported — duplicate boundary is aircraft + flight_date
+    # + session_key. source_path is stored for provenance only and deliberately
+    # NOT used for dedup (a folder may be moved/re-imported from a new path).
     if flight_date:
         existing = conn.execute(
             "SELECT id FROM flights WHERE aircraft_id=? AND flight_date=? AND session_key=?",
@@ -150,15 +159,6 @@ def import_session(source_path, aircraft_id, session_key):
         if existing:
             conn.close()
             return {'error': f'飞机已有日期 {flight_date} 的架次 {session_key}（flight #{existing["id"]}）'}
-
-    # Fallback: check by source_path (legacy data without flight_date)
-    existing = conn.execute(
-        "SELECT id FROM flights WHERE aircraft_id=? AND source_path=? AND session_key=?",
-        (aircraft_id, source_path, session_key)
-    ).fetchone()
-    if existing:
-        conn.close()
-        return {'error': f'Flight already exists for session {session_key}'}
 
     # Flight name: use session_key by default (can be renamed by user later)
     flight_name = session_key if session_key else folder_name
@@ -171,8 +171,15 @@ def import_session(source_path, aircraft_id, session_key):
     )
     flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    # Import all files for this session
-    import_result = import_files_for_session(conn, flight_id, matching, model_id)
+    # Import all files for this session. The scan above used the stored config,
+    # so files_info's data_type_keys line up with the stored config's
+    # definitions. Types the user deselected at creation time are not in the
+    # stored config's file_patterns and were never picked up by the scan.
+    # Cross-model import (writing A's data into B's tables) is no longer
+    # supported — the import target is the model the scan resolved to.
+    import_result = import_files_for_session(
+        conn, flight_id, matching, model_id, format_config=stored_config
+    )
 
     conn.close()
 

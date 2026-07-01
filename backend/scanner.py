@@ -167,18 +167,26 @@ MATCH_THRESHOLD = 0.95
 
 
 def resolve_model_for_scan(conn, source_path):
-    """Analyze a folder, compare against all existing model configs, and
-    either return the best-matching model or auto-create a new one.
+    """Analyze a folder and compare against all existing model configs.
+
+    This is a PREVIEW only — it never persists anything. If an existing model
+    matches (score >= MATCH_THRESHOLD) it is returned as the resolved model; if
+    nothing matches, the folder is reported as a new-format candidate with the
+    discovered data types listed (each tagged is_raw so the UI can default-deselect
+    raw byte dumps). Creating the new model is a separate, explicit step done by
+    the caller via create_model_from_scan() once the user confirms the name and
+    which data types to keep.
 
     Returns:
         dict with keys:
-            model_id, model_name, format_category, is_new,
+            model_id, model_name, is_new,
             match_confidence (None for new), config (generated config dict),
-            matching_models (list of {id, name, score})
+            matching_models (list of {id, name, score}),
+            suggested_name, discovered_types (new only)
     """
     from backend.format_configs import (
         generate_config_from_scan, load_all_model_configs_with_ids,
-        compare_configs, save_model_config_to_db, register_model_tables,
+        compare_configs,
     )
 
     # Step 1 — auto-generate config from the folder
@@ -194,7 +202,7 @@ def resolve_model_for_scan(conn, source_path):
     best_model = None
     all_scores = []
 
-    for model_id, model_name, _fmt_cat, existing_config in all_models:
+    for model_id, model_name, existing_config in all_models:
         score = compare_configs(generated, existing_config)
         all_scores.append({
             'id': model_id, 'name': model_name, 'score': round(score, 3),
@@ -205,50 +213,42 @@ def resolve_model_for_scan(conn, source_path):
 
     all_scores.sort(key=lambda x: x['score'], reverse=True)
 
-    # Step 4a — match found
+    # Step 4a — match found: resolve to the existing model (no write)
     if best_model and best_score >= MATCH_THRESHOLD:
         model_id, model_name = best_model
-        # Resolve the matched model's format_category
-        fmt_row = conn.execute(
-            "SELECT format_category FROM aircraft_models WHERE id=?", (model_id,)
-        ).fetchone()
-        fmt_cat = fmt_row['format_category'] if fmt_row else ''
         return {
             'model_id': model_id,
             'model_name': model_name,
-            'format_category': fmt_cat,
             'is_new': False,
             'match_confidence': round(best_score, 3),
             'config': generated,
             'matching_models': all_scores[:5],
         }
 
-    # Step 4b — no match: auto-create a new model
-    from datetime import datetime
+    # Step 4b — no match: report as a new-format candidate (no write).
+    # Surface the discovered types so the UI can let the user pick which to
+    # keep; is_raw=True types default to deselected.
     folder_name = os.path.basename(source_path.rstrip('/\\'))
-    ts = datetime.now().strftime('%H%M%S')
-    new_name = f"Auto-{folder_name}-{ts}"
-    fmt_cat = generated.get('format', folder_name) or folder_name
-
-    conn.execute(
-        "INSERT INTO aircraft_models (name, format_category) VALUES (?, ?)",
-        (new_name, fmt_cat),
-    )
-    model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-    generated['format'] = fmt_cat
-    save_model_config_to_db(conn, model_id, generated)
-    register_model_tables(conn, model_id, fmt_cat, config=generated)
-    conn.commit()
+    discovered = [
+        {
+            'data_type_key': key,
+            'display_label': tdef.get('display_label', key),
+            'is_alert': bool(tdef.get('is_alert', False)),
+            'is_raw': bool(tdef.get('is_raw', False)),
+            'column_count': len(tdef.get('columns', [])),
+        }
+        for key, tdef in generated['data_types'].items()
+    ]
 
     return {
-        'model_id': model_id,
-        'model_name': new_name,
-        'format_category': fmt_cat,
+        'model_id': None,
+        'model_name': None,
         'is_new': True,
         'match_confidence': None,
         'config': generated,
         'matching_models': all_scores[:5],
+        'suggested_name': f"机型-{folder_name}",
+        'discovered_types': discovered,
     }
 
 
@@ -294,36 +294,21 @@ def scan_files_recursive(source_path, config):
     extract_serial = config.get('extract_serial_from_path', True)
 
     for root, _dirs, files in os.walk(source_path):
-        # Determine if this is a special directory
-        dir_name = os.path.basename(root)
-        is_alert_dir = (dir_name == 'FlightAlertInfo')
-        is_gps_compare_dir = (dir_name == 'GPSCompareData')
-
         for fname in files:
             if not fname.endswith('.txt'):
                 continue
 
             filepath = os.path.join(root, fname)
 
-            # Classify file
-            if is_alert_dir:
-                dt_key = 'alert'
-                is_alert = True
-            elif is_gps_compare_dir:
-                # Files in GPSCompareData dir should only match known patterns.
-                # Use get_data_type_key (now with word-boundary matching) so
-                # "SendGPSData" does NOT match "GPSData" or "GPSCompareData".
-                dt_key, tdef = get_data_type_key(fname, config)
-                if dt_key:
-                    is_alert = False
-                else:
-                    # No known pattern matched — skip (e.g. SendGPSData binary dumps)
-                    continue
-            else:
-                dt_key, tdef = get_data_type_key(fname, config)
-                if not dt_key:
-                    continue
-                is_alert = tdef.get('is_alert', False) if tdef else False
+            # Classify the file by matching its name against the config's
+            # file_patterns (word-boundary regex). is_alert comes from the
+            # matched data-type definition (set during config generation when
+            # the pattern name contains 'alert'), so no directory-name or
+            # key-name special-casing is needed here.
+            dt_key, tdef = get_data_type_key(fname, config)
+            if not dt_key:
+                continue
+            is_alert = tdef.get('is_alert', False) if tdef else False
 
             # Determine aircraft_serial
             if extract_serial:
@@ -345,7 +330,7 @@ def scan_files_recursive(source_path, config):
     return results
 
 
-def scan_folder(source_path, config, format_category=''):
+def scan_folder(source_path, config):
     """Scan a folder for flight data files using the given config.
 
     This is a helper that does NOT auto-detect — the caller is responsible
@@ -354,16 +339,14 @@ def scan_folder(source_path, config, format_category=''):
     Args:
         source_path: Root folder path
         config: Format config dict (required)
-        format_category: Optional label for result dict
 
     Returns:
-        dict: {source_path, folder_name, format_category, sessions: [...]}
+        dict: {source_path, folder_name, sessions: [...]}
     """
     if not os.path.isdir(source_path):
         return {
             'source_path': source_path,
             'folder_name': os.path.basename(source_path.rstrip('/\\')),
-            'format_category': format_category,
             'sessions': [],
             'error': 'Source path is not a directory',
         }
@@ -374,7 +357,6 @@ def scan_folder(source_path, config, format_category=''):
         return {
             'source_path': source_path,
             'folder_name': os.path.basename(source_path.rstrip('/\\')),
-            'format_category': format_category,
             'sessions': [],
             'error': str(e),
         }
@@ -383,7 +365,6 @@ def scan_folder(source_path, config, format_category=''):
         return {
             'source_path': source_path,
             'folder_name': os.path.basename(source_path.rstrip('/\\')),
-            'format_category': format_category,
             'sessions': [],
             'error': 'No data files found',
         }
@@ -413,7 +394,6 @@ def scan_folder(source_path, config, format_category=''):
     return {
         'source_path': source_path,
         'folder_name': os.path.basename(source_path.rstrip('/\\')),
-        'format_category': format_category,
         'format_detected': True,
         'sessions': sessions,
     }
@@ -472,7 +452,6 @@ def scan_folder_sessions(source_path, conn=None):
         result = {
             'source_path': source_path,
             'folder_name': os.path.basename(source_path.rstrip('/\\')),
-            'format_category': None,
             'format_detected': False,
             'model': None,
             'sessions': [],
@@ -489,7 +468,6 @@ def scan_folder_sessions(source_path, conn=None):
         result = {
             'source_path': source_path,
             'folder_name': os.path.basename(source_path.rstrip('/\\')),
-            'format_category': None,
             'format_detected': False,
             'model': None,
             'sessions': [],
@@ -499,16 +477,36 @@ def scan_folder_sessions(source_path, conn=None):
             conn.close()
         return result
 
-    fmt = model_info['format_category']
-
     # Step 2 — scan files using the generated config (has correct file_patterns)
-    scan_result = scan_folder(source_path, model_info['config'], format_category=fmt)
+    scan_result = scan_folder(source_path, model_info['config'])
+
+    # When no existing model matches, the user must create one (choosing which
+    # data types to keep) before any flight can be imported. We surface the
+    # discovered types and return model=null so the UI prompts for creation;
+    # the import-status / duplicate check below needs a model_id, so it is
+    # skipped until a model exists.
+    if model_info.get('is_new'):
+        result = {
+            'source_path': source_path,
+            'folder_name': scan_result.get('folder_name', os.path.basename(source_path.rstrip('/\\'))),
+            'format_detected': True,
+            'model': None,
+            'suggested_model_id': None,
+            'suggested_model_name': None,
+            'matching_models': model_info.get('matching_models', []),
+            'suggested_name': model_info.get('suggested_name'),
+            'discovered_types': model_info.get('discovered_types', []),
+            'sessions': scan_result.get('sessions', []),
+            'error': scan_result.get('error'),
+        }
+        if close_conn:
+            conn.close()
+        return result
 
     # Build the model descriptor
     model_desc = {
         'id': model_info['model_id'],
         'name': model_info['model_name'],
-        'format_category': fmt,
         'is_new': model_info['is_new'],
         'match_confidence': model_info['match_confidence'],
     }
@@ -517,7 +515,6 @@ def scan_folder_sessions(source_path, conn=None):
     result = {
         'source_path': source_path,
         'folder_name': scan_result.get('folder_name', os.path.basename(source_path.rstrip('/\\'))),
-        'format_category': fmt,
         'format_detected': True,
         'model': model_desc,
         'suggested_model_id': model_info['model_id'],
@@ -544,7 +541,7 @@ def scan_folder_sessions(source_path, conn=None):
 
         # Find ALL flights under this model with the same date+session_key
         conflicts = conn.execute(
-            """SELECT f.id, f.name, a.serial_number
+            """SELECT f.id, f.name, a.name as aircraft_name
                FROM flights f
                JOIN aircraft a ON a.id = f.aircraft_id
                WHERE a.model_id = ? AND f.flight_date = ? AND f.session_key = ?""",
@@ -556,7 +553,7 @@ def scan_folder_sessions(source_path, conn=None):
 
         # Build conflict list for frontend to use in dynamic status check
         sess['conflicting_aircraft'] = [
-            {'aircraft_serial': r['serial_number'],
+            {'aircraft_serial': r['aircraft_name'],
              'flight_id': r['id'],
              'flight_name': r['name']}
             for r in conflicts
@@ -565,12 +562,12 @@ def scan_folder_sessions(source_path, conn=None):
         # If auto-detected serial matches one of the conflicting aircraft,
         # mark as already imported
         for r in conflicts:
-            if r['serial_number'] == auto_serial:
+            if r['aircraft_name'] == auto_serial:
                 sess['import_status'] = 'imported'
                 sess['existing_flight_id'] = r['id']
                 sess['existing_flight_name'] = r['name']
                 sess['aircraft_id'] = conn.execute(
-                    "SELECT id FROM aircraft WHERE model_id=? AND serial_number=?",
+                    "SELECT id FROM aircraft WHERE model_id=? AND name=?",
                     (model_info['model_id'], auto_serial)
                 ).fetchone()['id']
                 break

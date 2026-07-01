@@ -6,22 +6,6 @@ import {
   type AircraftModel, type Aircraft,
 } from '../api';
 
-function formatBadgeStyle(fmt: string): string {
-  const colors = [
-    'bg-blue-100 text-blue-700 border-blue-200',
-    'bg-green-100 text-green-700 border-green-200',
-    'bg-amber-100 text-amber-700 border-amber-200',
-    'bg-purple-100 text-purple-700 border-purple-200',
-    'bg-pink-100 text-pink-700 border-pink-200',
-    'bg-teal-100 text-teal-700 border-teal-200',
-  ];
-  let hash = 0;
-  for (let i = 0; i < fmt.length; i++) {
-    hash = ((hash << 5) - hash) + fmt.charCodeAt(i);
-    hash |= 0;
-  }
-  return colors[Math.abs(hash) % colors.length];
-}
 
 interface Props {
   onImported: () => void;
@@ -179,6 +163,11 @@ export default function ImportPage({ onImported }: Props) {
   const [showCreateAircraft, setShowCreateAircraft] = useState<Record<string, boolean>>({});
   const [newAircraftSerial, setNewAircraftSerial] = useState('');
 
+  // New-format model creation (when no existing model matches the folder)
+  const [newModelName, setNewModelName] = useState('');
+  const [newModelTypes, setNewModelTypes] = useState<Set<string>>(new Set());
+  const [creatingModel, setCreatingModel] = useState(false);
+
   function sessionKey(serial: string, skey: string) { return `${serial}__${skey}`; }
 
   // ─── Dynamic duplicate status ──────────────────────────────
@@ -223,6 +212,19 @@ export default function ImportPage({ onImported }: Props) {
     } catch {}
   };
 
+  // When a scan finds no matching model, seed the new-model form: default name
+  // from the scan, and pre-select every non-raw discovered type. is_raw types
+  // (raw byte dumps like HandlePacket/AllReceivedData/SendCommand) default to
+  // deselected but remain available for the user to opt in.
+  useEffect(() => {
+    if (scanResult && !scanResult.model && scanResult.discovered_types) {
+      setNewModelName(scanResult.suggested_name ?? '');
+      setNewModelTypes(
+        new Set(scanResult.discovered_types.filter((t) => !t.is_raw).map((t) => t.data_type_key)),
+      );
+    }
+  }, [scanResult]);
+
   // ─── Browse / Scan ────────────────────────────────────────
 
   const doScan = async (scanPath: string) => {
@@ -248,7 +250,7 @@ export default function ImportPage({ onImported }: Props) {
       setErrorKeys({});
       setSessionAircraftMap({});
     } catch (e: any) {
-      setScanResult({ source_path: scanPath, folder_name: scanPath, format_category: null, model: null, sessions: [], error: '扫描失败: ' + e.message });
+      setScanResult({ source_path: scanPath, folder_name: scanPath, model: null, sessions: [], error: '扫描失败: ' + e.message });
     } finally { setScanning(false); }
   };
 
@@ -275,7 +277,7 @@ export default function ImportPage({ onImported }: Props) {
     if (sessionAircraftMap[key]) return sessionAircraftMap[key];
     if (session.aircraft_id) return session.aircraft_id;
     // Try to find matching aircraft from list
-    const match = aircraftList.find((a) => a.serial_number === session.aircraft_serial);
+    const match = aircraftList.find((a) => a.name === session.aircraft_serial);
     if (match) return match.id;
     return null;
   };
@@ -290,7 +292,7 @@ export default function ImportPage({ onImported }: Props) {
 
     // Check if aircraft already exists under this model
     const fresh = await listAircraft(selectedModelId);
-    const match = fresh.aircraft.find((a) => a.serial_number === session.aircraft_serial);
+    const match = fresh.aircraft.find((a) => a.name === session.aircraft_serial);
     if (match) {
       setAircraftList(fresh.aircraft);
       return match.id;
@@ -301,7 +303,7 @@ export default function ImportPage({ onImported }: Props) {
       await createAircraft(selectedModelId, session.aircraft_serial.trim());
       const updated = await listAircraft(selectedModelId);
       setAircraftList(updated.aircraft);
-      const created = updated.aircraft.find((a) => a.serial_number === session.aircraft_serial);
+      const created = updated.aircraft.find((a) => a.name === session.aircraft_serial);
       return created ? created.id : null;
     } catch {
       return null;
@@ -344,17 +346,47 @@ export default function ImportPage({ onImported }: Props) {
 
   // Manual override: create a fresh model even when auto-match exists
   const handleCreateModelFromScan = async () => {
-    if (!scanResult?.format_category || !path.trim()) return;
-    const cat = scanResult.format_category;
-    const modelName = `${cat}-${Date.now().toString(36)}`;
+    if (!path.trim()) return;
+    const modelName = `新机型-${Date.now().toString(36)}`;
     try {
-      const result = await createModelFromScan(modelName, path.trim(), cat);
+      const result = await createModelFromScan(modelName, path.trim());
       setSelectedModelId(result.id);
       await loadContext();
       await loadAircraftForModel(result.id);
     } catch (e: any) {
       alert('创建机型失败: ' + e.message);
     }
+  };
+
+  // New-format flow: create a model from the scan with the user's chosen name
+  // and selected data types, then re-scan so the new model is matched.
+  const handleConfirmCreateModel = async () => {
+    if (!path.trim() || !newModelName.trim() || newModelTypes.size === 0) return;
+    setCreatingModel(true);
+    try {
+      const result = await createModelFromScan(
+        newModelName.trim(),
+        path.trim(),
+        Array.from(newModelTypes),
+      );
+      setSelectedModelId(result.id);
+      await loadContext();
+      await loadAircraftForModel(result.id);
+      await refreshScan();
+    } catch (e: any) {
+      alert('创建机型失败: ' + e.message);
+    } finally {
+      setCreatingModel(false);
+    }
+  };
+
+  const toggleNewModelType = (key: string) => {
+    setNewModelTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   const handleCreateAircraft = async (serial: string, sessionKey?: string) => {
@@ -367,7 +399,7 @@ export default function ImportPage({ onImported }: Props) {
       setAircraftList(updated.aircraft);
       // Auto-assign to session if provided
       if (sessionKey) {
-        const created = updated.aircraft.find((a) => a.serial_number === serial.trim());
+        const created = updated.aircraft.find((a) => a.name === serial.trim());
         if (created) {
           setSessionAircraftMap((prev) => ({ ...prev, [sessionKey]: created.id }));
           setErrorKeys((prev) => { const n = { ...prev }; delete n[sessionKey]; return n; });
@@ -403,7 +435,7 @@ export default function ImportPage({ onImported }: Props) {
     if (!flightSearch.trim()) return true;
     const s = flightSearch.toLowerCase();
     return f.name.toLowerCase().includes(s)
-      || (f.aircraft_serial || '').toLowerCase().includes(s)
+      || (f.aircraft_name || '').toLowerCase().includes(s)
       || (f.model_name || '').toLowerCase().includes(s);
   });
 
@@ -448,11 +480,6 @@ export default function ImportPage({ onImported }: Props) {
             <h3 className="text-sm font-medium text-gray-500">
               扫描结果 — {scanResult.folder_name}
             </h3>
-            {scanResult.format_category && (
-              <span className={`px-2 py-0.5 rounded text-xs font-medium border ${formatBadgeStyle(scanResult.format_category)}`}>
-                {scanResult.format_category}
-              </span>
-            )}
             {scanResult.format_detected && (
               <span className="text-xs text-green-600">✓ 自动检测</span>
             )}
@@ -475,7 +502,7 @@ export default function ImportPage({ onImported }: Props) {
                   }}
                   className="bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500"
                 >
-                  {/* Always show resolved model first, then other models sharing the same format_category */}
+                  {/* Resolved model first, then other models */}
                   <option value={scanResult.model.id}>
                     {scanResult.model.name} (推荐)
                   </option>
@@ -535,6 +562,80 @@ export default function ImportPage({ onImported }: Props) {
             </div>
           )}
 
+          {/* New format: no model matched → prompt the user to create one,
+              choosing which discovered data types to keep. */}
+          {!scanResult.model && scanResult.discovered_types && (
+            <div className="mb-4 p-4 bg-amber-50 rounded-lg border border-amber-200 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-amber-800">发现新格式</span>
+                <span className="text-xs text-amber-600">未匹配到已有机型，创建新机型后即可导入</span>
+              </div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs text-gray-500">机型名称</span>
+                <input
+                  value={newModelName}
+                  onChange={(e) => setNewModelName(e.target.value)}
+                  className="bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500"
+                  placeholder="给新机型命名"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">
+                    数据类型（勾选要导入的，共 {scanResult.discovered_types.length} 个）
+                  </span>
+                  <button
+                    onClick={() => setNewModelTypes(new Set(scanResult.discovered_types!.map((t) => t.data_type_key)))}
+                    className="text-xs text-blue-600 hover:underline"
+                  >
+                    全选
+                  </button>
+                </div>
+                {scanResult.discovered_types.map((t) => {
+                  const checked = newModelTypes.has(t.data_type_key);
+                  return (
+                    <label
+                      key={t.data_type_key}
+                      className="flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-white/60 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleNewModelType(t.data_type_key)}
+                      />
+                      <span className="text-gray-800">{t.display_label}</span>
+                      <span className="text-xs text-gray-400">{t.data_type_key}</span>
+                      {t.is_alert && (
+                        <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs border border-amber-200">告警</span>
+                      )}
+                      {t.is_raw && (
+                        <span
+                          className="px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-xs border border-gray-300"
+                          title="疑似原始字节转储，分析价值低，默认不导入。可手动勾选。"
+                        >
+                          原始数据
+                        </span>
+                      )}
+                      <span className="text-xs text-gray-400 ml-auto">{t.column_count} 列</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleConfirmCreateModel}
+                  disabled={creatingModel || !newModelName.trim() || newModelTypes.size === 0}
+                  className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {creatingModel ? '创建中…' : '创建机型并继续'}
+                </button>
+                {newModelTypes.size === 0 && (
+                  <span className="text-xs text-red-500">至少选择一个数据类型</span>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Sessions */}
           {scanResult.sessions.length > 0 && (
             <div className="space-y-3">
@@ -543,7 +644,7 @@ export default function ImportPage({ onImported }: Props) {
                 const isImporting = importingKeys.has(key);
                 const aid = getAircraftId(session);
                 const selectedSerial = aid
-                  ? (aircraftList.find(a => a.id === aid)?.serial_number ?? session.aircraft_serial)
+                  ? (aircraftList.find(a => a.id === aid)?.name ?? session.aircraft_serial)
                   : session.aircraft_serial;
                 const effStatus = getEffectiveStatus(session, selectedSerial);
                 const isImported = importedKeys.has(key)
@@ -613,7 +714,7 @@ export default function ImportPage({ onImported }: Props) {
                               >
                                 <option value="">选择已有飞机...</option>
                                 {aircraftList.map((a) => (
-                                  <option key={a.id} value={a.id}>{a.serial_number}{a.name ? ` (${a.name})` : ''}</option>
+                                  <option key={a.id} value={a.id}>{a.name}</option>
                                 ))}
                               </select>
                               {showCreateAircraft[key] ? (
@@ -703,10 +804,10 @@ export default function ImportPage({ onImported }: Props) {
               <div key={f.id} className="flex items-center justify-between bg-white rounded-lg px-4 py-3 border border-gray-200">
                 <div className="flex items-center gap-4">
                   <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
-                    {f.model_name || f.format_category}
+                    {f.model_name}
                   </span>
                   <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
-                    {f.aircraft_serial || f.drone_id || '?'}
+                    {f.aircraft_name || f.drone_id || '?'}
                   </span>
                   {editingFlightId === f.id ? (
                     <div className="flex items-center gap-1">

@@ -28,7 +28,6 @@ from backend.database import init_db, get_db, DATA_DIR, DB_PATH
 from backend.parser import import_session
 from backend.format_configs import (
     register_model_tables, get_columns_for_model,
-    get_table_name,
     save_model_config_to_db, generate_config_from_scan,
     update_column_metadata, data_table_name,
 )
@@ -104,7 +103,6 @@ def health_check():
 
 class ImportRequest(BaseModel):
     source_path: str
-    format_category: str | None = None
 
 
 class ImportSessionRequest(BaseModel):
@@ -119,13 +117,15 @@ class UpdateFlightRequest(BaseModel):
 
 class CreateModelRequest(BaseModel):
     name: str
-    format_category: str
 
 
 class CreateModelFromScanRequest(BaseModel):
     name: str
     source_path: str
-    format_category: str
+    # Optional allowlist of data_type_keys to register. When omitted, every
+    # discovered type is registered. When provided, only the listed types are
+    # kept (lets the user drop raw byte dumps during new-model creation).
+    selected_data_types: list[str] | None = None
 
 
 class UpdateModelRequest(BaseModel):
@@ -143,12 +143,11 @@ class UpdateDataTypeLabelRequest(BaseModel):
 
 
 class CreateAircraftRequest(BaseModel):
-    serial_number: str
-    name: str = ''
+    name: str
 
 
 class UpdateAircraftRequest(BaseModel):
-    serial_number: str
+    name: str
 
 
 class AlignedRequest(BaseModel):
@@ -248,18 +247,18 @@ def list_models():
 @app.post("/api/models")
 def create_model(req: CreateModelRequest):
     """Create a new aircraft model. Automatically creates data tables and column registry."""
-    if not req.format_category.strip():
-        raise HTTPException(400, "format_category must not be empty")
+    if not req.name.strip():
+        raise HTTPException(400, "Model name must not be empty")
 
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO aircraft_models (name, format_category) VALUES (?, ?)",
-            (req.name, req.format_category)
+            "INSERT INTO aircraft_models (name) VALUES (?)",
+            (req.name,)
         )
         model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        register_model_tables(conn, model_id, req.format_category)
-        return {"id": model_id, "name": req.name, "format_category": req.format_category}
+        register_model_tables(conn, model_id)
+        return {"id": model_id, "name": req.name}
     except Exception as e:
         if 'UNIQUE' in str(e):
             raise HTTPException(400, f"Model name '{req.name}' already exists")
@@ -270,23 +269,38 @@ def create_model(req: CreateModelRequest):
 
 @app.post("/api/models/from-scan")
 def create_model_from_scan(req: CreateModelFromScanRequest):
-    """Create a model from a scanned folder. Auto-generates format config
-    from the folder's file structure."""
+    """Create a model from a scanned folder.
+
+    Auto-generates a format config from the folder's file structure, then
+    persists it. If ``selected_data_types`` is provided, only those data types
+    are registered — raw byte dumps the user deselected during creation are
+    dropped here. When omitted, every discovered type is kept.
+    """
     conn = get_db()
     try:
         config_data = generate_config_from_scan(req.source_path)
-        config_data['format'] = req.format_category
+
+        if req.selected_data_types is not None:
+            keep = set(req.selected_data_types)
+            config_data['data_types'] = {
+                k: v for k, v in config_data['data_types'].items() if k in keep
+            }
+
+        if not config_data.get('data_types'):
+            raise HTTPException(400, "No data types selected; cannot create an empty model")
 
         conn.execute(
-            "INSERT INTO aircraft_models (name, format_category) VALUES (?, ?)",
-            (req.name, req.format_category)
+            "INSERT INTO aircraft_models (name) VALUES (?)",
+            (req.name,)
         )
         model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         save_model_config_to_db(conn, model_id, config_data)
-        register_model_tables(conn, model_id, req.format_category, config=config_data)
+        register_model_tables(conn, model_id, config=config_data)
         conn.commit()
-        return {"id": model_id, "name": req.name, "format_category": req.format_category}
+        return {"id": model_id, "name": req.name}
+    except HTTPException:
+        raise
     except Exception as e:
         if 'UNIQUE' in str(e):
             raise HTTPException(400, f"Model name '{req.name}' already exists")
@@ -364,7 +378,7 @@ def export_model(model_id: int):
     conn = get_db()
     try:
         model = conn.execute(
-            "SELECT name, format_category, has_header, has_uav_send_id, extract_serial_from_path "
+            "SELECT name, has_header, has_uav_send_id, extract_serial_from_path "
             "FROM aircraft_models WHERE id=?",
             (model_id,)
         ).fetchone()
@@ -441,7 +455,6 @@ def export_model(model_id: int):
             'exported_at': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
             'model': {
                 'name': model['name'],
-                'format_category': model['format_category'],
                 'has_header': bool(model['has_header']),
                 'has_uav_send_id': bool(model['has_uav_send_id']),
                 'extract_serial_from_path': bool(model['extract_serial_from_path']),
@@ -480,7 +493,7 @@ def import_model(req: ImportModelRequest):
 
     model_data = data.get('model', {})
     data_types = data.get('data_types', {})
-    if not model_data.get('format_category') or not data_types:
+    if not model_data or not data_types:
         raise HTTPException(400, "Invalid export data: missing model or data_types")
 
     conn = get_db()
@@ -496,16 +509,13 @@ def import_model(req: ImportModelRequest):
             name = f"{base_name} ({suffix})"
             suffix += 1
 
-        fmt_cat = model_data['format_category']
-
         # ── Create model ──
         conn.execute(
             """INSERT INTO aircraft_models
-               (name, format_category, has_header, has_uav_send_id, extract_serial_from_path)
-               VALUES (?, ?, ?, ?, ?)""",
+               (name, has_header, has_uav_send_id, extract_serial_from_path)
+               VALUES (?, ?, ?, ?)""",
             (
                 name,
-                fmt_cat,
                 1 if model_data.get('has_header') else 0,
                 1 if model_data.get('has_uav_send_id') else 0,
                 1 if model_data.get('extract_serial_from_path') else 0,
@@ -570,7 +580,6 @@ def import_model(req: ImportModelRequest):
 
         # ── Build config dict for register_model_tables ──
         config = {
-            'format': fmt_cat,
             'has_header': bool(model_data.get('has_header')),
             'has_uav_send_id': bool(model_data.get('has_uav_send_id')),
             'extract_serial_from_path': bool(model_data.get('extract_serial_from_path')),
@@ -594,10 +603,10 @@ def import_model(req: ImportModelRequest):
                 ],
             }
 
-        register_model_tables(conn, model_id, fmt_cat, config=config)
+        register_model_tables(conn, model_id, config=config)
         conn.commit()
 
-        return {"id": model_id, "name": name, "format_category": fmt_cat}
+        return {"id": model_id, "name": name}
 
     except HTTPException:
         raise
@@ -728,7 +737,7 @@ def list_aircraft(model_id: int):
     try:
         rows = conn.execute(
             "SELECT a.*, (SELECT COUNT(*) FROM flights f WHERE f.aircraft_id = a.id) as flight_count "
-            "FROM aircraft a WHERE a.model_id = ? ORDER BY a.serial_number",
+            "FROM aircraft a WHERE a.model_id = ? ORDER BY a.name",
             (model_id,)
         ).fetchall()
         return {"aircraft": [dict(r) for r in rows]}
@@ -745,17 +754,17 @@ def create_aircraft(model_id: int, req: CreateAircraftRequest):
         if not model:
             raise HTTPException(404, "Model not found")
         conn.execute(
-            "INSERT INTO aircraft (model_id, serial_number) VALUES (?, ?)",
-            (model_id, req.serial_number)
+            "INSERT INTO aircraft (model_id, name) VALUES (?, ?)",
+            (model_id, req.name)
         )
         aid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
-        return {"id": aid, "model_id": model_id, "serial_number": req.serial_number}
+        return {"id": aid, "model_id": model_id, "name": req.name}
     except HTTPException:
         raise
     except Exception as e:
         if 'UNIQUE' in str(e):
-            raise HTTPException(400, f"Aircraft '{req.serial_number}' already exists in this model")
+            raise HTTPException(400, f"Aircraft '{req.name}' already exists in this model")
         raise HTTPException(500, str(e))
     finally:
         conn.close()
@@ -763,20 +772,20 @@ def create_aircraft(model_id: int, req: CreateAircraftRequest):
 
 @app.patch("/api/aircraft/{aircraft_id}")
 def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
-    """Update an aircraft's serial number."""
+    """Update an aircraft's name."""
     conn = get_db()
     try:
         row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Aircraft not found")
-        conn.execute("UPDATE aircraft SET serial_number=? WHERE id=?", (req.serial_number.strip(), aircraft_id))
+        conn.execute("UPDATE aircraft SET name=? WHERE id=?", (req.name.strip(), aircraft_id))
         conn.commit()
         return {"ok": True}
     except HTTPException:
         raise
     except Exception as e:
         if 'UNIQUE' in str(e):
-            raise HTTPException(400, f"Serial number '{req.serial_number}' already exists in this model")
+            raise HTTPException(400, f"Aircraft name '{req.name}' already exists in this model")
         raise HTTPException(500, str(e))
     finally:
         conn.close()
@@ -805,8 +814,8 @@ def list_flights():
     conn = get_db()
     try:
         rows = conn.execute(
-            """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name, am.format_category
+            """SELECT f.*, a.name as aircraft_name,
+                      am.id as model_id, am.name as model_name
                FROM flights f
                JOIN aircraft a ON a.id = f.aircraft_id
                JOIN aircraft_models am ON am.id = a.model_id
@@ -823,8 +832,8 @@ def get_flight(flight_id: int):
     conn = get_db()
     try:
         flight = conn.execute(
-            """SELECT f.*, a.serial_number as aircraft_serial, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name, am.format_category
+            """SELECT f.*, a.name as aircraft_name,
+                      am.id as model_id, am.name as model_name
                FROM flights f
                JOIN aircraft a ON a.id = f.aircraft_id
                JOIN aircraft_models am ON am.id = a.model_id
@@ -942,16 +951,16 @@ def get_alerts(flight_id: int):
         if model_id is None:
             return {"alerts": []}
 
-        alert_table = get_table_name(conn, model_id, 'alert')
+        alert_dt_key, alert_table = analysis._get_alert_data_type(conn, model_id)
         if not alert_table:
             return {"alerts": []}
 
         # Read alert columns from column_registry (ordered by ordinal)
         alert_col_rows = conn.execute(
             "SELECT column_name FROM column_registry "
-            "WHERE model_id=? AND data_type_key='alert' AND ordinal IS NOT NULL "
+            "WHERE model_id=? AND data_type_key=? AND ordinal IS NOT NULL "
             "ORDER BY ordinal",
-            (model_id,)
+            (model_id, alert_dt_key)
         ).fetchall()
 
         if not alert_col_rows:

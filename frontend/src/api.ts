@@ -44,7 +44,6 @@ export interface HealthStatus {
 export interface AircraftModel {
   id: number;
   name: string;
-  format_category: string;
   created_at: string;
   aircraft_count?: number;
   total_flights?: number;
@@ -54,7 +53,6 @@ export interface AircraftModel {
 export interface Aircraft {
   id: number;
   model_id: number;
-  serial_number: string;
   name: string;
   created_at: string;
   flight_count?: number;
@@ -64,11 +62,9 @@ export interface Flight {
   id: number;
   name: string;
   aircraft_id: number;
-  aircraft_serial: string;
   aircraft_name: string;
   model_id: number;
   model_name: string;
-  format_category: string;
   source_path: string;
   session_key: string;
   flight_date: string;
@@ -94,20 +90,30 @@ export interface SessionPreview {
   conflicting_aircraft?: { aircraft_serial: string; flight_id: number; flight_name: string }[];
 }
 
+export interface DiscoveredType {
+  data_type_key: string;
+  display_label: string;
+  is_alert: boolean;
+  is_raw: boolean;
+  column_count: number;
+}
+
 export interface ScanResult {
   source_path: string;
   folder_name: string;
-  format_category: string | null;
   format_detected?: boolean;
   model: {
     id: number;
     name: string;
-    format_category: string;
     is_new: boolean;
     match_confidence: number | null;
   } | null;
   suggested_model_id?: number;
   suggested_model_name?: string;
+  // New-format folder: no model matched, so the UI prompts the user to create
+  // one (choosing a name and which discovered data types to keep).
+  suggested_name?: string;
+  discovered_types?: DiscoveredType[];
   matching_models?: { id: number; name: string; score: number }[];
   sessions: SessionPreview[];
   error?: string;
@@ -204,15 +210,6 @@ export interface FlightStats {
   end_time: string;
   drone_id: string;
   name: string;
-  max_altitude: number;
-  max_speed: number;
-  avg_rpm: number;
-  max_rpm: number;
-  fuel_start: number;
-  fuel_end: number;
-  battery_start: number;
-  battery_end: number;
-  alert_count: number;
 }
 
 export interface Preset {
@@ -243,10 +240,21 @@ export const checkHealth = () => request<HealthStatus>('/health');
 
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');
-export const createModel = (name: string, formatCategory: string) =>
-  request<AircraftModel>('/models', { method: 'POST', body: JSON.stringify({ name, format_category: formatCategory }) });
-export const createModelFromScan = (name: string, sourcePath: string, formatCategory: string) =>
-  request<AircraftModel>('/models/from-scan', { method: 'POST', body: JSON.stringify({ name, source_path: sourcePath, format_category: formatCategory }) });
+export const createModel = (name: string) =>
+  request<AircraftModel>('/models', { method: 'POST', body: JSON.stringify({ name }) });
+export const createModelFromScan = (
+  name: string,
+  sourcePath: string,
+  selectedDataTypes?: string[],
+) =>
+  request<AircraftModel>('/models/from-scan', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      source_path: sourcePath,
+      selected_data_types: selectedDataTypes ?? null,
+    }),
+  });
 export const updateModel = (id: number, name: string) =>
   request('/models/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const deleteModel = (id: number) => request('/models/' + id, { method: 'DELETE' });
@@ -288,10 +296,10 @@ export const updateModelDataTypeLabel = (
 // Aircraft
 export const listAircraft = (modelId: number) =>
   request<{ aircraft: Aircraft[] }>(`/models/${modelId}/aircraft`);
-export const createAircraft = (modelId: number, serialNumber: string, name?: string) =>
-  request<Aircraft>(`/models/${modelId}/aircraft`, { method: 'POST', body: JSON.stringify({ serial_number: serialNumber, name: name || '' }) });
-export const updateAircraft = (id: number, serialNumber: string) =>
-  request('/aircraft/' + id, { method: 'PATCH', body: JSON.stringify({ serial_number: serialNumber }) });
+export const createAircraft = (modelId: number, name: string) =>
+  request<Aircraft>(`/models/${modelId}/aircraft`, { method: 'POST', body: JSON.stringify({ name }) });
+export const updateAircraft = (id: number, name: string) =>
+  request('/aircraft/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const deleteAircraft = (id: number) => request('/aircraft/' + id, { method: 'DELETE' });
 
 // Flights
@@ -300,9 +308,9 @@ export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>
   request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
-export const scanFolder = (sourcePath: string, formatCategory?: string) =>
+export const scanFolder = (sourcePath: string) =>
   request<ScanResult>(
-    '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, format_category: formatCategory || null }) }
+    '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }
   );
 export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string) =>
   request<ImportSessionResult>(

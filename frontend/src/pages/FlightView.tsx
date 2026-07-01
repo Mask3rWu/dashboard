@@ -416,7 +416,7 @@ export default function FlightView({
     const s = flightSearch.toLowerCase();
     return new Set(
       flights.filter(f =>
-        f.name.toLowerCase().includes(s) || (f.aircraft_serial || f.drone_id || '').toLowerCase().includes(s)
+        f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s)
       ).map(f => f.id)
     );
   })();
@@ -437,7 +437,7 @@ export default function FlightView({
     : []).filter(f => {
       if (!flightSearch.trim()) return true;
       const s = flightSearch.toLowerCase();
-      return f.name.toLowerCase().includes(s) || (f.aircraft_serial || f.drone_id || '').toLowerCase().includes(s);
+      return f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s);
     });
 
   const chartRef = useRef<HTMLDivElement>(null);
@@ -843,7 +843,7 @@ export default function FlightView({
                   const f = flights.find(fl => fl.id === selectedFlightId);
                   const m = models.find(mo => mo.id === selectedModelId);
                   const a = aircraft.find(ac => ac.id === selectedAircraftId);
-                  if (f && m && a) return `${m.name} / ${a.serial_number} / ${f.name}`;
+                  if (f && m && a) return `${m.name} / ${a.name} / ${f.name}`;
                   return f?.name || '选择架次...';
                 })()}
               </span>
@@ -896,7 +896,7 @@ export default function FlightView({
                             : 'text-gray-700 hover:bg-gray-50'
                         }`}
                       >
-                        <span className="truncate">{a.serial_number}{a.name ? ` (${a.name})` : ''}</span>
+                        <span className="truncate">{a.name}</span>
                         <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
                       </button>
                     ))
@@ -1140,13 +1140,6 @@ export default function FlightView({
           <span className="text-gray-500">基准: <strong className="text-gray-800">{aligned?.ref_label || '自动'}</strong>{aligned?.ref_sample_hz ? <span className="text-gray-400"> · {formatSampleHz(aligned.ref_sample_hz)}</span> : null}</span>
           <span className="text-gray-500">对齐容差: <strong className="text-gray-800">{aligned?.tolerance?.toFixed(2) ?? '-'}s</strong></span>
           <span className="text-gray-500">时长: <strong className="text-gray-800">{Math.round(stats.duration_sec / 60)}min</strong></span>
-          <span className="text-gray-500">最大高度: <strong className="text-gray-800">{stats.max_altitude}m</strong></span>
-          <span className="text-gray-500">最大速度: <strong className="text-gray-800">{stats.max_speed}m/s</strong></span>
-          <span className="text-gray-500">平均转速: <strong className="text-gray-800">{stats.avg_rpm}RPM</strong></span>
-          <span className="text-gray-500">最高转速: <strong className="text-gray-800">{stats.max_rpm}RPM</strong></span>
-          <span className="text-gray-500">油耗: <strong className="text-gray-800">{stats.fuel_start}→{stats.fuel_end}L</strong></span>
-          <span className="text-gray-500">电量: <strong className="text-gray-800">{stats.battery_start}→{stats.battery_end}%</strong></span>
-          <span className="text-gray-500">告警: <strong className="text-amber-500">{stats.alert_count}</strong></span>
         </div>
       )}
 

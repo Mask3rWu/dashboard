@@ -309,7 +309,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const filteredAircraft = aircraft.filter((ac) => {
     if (!aircraftSearch.trim()) return true;
     const t = aircraftSearch.trim().toLowerCase();
-    return ac.serial_number.toLowerCase().includes(t) || (ac.name && ac.name.toLowerCase().includes(t));
+    return ac.name.toLowerCase().includes(t);
   });
 
   const getAircraftStats = (acId: number) => {
@@ -569,7 +569,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                 </div>
                               ) : (
                                 <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
-                                  {ac.serial_number}
+                                  {ac.name}
                                 </span>
                               )}
                               {(() => {
@@ -595,7 +595,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                               ) : (
                                 <>
                                   <button
-                                    onClick={() => { setEditingAcId(ac.id); setEditAcSerial(ac.serial_number); }}
+                                    onClick={() => { setEditingAcId(ac.id); setEditAcSerial(ac.name); }}
                                     className="text-xs text-gray-400 hover:text-blue-500"
                                   >
                                     重命名
@@ -850,7 +850,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
               <div>
                 <label className="block text-xs text-gray-500 mb-1">来源</label>
                 <div className="text-sm text-gray-800 bg-gray-50 rounded px-2 py-1">
-                  {importData.model?.name} ({importData.model?.format_category})
+                  {importData.model?.name}
                 </div>
               </div>
               <div>

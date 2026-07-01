@@ -16,15 +16,21 @@ else:
     DATA_DIR = os.path.join(os.path.expanduser('~'), '.flightanalyzer')
 
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
-CURRENT_SCHEMA_VERSION = 7
+# v9: dropped aircraft_models.format_category (dead placeholder field) and renamed
+# aircraft.serial_number → aircraft.name (it always held a free-form aircraft
+# label, not a numeric serial). v8 DBs are rebuilt from scratch on startup.
+CURRENT_SCHEMA_VERSION = 9
 CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
 }
 REQUIRED_COLUMNS = {
     'aircraft_models': {
-        'id', 'name', 'format_category', 'has_header', 'has_uav_send_id',
+        'id', 'name', 'has_header', 'has_uav_send_id',
         'extract_serial_from_path', 'created_at',
+    },
+    'aircraft': {
+        'id', 'model_id', 'name', 'created_at',
     },
     'flights': {
         'id', 'aircraft_id', 'name', 'source_path', 'session_key',
@@ -138,21 +144,19 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS aircraft_models (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
-    format_category TEXT NOT NULL CHECK(format_category != ''),
     has_header      INTEGER DEFAULT 1,
     has_uav_send_id INTEGER DEFAULT 0,
     extract_serial_from_path INTEGER DEFAULT 0,
     created_at      TEXT DEFAULT (datetime('now','localtime'))
 );
 
--- Individual aircraft (飞机序号)
+-- Individual aircraft (飞机) — `name` is a free-form aircraft label
 CREATE TABLE IF NOT EXISTS aircraft (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id        INTEGER NOT NULL REFERENCES aircraft_models(id) ON DELETE CASCADE,
-    serial_number   TEXT NOT NULL,
-    name            TEXT DEFAULT '',
+    name            TEXT NOT NULL,
     created_at      TEXT DEFAULT (datetime('now','localtime')),
-    UNIQUE(model_id, serial_number)
+    UNIQUE(model_id, name)
 );
 
 -- Flight sessions (飞行架次)
@@ -168,7 +172,10 @@ CREATE TABLE IF NOT EXISTS flights (
     duration_sec    REAL,
     total_rows      INTEGER DEFAULT 0,
     import_time     TEXT DEFAULT (datetime('now','localtime')),
-    UNIQUE(aircraft_id, source_path, session_key)
+    -- Dedup boundary: same aircraft + date + session_key. source_path is
+    -- stored for provenance only and intentionally excluded from the unique
+    -- constraint (a folder may be moved and re-imported from a new path).
+    UNIQUE(aircraft_id, flight_date, session_key)
 );
 
 -- Data table registry (maps model × data_type → table_name)
@@ -227,116 +234,6 @@ def get_db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
-
-
-def _has_old_schema(conn):
-    """Check if the v1 (old) schema is present."""
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='gps_data'"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _is_migrated(conn):
-    """Check if v2 migration has been applied."""
-    rows = conn.execute(
-        "SELECT version FROM schema_version WHERE version >= 2"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _is_migrated_v3(conn):
-    """Check if v3 migration has been applied."""
-    rows = conn.execute(
-        "SELECT version FROM schema_version WHERE version >= 3"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _run_v2_migration(conn):
-    """Run migration from v1 to v2 schema.
-
-    This is imported from backend.migrate_v2 at runtime to avoid circular imports.
-    """
-    from backend.migrate_v2 import run_migration
-    run_migration(conn)
-
-
-def _run_v3_migration(conn):
-    """Run migration from v2 to v3 schema (relax format_category, add config_path).
-
-    This is imported from backend.migrate_v3 at runtime to avoid circular imports.
-    """
-    from backend.migrate_v3 import run_migration
-    run_migration(conn)
-
-
-def _is_migrated_v4(conn):
-    """Check if v4 migration has been applied."""
-    rows = conn.execute(
-        "SELECT version FROM schema_version WHERE version >= 4"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _run_v4_migration(conn):
-    """Run migration from v3 to v4 schema (preset → model scoping).
-
-    This is imported from backend.migrate_v4 at runtime to avoid circular imports.
-    """
-    from backend.migrate_v4 import run_migration
-    run_migration(conn)
-
-
-def _is_migrated_v5(conn):
-    """Check if v5 migration has been applied."""
-    rows = conn.execute(
-        "SELECT version FROM schema_version WHERE version >= 5"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _run_v5_migration(conn):
-    """Run migration from v4 to v5 schema (column scale_factor).
-
-    This is imported from backend.migrate_v5 at runtime to avoid circular imports.
-    """
-    from backend.migrate_v5 import run_migration
-    run_migration(conn)
-
-
-def _is_migrated_v6(conn):
-    """Check if v6 migration has been applied."""
-    rows = conn.execute(
-        "SELECT version FROM schema_version WHERE version >= 6"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _run_v6_migration(conn):
-    """Run migration from v5 to v6 schema (full datetime in flights).
-
-    This is imported from backend.migrate_v6 at runtime to avoid circular imports.
-    """
-    from backend.migrate_v6 import run_migration
-    run_migration(conn)
-
-
-def _is_migrated_v7(conn):
-    """Check if v7 migration has been applied."""
-    rows = conn.execute(
-        "SELECT version FROM schema_version WHERE version >= 7"
-    ).fetchall()
-    return len(rows) > 0
-
-
-def _run_v7_migration(conn):
-    """Run migration from v6 to v7 schema (JSON config → DB).
-
-    This is imported from backend.migrate_v7 at runtime to avoid circular imports.
-    """
-    from backend.migrate_v7 import run_migration
-    run_migration(conn)
 
 
 def init_db():

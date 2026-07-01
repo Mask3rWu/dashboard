@@ -209,7 +209,7 @@ export default function ComparePage({
     // Text search
     if (!flightSearch.trim()) return true;
     const s = flightSearch.toLowerCase();
-    return f.name.toLowerCase().includes(s) || (f.aircraft_serial || f.drone_id || '').toLowerCase().includes(s);
+    return f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s);
   });
 
   // Search-matched flight IDs for upward tree filtering
@@ -218,7 +218,7 @@ export default function ComparePage({
     const s = flightSearch.toLowerCase();
     return new Set(
       flights.filter(f =>
-        f.name.toLowerCase().includes(s) || (f.aircraft_serial || f.drone_id || '').toLowerCase().includes(s)
+        f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s)
       ).map(f => f.id)
     );
   })();
@@ -259,7 +259,7 @@ export default function ComparePage({
               {(() => {
                 const m = models.find(mo => mo.id === selectedModelId);
                 const a = aircraft.find(ac => ac.id === selectedAircraftId);
-                if (m && a) return `${m.name} / ${a.serial_number}`;
+                if (m && a) return `${m.name} / ${a.name}`;
                 return '选择机型/飞机...';
               })()}
             </span>
@@ -312,7 +312,7 @@ export default function ComparePage({
                           : 'text-gray-700 hover:bg-gray-50'
                       }`}
                     >
-                      <span className="truncate block">{a.serial_number}{a.name ? ` (${a.name})` : ''}</span>
+                      <span className="truncate block">{a.name}</span>
                     </button>
                   ))
                 )}
@@ -349,7 +349,7 @@ export default function ComparePage({
                 : 'bg-white border border-gray-300 text-gray-500 hover:bg-gray-100'
             }`}
           >
-            UAV{f.aircraft_serial || f.drone_id} - {f.name}
+            {f.aircraft_name || f.drone_id} - {f.name}
           </button>
         )))}
       </div>
