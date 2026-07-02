@@ -96,7 +96,20 @@ export interface Aircraft {
   flight_count?: number;
 }
 
-export interface Flight {
+export interface FlightRecordFields {
+  record_daily_duration_min?: number | null;
+  record_batch_name?: string;
+  record_location?: string;
+  record_payload?: string;
+  record_weather?: string;
+  record_fuel_amount?: number | null;
+  record_takeoff_weight?: number | null;
+  record_altitude?: number | null;
+  record_wind_speed?: number | null;
+  record_note?: string;
+}
+
+export interface Flight extends FlightRecordFields {
   id: number;
   name: string;
   aircraft_id: number;
@@ -362,18 +375,46 @@ export const updateAircraft = (id: number, name: string) =>
 export const deleteAircraft = (id: number) => request('/aircraft/' + id, { method: 'DELETE' });
 
 // Flights
-export const listFlights = () => request<{ flights: Flight[] }>('/flights');
+export interface FlightListFilters {
+  model_id?: number | null;
+  aircraft_id?: number | null;
+  date_from?: string;
+  date_to?: string;
+  batch_name?: string;
+  location?: string;
+  weather?: string;
+  payload?: string;
+}
+
+function buildQuery(params: Record<string, string | number | null | undefined>) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && String(value).trim() !== '') {
+      qs.set(key, String(value));
+    }
+  });
+  const text = qs.toString();
+  return text ? `?${text}` : '';
+}
+
+export const listFlights = (filters: FlightListFilters = {}) =>
+  request<{ flights: Flight[] }>(`/flights${buildQuery(filters as Record<string, string | number | null | undefined>)}`);
 export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup[] }>(`/flights/${id}`);
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>
   request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
+export const updateFlightRecord = (id: number, record: FlightRecordFields) =>
+  request('/flights/' + id + '/record', { method: 'PATCH', body: JSON.stringify(record) });
 export const scanFolder = (sourcePath: string) =>
   request<ScanResult>(
     '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }
   );
-export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string) =>
+export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string, record: FlightRecordFields = {}) =>
   request<ImportSessionResult>(
-    '/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, aircraft_id: aircraftId, session_key: sessionKey }) }
+    '/flights/import', {
+      method: 'POST',
+      body: JSON.stringify({ source_path: sourcePath, aircraft_id: aircraftId, session_key: sessionKey, ...record }),
+    }
   );
 
 // Folder browser

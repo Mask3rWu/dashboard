@@ -34,7 +34,10 @@ REQUIRED_COLUMNS = {
     'flights': {
         'id', 'aircraft_id', 'name', 'source_path', 'session_key',
         'flight_date', 'start_time', 'end_time', 'duration_sec',
-        'total_rows', 'import_time',
+        'total_rows', 'import_time', 'record_daily_duration_min',
+        'record_batch_name', 'record_location', 'record_payload',
+        'record_weather', 'record_fuel_amount', 'record_takeoff_weight',
+        'record_altitude', 'record_wind_speed', 'record_note',
     },
     'data_table_registry': {
         'id', 'model_id', 'data_type_key', 'table_name', 'display_label',
@@ -206,6 +209,16 @@ CREATE TABLE IF NOT EXISTS flights (
     duration_sec    REAL,
     total_rows      INTEGER DEFAULT 0,
     import_time     TEXT DEFAULT (datetime('now','localtime')),
+    record_daily_duration_min REAL,
+    record_batch_name TEXT DEFAULT '',
+    record_location TEXT DEFAULT '',
+    record_payload TEXT DEFAULT '',
+    record_weather TEXT DEFAULT '',
+    record_fuel_amount REAL,
+    record_takeoff_weight REAL,
+    record_altitude REAL,
+    record_wind_speed REAL,
+    record_note TEXT DEFAULT '',
     -- Dedup boundary: same aircraft + date + session_key. source_path is
     -- stored for provenance only and intentionally excluded from the unique
     -- constraint (a folder may be moved and re-imported from a new path).

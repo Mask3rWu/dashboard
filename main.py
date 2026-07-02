@@ -117,10 +117,33 @@ class ImportSessionRequest(BaseModel):
     source_path: str
     aircraft_id: int       # required — aircraft.id
     session_key: str = ''  # empty = import all sessions for this aircraft
+    record_daily_duration_min: float | None = None
+    record_batch_name: str | None = ''
+    record_location: str | None = ''
+    record_payload: str | None = ''
+    record_weather: str | None = ''
+    record_fuel_amount: float | None = None
+    record_takeoff_weight: float | None = None
+    record_altitude: float | None = None
+    record_wind_speed: float | None = None
+    record_note: str | None = ''
 
 
 class UpdateFlightRequest(BaseModel):
     name: str
+
+
+class FlightRecordRequest(BaseModel):
+    record_daily_duration_min: float | None = None
+    record_batch_name: str | None = None
+    record_location: str | None = None
+    record_payload: str | None = None
+    record_weather: str | None = None
+    record_fuel_amount: float | None = None
+    record_takeoff_weight: float | None = None
+    record_altitude: float | None = None
+    record_wind_speed: float | None = None
+    record_note: str | None = None
 
 
 class CreateModelRequest(BaseModel):
@@ -178,6 +201,45 @@ class AnomalyRequest(BaseModel):
 class CompareRequest(BaseModel):
     flight_ids: list[int]
     column_key: str
+
+
+RECORD_TEXT_FIELDS = {
+    "record_batch_name",
+    "record_location",
+    "record_payload",
+    "record_weather",
+    "record_note",
+}
+RECORD_NUMERIC_FIELDS = {
+    "record_daily_duration_min",
+    "record_fuel_amount",
+    "record_takeoff_weight",
+    "record_altitude",
+    "record_wind_speed",
+}
+RECORD_FIELDS = RECORD_TEXT_FIELDS | RECORD_NUMERIC_FIELDS
+
+
+def _model_dump(obj, exclude_unset=False):
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(exclude_unset=exclude_unset)
+    return obj.dict(exclude_unset=exclude_unset)
+
+
+def _normalize_record_fields(data: dict, include_unset: bool = True) -> dict:
+    if include_unset:
+        keys = RECORD_FIELDS
+    else:
+        keys = {key for key in RECORD_FIELDS if key in data}
+
+    normalized = {}
+    for key in keys:
+        value = data.get(key)
+        if key in RECORD_TEXT_FIELDS:
+            normalized[key] = (value or "").strip() if isinstance(value, str) else ""
+        else:
+            normalized[key] = value
+    return normalized
 
 
 class PresetCreate(BaseModel):
@@ -988,17 +1050,55 @@ def delete_aircraft(aircraft_id: int, request: Request):
 # ─── Flight Routes ─────────────────────────────────────────
 
 @app.get("/api/flights")
-def list_flights():
+def list_flights(
+    model_id: int | None = None,
+    aircraft_id: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    batch_name: str | None = None,
+    location: str | None = None,
+    weather: str | None = None,
+    payload: str | None = None,
+):
     """List all imported flights with model/aircraft info."""
     conn = get_db()
     try:
+        where = []
+        params = []
+        if model_id is not None:
+            where.append("am.id = ?")
+            params.append(model_id)
+        if aircraft_id is not None:
+            where.append("a.id = ?")
+            params.append(aircraft_id)
+        if date_from:
+            where.append("f.flight_date >= ?")
+            params.append(date_from)
+        if date_to:
+            where.append("f.flight_date <= ?")
+            params.append(date_to)
+        text_filters = [
+            ("f.record_batch_name", batch_name),
+            ("f.record_location", location),
+            ("f.record_weather", weather),
+            ("f.record_payload", payload),
+        ]
+        for column, value in text_filters:
+            if value and value.strip():
+                where.append(f"{column} LIKE ?")
+                params.append(f"%{value.strip()}%")
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         rows = conn.execute(
-            """SELECT f.*, a.name as aircraft_name,
+            f"""SELECT f.*, a.name as aircraft_name,
                       am.id as model_id, am.name as model_name
                FROM flights f
                JOIN aircraft a ON a.id = f.aircraft_id
                JOIN aircraft_models am ON am.id = a.model_id
+               {where_sql}
                ORDER BY f.import_time DESC"""
+            ,
+            params,
         ).fetchall()
         return {"flights": [dict(r) for r in rows]}
     finally:
@@ -1058,6 +1158,29 @@ def update_flight(flight_id: int, req: UpdateFlightRequest):
         conn.close()
 
 
+@app.patch("/api/flights/{flight_id}/record")
+def update_flight_record(flight_id: int, req: FlightRecordRequest):
+    """Update manual flight record fields without touching parsed metrics."""
+    data = _normalize_record_fields(_model_dump(req, exclude_unset=True), include_unset=False)
+    if not data:
+        return {"ok": True}
+
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT id FROM flights WHERE id=?", (flight_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Flight not found")
+        assignments = ", ".join([f"{key}=?" for key in data])
+        conn.execute(
+            f"UPDATE flights SET {assignments} WHERE id=?",
+            [*data.values(), flight_id],
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @app.post("/api/flights/scan")
 def scan_folder_api(req: ImportRequest):
     """Scan a folder for flight sessions.
@@ -1077,9 +1200,11 @@ def scan_folder_api(req: ImportRequest):
 def import_flight_api(req: ImportSessionRequest):
     """Import a flight session (or all sessions if session_key is empty)."""
     try:
+        record_fields = _normalize_record_fields(_model_dump(req), include_unset=True)
         if req.session_key:
             result = import_session(
-                os.path.normpath(req.source_path), req.aircraft_id, req.session_key
+                os.path.normpath(req.source_path), req.aircraft_id, req.session_key,
+                record_fields=record_fields,
             )
             return result
         else:
@@ -1090,7 +1215,8 @@ def import_flight_api(req: ImportSessionRequest):
                 imported = []
                 for sess in preview.get('sessions', []):
                     result = import_session(
-                        os.path.normpath(req.source_path), req.aircraft_id, sess['session_key']
+                        os.path.normpath(req.source_path), req.aircraft_id, sess['session_key'],
+                        record_fields=record_fields,
                     )
                     if 'error' not in result:
                         imported.append(result)

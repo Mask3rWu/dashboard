@@ -3,7 +3,7 @@ import {
   scanFolder, importSession, listFlights, deleteFlight, updateFlight, browseFolder,
   listModels, createModelFromScan, listAircraft, createAircraft, listSubdirs,
   type Flight, type ScanResult, type SessionPreview,
-  type AircraftModel, type Aircraft,
+  type AircraftModel, type Aircraft, type FlightRecordFields,
 } from '../api';
 
 
@@ -134,6 +134,62 @@ function DirStructureBanner({ sourcePath, scanResult }: { sourcePath: string; sc
   );
 }
 
+function emptyRecord(): FlightRecordFields {
+  return {
+    record_daily_duration_min: null,
+    record_batch_name: '',
+    record_location: '',
+    record_payload: '',
+    record_weather: '',
+    record_fuel_amount: null,
+    record_takeoff_weight: null,
+    record_altitude: null,
+    record_wind_speed: null,
+    record_note: '',
+  };
+}
+
+function parseNumberInput(value: string): number | null {
+  if (value.trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function recordSummary(record: FlightRecordFields): string {
+  const parts = [
+    record.record_batch_name,
+    record.record_location,
+    record.record_weather,
+    record.record_takeoff_weight != null ? `${record.record_takeoff_weight}kg` : '',
+    record.record_payload,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' / ') : '未填写';
+}
+
+function RecordInput({
+  label,
+  value,
+  onChange,
+  type = 'text',
+}: {
+  label: string;
+  value: string | number | null | undefined;
+  onChange: (value: string) => void;
+  type?: 'text' | 'number';
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="block text-[11px] text-gray-500">{label}</span>
+      <input
+        type={type}
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+      />
+    </label>
+  );
+}
+
 // ── ImportPage ─────────────────────────────────────────────
 
 export default function ImportPage({ onImported, canDeleteFlights }: Props) {
@@ -152,6 +208,8 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
   const [importingKeys, setImportingKeys] = useState<Set<string>>(new Set());
   const [importedKeys, setImportedKeys] = useState<Set<string>>(new Set());
   const [errorKeys, setErrorKeys] = useState<Record<string, string>>({});
+  const [sessionRecords, setSessionRecords] = useState<Record<string, FlightRecordFields>>({});
+  const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
 
   // Flight management
   const [flights, setFlights] = useState<Flight[]>([]);
@@ -250,6 +308,8 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
       setImportedKeys(new Set());
       setErrorKeys({});
       setSessionAircraftMap({});
+      setSessionRecords({});
+      setExpandedRecords(new Set());
     } catch (e: any) {
       setScanResult({ source_path: scanPath, folder_name: scanPath, model: null, sessions: [], error: '扫描失败: ' + e.message });
     } finally { setScanning(false); }
@@ -330,7 +390,7 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
     setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
 
     try {
-      const result = await importSession(path, aid, session.session_key);
+      const result = await importSession(path, aid, session.session_key, sessionRecords[key] ?? emptyRecord());
       if (result.error) throw new Error(result.error);
       setImportedKeys((prev) => new Set(prev).add(key));
       onImported();
@@ -431,6 +491,24 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
   };
 
   const startRename = (f: Flight) => { setEditingFlightId(f.id); setEditName(f.name); };
+
+  const getSessionRecord = (key: string): FlightRecordFields => sessionRecords[key] ?? emptyRecord();
+
+  const updateSessionRecord = (key: string, patch: Partial<FlightRecordFields>) => {
+    setSessionRecords((prev) => ({
+      ...prev,
+      [key]: { ...emptyRecord(), ...(prev[key] ?? {}), ...patch },
+    }));
+  };
+
+  const toggleRecordExpanded = (key: string) => {
+    setExpandedRecords((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const filteredFlights = flights.filter((f) => {
     if (!flightSearch.trim()) return true;
@@ -652,6 +730,8 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
                   || (effStatus === 'imported' && !importingKeys.has(key));
                 const isConflict = effStatus === 'conflict';
                 const errMsg = errorKeys[key];
+                const record = getSessionRecord(key);
+                const isRecordExpanded = expandedRecords.has(key);
 
                 // Card border based on effective status
                 const cardBorder = errMsg
@@ -756,6 +836,36 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
                           </div>
                         )}
                         {renderBadges(session.data_types)}
+                        <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs text-gray-500">
+                              飞行记录: <span className="text-gray-700">{recordSummary(record)}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => toggleRecordExpanded(key)}
+                              className="text-xs text-blue-600 hover:text-blue-500"
+                            >
+                              {isRecordExpanded ? '收起字段' : '展开全部'}
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                            <RecordInput label="批次" value={record.record_batch_name} onChange={(v) => updateSessionRecord(key, { record_batch_name: v })} />
+                            <RecordInput label="地点" value={record.record_location} onChange={(v) => updateSessionRecord(key, { record_location: v })} />
+                            <RecordInput label="天气" value={record.record_weather} onChange={(v) => updateSessionRecord(key, { record_weather: v })} />
+                            <RecordInput label="起飞重量（kg）" type="number" value={record.record_takeoff_weight} onChange={(v) => updateSessionRecord(key, { record_takeoff_weight: parseNumberInput(v) })} />
+                            <RecordInput label="备注" value={record.record_note} onChange={(v) => updateSessionRecord(key, { record_note: v })} />
+                          </div>
+                          {isRecordExpanded && (
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                              <RecordInput label="单日飞行时长（分钟）" type="number" value={record.record_daily_duration_min} onChange={(v) => updateSessionRecord(key, { record_daily_duration_min: parseNumberInput(v) })} />
+                              <RecordInput label="设备载荷" value={record.record_payload} onChange={(v) => updateSessionRecord(key, { record_payload: v })} />
+                              <RecordInput label="燃油量（kg）" type="number" value={record.record_fuel_amount} onChange={(v) => updateSessionRecord(key, { record_fuel_amount: parseNumberInput(v) })} />
+                              <RecordInput label="海拔高度（m）" type="number" value={record.record_altitude} onChange={(v) => updateSessionRecord(key, { record_altitude: parseNumberInput(v) })} />
+                              <RecordInput label="风速（m/s）" type="number" value={record.record_wind_speed} onChange={(v) => updateSessionRecord(key, { record_wind_speed: parseNumberInput(v) })} />
+                            </div>
+                          )}
+                        </div>
                         {errMsg && <p className="text-xs text-red-500">{errMsg}</p>}
                       </div>
                       <div className="shrink-0 flex items-center gap-2">

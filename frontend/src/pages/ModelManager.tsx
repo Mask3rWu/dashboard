@@ -3,11 +3,11 @@ import { Pencil, Trash2, Download, Upload } from 'lucide-react';
 import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
-  deleteFlight, updateFlight,
+  deleteFlight, updateFlight, updateFlightRecord,
   getModelColumns, updateModelColumn, updateModelDataTypeLabel,
   exportModel, importModel,
   type AircraftModel, type Aircraft, type Flight,
-  type DataTypeGroup,
+  type DataTypeGroup, type FlightRecordFields,
 } from '../api';
 
 interface Props {
@@ -16,6 +16,77 @@ interface Props {
   flights: Flight[];
   modelsVersion: number;
   capabilities: string[];
+}
+
+function emptyRecord(): FlightRecordFields {
+  return {
+    record_daily_duration_min: null,
+    record_batch_name: '',
+    record_location: '',
+    record_payload: '',
+    record_weather: '',
+    record_fuel_amount: null,
+    record_takeoff_weight: null,
+    record_altitude: null,
+    record_wind_speed: null,
+    record_note: '',
+  };
+}
+
+function recordFromFlight(f: Flight): FlightRecordFields {
+  return {
+    record_daily_duration_min: f.record_daily_duration_min ?? null,
+    record_batch_name: f.record_batch_name ?? '',
+    record_location: f.record_location ?? '',
+    record_payload: f.record_payload ?? '',
+    record_weather: f.record_weather ?? '',
+    record_fuel_amount: f.record_fuel_amount ?? null,
+    record_takeoff_weight: f.record_takeoff_weight ?? null,
+    record_altitude: f.record_altitude ?? null,
+    record_wind_speed: f.record_wind_speed ?? null,
+    record_note: f.record_note ?? '',
+  };
+}
+
+function parseNumberInput(value: string): number | null {
+  if (value.trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function recordSummary(f: Flight) {
+  const parts = [
+    f.record_batch_name ? `批次 ${f.record_batch_name}` : '',
+    f.record_location ? `地点 ${f.record_location}` : '',
+    f.record_weather ? `天气 ${f.record_weather}` : '',
+    f.record_payload ? `载荷 ${f.record_payload}` : '',
+    f.record_takeoff_weight != null ? `起飞 ${f.record_takeoff_weight}kg` : '',
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : '未填写记录';
+}
+
+function RecordField({
+  label,
+  value,
+  onChange,
+  type = 'text',
+}: {
+  label: string;
+  value: string | number | null | undefined;
+  onChange: (value: string) => void;
+  type?: 'text' | 'number';
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="block text-[10px] text-gray-500">{label}</span>
+      <input
+        type={type}
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+      />
+    </label>
+  );
 }
 
 export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities }: Props) {
@@ -48,6 +119,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
   const [editFlightName, setEditFlightName] = useState('');
   const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
+  const [editingRecordFlightId, setEditingRecordFlightId] = useState<number | null>(null);
+  const [recordForm, setRecordForm] = useState<FlightRecordFields>(emptyRecord());
+  const [savingRecord, setSavingRecord] = useState(false);
 
   // Column groups
   const [columnGroups, setColumnGroups] = useState<DataTypeGroup[]>([]);
@@ -108,6 +182,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [aircraftSearch, setAircraftSearch] = useState('');
   const [timeFilterStart, setTimeFilterStart] = useState('');
   const [timeFilterEnd, setTimeFilterEnd] = useState('');
+  const [batchFilter, setBatchFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
+  const [weatherFilter, setWeatherFilter] = useState('');
+  const [payloadFilter, setPayloadFilter] = useState('');
 
   const loadModels = async () => {
     try {
@@ -307,8 +385,21 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     return fs <= filterEndMs && fe >= filterStartMs;
   };
 
+  const flightMatchesRecordFilters = (f: Flight): boolean => {
+    const filters: [string, string | undefined][] = [
+      [batchFilter, f.record_batch_name],
+      [locationFilter, f.record_location],
+      [weatherFilter, f.record_weather],
+      [payloadFilter, f.record_payload],
+    ];
+    return filters.every(([needle, value]) => {
+      if (!needle.trim()) return true;
+      return (value ?? '').toLowerCase().includes(needle.trim().toLowerCase());
+    });
+  };
+
   const getFlightsForAircraft = (acId: number): Flight[] =>
-    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f));
+    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesRecordFilters(f));
 
   const filteredAircraft = aircraft.filter((ac) => {
     if (!aircraftSearch.trim()) return true;
@@ -327,6 +418,35 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     totalFlights: flights.length,
     totalHours: flights.reduce((s, f) => s + (f.duration_sec ?? 0), 0) / 3600,
   };
+
+  const startEditRecord = (f: Flight) => {
+    setEditingRecordFlightId(f.id);
+    setRecordForm(recordFromFlight(f));
+  };
+
+  const updateRecordForm = (patch: Partial<FlightRecordFields>) => {
+    setRecordForm((prev) => ({ ...prev, ...patch }));
+  };
+
+  const saveRecord = async (flightId: number) => {
+    setSavingRecord(true);
+    try {
+      await updateFlightRecord(flightId, recordForm);
+      setEditingRecordFlightId(null);
+      onModelsChanged();
+    } finally {
+      setSavingRecord(false);
+    }
+  };
+
+  const clearRecordFilters = () => {
+    setBatchFilter('');
+    setLocationFilter('');
+    setWeatherFilter('');
+    setPayloadFilter('');
+  };
+
+  const recordFiltersActive = [batchFilter, locationFilter, weatherFilter, payloadFilter].some((v) => v.trim());
 
   return (
     <div className="h-full flex">
@@ -524,6 +644,50 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       清除时间筛选
                     </button>
                   )}
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-gray-500 shrink-0">批次:</span>
+                    <input
+                      type="text"
+                      value={batchFilter}
+                      onChange={(e) => setBatchFilter(e.target.value)}
+                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-gray-500 shrink-0">地点:</span>
+                    <input
+                      type="text"
+                      value={locationFilter}
+                      onChange={(e) => setLocationFilter(e.target.value)}
+                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-gray-500 shrink-0">天气:</span>
+                    <input
+                      type="text"
+                      value={weatherFilter}
+                      onChange={(e) => setWeatherFilter(e.target.value)}
+                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-gray-500 shrink-0">载荷:</span>
+                    <input
+                      type="text"
+                      value={payloadFilter}
+                      onChange={(e) => setPayloadFilter(e.target.value)}
+                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  {recordFiltersActive && (
+                    <button
+                      onClick={clearRecordFilters}
+                      className="text-xs text-blue-600 hover:text-blue-500"
+                    >
+                      清除记录筛选
+                    </button>
+                  )}
                 </div>
                 {showAddAircraft && (
                   <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg space-y-2">
@@ -638,68 +802,118 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                 <p className="text-xs text-gray-400 px-6 py-3">暂无飞行架次</p>
                               ) : (
                                 acFlights.map((f) => (
-                                  <div key={f.id} className="flex items-center justify-between px-6 py-2 border-b border-gray-100 last:border-b-0 hover:bg-white transition-colors">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                      <span className="text-sm font-medium text-gray-700 truncate max-w-[200px]">
-                                        {editingFlightId === f.id ? (
-                                          <div className="flex items-center gap-1">
-                                            <input
-                                              type="text" value={editFlightName}
-                                              onChange={(e) => setEditFlightName(e.target.value)}
-                                              onKeyDown={(e) => {
-                                                if (e.key === 'Enter') handleRenameFlight(f.id);
-                                                if (e.key === 'Escape') setEditingFlightId(null);
-                                              }}
-                                              className="bg-white border border-blue-400 rounded px-2 py-0.5 text-xs focus:outline-none w-36"
-                                              autoFocus
-                                            />
-                                            <button type="button" onClick={() => handleRenameFlight(f.id)} className="text-[10px] px-1.5 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">✓</button>
-                                            <button type="button" onClick={() => setEditingFlightId(null)} className="text-[10px] px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">✕</button>
-                                          </div>
-                                        ) : (
-                                          <span className="flex items-center gap-1 group">
-                                            {f.name}
-                                            <button
-                                              onClick={() => { setEditingFlightId(f.id); setEditFlightName(f.name); }}
-                                              className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 text-[10px]"
-                                            ><Pencil className="w-3 h-3" /></button>
-                                          </span>
-                                        )}
-                                      </span>
-                                      <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>
-                                      {f.duration_sec != null && (
-                                        <span className="text-xs text-gray-400">{Math.round(f.duration_sec / 60)}分钟</span>
-                                      )}
-                                      <span className="text-xs text-gray-400">
-                                        {f.start_time && `${f.start_time}${f.end_time ? ` ~ ${f.end_time.split(' ').pop()}` : ''}`}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      <button
-                                        onClick={() => onNavigateToFlight(f.id)}
-                                        className="text-xs text-blue-600 hover:text-blue-500 font-medium"
-                                      >
-                                        分析 →
-                                      </button>
-                                      {canDeleteFlights && deletingFlightId === f.id ? (
-                                        <span className="text-xs text-gray-500" onClick={(e) => e.stopPropagation()}>
-                                          确认?{' '}
-                                          <button type="button" onClick={() => handleDeleteFlight(f.id)} className="text-red-600 font-bold hover:text-red-700">是</button>
-                                          {' / '}
-                                          <button type="button" onClick={() => setDeletingFlightId(null)} className="text-gray-400 hover:text-gray-500">否</button>
+                                  <div key={f.id} className="px-6 py-2 border-b border-gray-100 last:border-b-0 hover:bg-white transition-colors">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div className="flex items-center gap-3 min-w-0">
+                                        <span className="text-sm font-medium text-gray-700 truncate max-w-[200px]">
+                                          {editingFlightId === f.id ? (
+                                            <div className="flex items-center gap-1">
+                                              <input
+                                                type="text" value={editFlightName}
+                                                onChange={(e) => setEditFlightName(e.target.value)}
+                                                onKeyDown={(e) => {
+                                                  if (e.key === 'Enter') handleRenameFlight(f.id);
+                                                  if (e.key === 'Escape') setEditingFlightId(null);
+                                                }}
+                                                className="bg-white border border-blue-400 rounded px-2 py-0.5 text-xs focus:outline-none w-36"
+                                                autoFocus
+                                              />
+                                              <button type="button" onClick={() => handleRenameFlight(f.id)} className="text-[10px] px-1.5 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">✓</button>
+                                              <button type="button" onClick={() => setEditingFlightId(null)} className="text-[10px] px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">✕</button>
+                                            </div>
+                                          ) : (
+                                            <span className="flex items-center gap-1 group">
+                                              {f.name}
+                                              <button
+                                                onClick={() => { setEditingFlightId(f.id); setEditFlightName(f.name); }}
+                                                className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 text-[10px]"
+                                              ><Pencil className="w-3 h-3" /></button>
+                                            </span>
+                                          )}
                                         </span>
-                                      ) : canDeleteFlights ? (
+                                        <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>
+                                        {f.duration_sec != null && (
+                                          <span className="text-xs text-gray-400">解析 {Math.round(f.duration_sec / 60)}分钟</span>
+                                        )}
+                                        {f.record_daily_duration_min != null && (
+                                          <span className="text-xs text-gray-500">记录 {f.record_daily_duration_min}分钟</span>
+                                        )}
+                                        <span className="text-xs text-gray-400">
+                                          {f.start_time && `${f.start_time}${f.end_time ? ` ~ ${f.end_time.split(' ').pop()}` : ''}`}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-2 shrink-0">
                                         <button
                                           type="button"
-                                          onClick={() => setDeletingFlightId(f.id)}
-                                          className="text-xs text-red-400 hover:text-red-600"
+                                          onClick={() => startEditRecord(f)}
+                                          className="text-xs text-gray-500 hover:text-blue-600"
                                         >
-                                          删除
+                                          编辑记录
                                         </button>
-                                      ) : (
-                                        <span className="text-xs text-gray-300" title="当前环境或登录状态无删除架次权限">删除</span>
-                                      )}
+                                        <button
+                                          onClick={() => onNavigateToFlight(f.id)}
+                                          className="text-xs text-blue-600 hover:text-blue-500 font-medium"
+                                        >
+                                          分析 →
+                                        </button>
+                                        {canDeleteFlights && deletingFlightId === f.id ? (
+                                          <span className="text-xs text-gray-500" onClick={(e) => e.stopPropagation()}>
+                                            确认?{' '}
+                                            <button type="button" onClick={() => handleDeleteFlight(f.id)} className="text-red-600 font-bold hover:text-red-700">是</button>
+                                            {' / '}
+                                            <button type="button" onClick={() => setDeletingFlightId(null)} className="text-gray-400 hover:text-gray-500">否</button>
+                                          </span>
+                                        ) : canDeleteFlights ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => setDeletingFlightId(f.id)}
+                                            className="text-xs text-red-400 hover:text-red-600"
+                                          >
+                                            删除
+                                          </button>
+                                        ) : (
+                                          <span className="text-xs text-gray-300" title="当前环境或登录状态无删除架次权限">删除</span>
+                                        )}
+                                      </div>
                                     </div>
+                                    <div className="mt-1 text-xs text-gray-500 truncate">
+                                      {recordSummary(f)}
+                                      {f.record_note && <span className="text-gray-400"> · 备注 {f.record_note}</span>}
+                                    </div>
+                                    {editingRecordFlightId === f.id && (
+                                      <div className="mt-3 rounded border border-blue-100 bg-blue-50/40 p-3 space-y-3">
+                                        <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+                                          <RecordField label="单日飞行时长（分钟）" type="number" value={recordForm.record_daily_duration_min} onChange={(v) => updateRecordForm({ record_daily_duration_min: parseNumberInput(v) })} />
+                                          <RecordField label="批次" value={recordForm.record_batch_name} onChange={(v) => updateRecordForm({ record_batch_name: v })} />
+                                          <RecordField label="地点" value={recordForm.record_location} onChange={(v) => updateRecordForm({ record_location: v })} />
+                                          <RecordField label="设备载荷" value={recordForm.record_payload} onChange={(v) => updateRecordForm({ record_payload: v })} />
+                                          <RecordField label="天气" value={recordForm.record_weather} onChange={(v) => updateRecordForm({ record_weather: v })} />
+                                          <RecordField label="燃油量（kg）" type="number" value={recordForm.record_fuel_amount} onChange={(v) => updateRecordForm({ record_fuel_amount: parseNumberInput(v) })} />
+                                          <RecordField label="起飞重量（kg）" type="number" value={recordForm.record_takeoff_weight} onChange={(v) => updateRecordForm({ record_takeoff_weight: parseNumberInput(v) })} />
+                                          <RecordField label="海拔高度（m）" type="number" value={recordForm.record_altitude} onChange={(v) => updateRecordForm({ record_altitude: parseNumberInput(v) })} />
+                                          <RecordField label="风速（m/s）" type="number" value={recordForm.record_wind_speed} onChange={(v) => updateRecordForm({ record_wind_speed: parseNumberInput(v) })} />
+                                          <RecordField label="备注" value={recordForm.record_note} onChange={(v) => updateRecordForm({ record_note: v })} />
+                                        </div>
+                                        <div className="flex items-center gap-2 justify-end">
+                                          <button
+                                            type="button"
+                                            onClick={() => saveRecord(f.id)}
+                                            disabled={savingRecord}
+                                            className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
+                                          >
+                                            保存记录
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setEditingRecordFlightId(null)}
+                                            disabled={savingRecord}
+                                            className="px-3 py-1 text-xs bg-gray-200 text-gray-600 rounded hover:bg-gray-300 disabled:opacity-50"
+                                          >
+                                            取消
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
                                 ))
                               )}

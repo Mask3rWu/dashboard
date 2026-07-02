@@ -27,6 +27,19 @@ from backend.importer import (
     import_data_type, import_alerts, import_files_for_session,
 )
 
+RECORD_FIELD_COLUMNS = (
+    'record_daily_duration_min',
+    'record_batch_name',
+    'record_location',
+    'record_payload',
+    'record_weather',
+    'record_fuel_amount',
+    'record_takeoff_weight',
+    'record_altitude',
+    'record_wind_speed',
+    'record_note',
+)
+
 
 def _extract_flight_date(source_path):
     """Extract flight date from directory hierarchy.
@@ -47,18 +60,20 @@ def _extract_flight_date(source_path):
     return None
 
 
-def import_session(source_path, aircraft_id, session_key):
+def import_session(source_path, aircraft_id, session_key, record_fields=None):
     """Import a single flight session into the hierarchy.
 
     Args:
         source_path: Root folder path
         aircraft_id: aircraft.id (must exist)
         session_key: Target session key
+        record_fields: Optional manual flight record field values
 
     Returns:
         {flight_id, aircraft_id, session_key, name, rows, details} or {error: ...}
     """
     conn = get_db()
+    record_fields = record_fields or {}
 
     # Normalize path for cross-platform consistency (matches scanner.py:449)
     source_path = os.path.normpath(source_path)
@@ -163,11 +178,20 @@ def import_session(source_path, aircraft_id, session_key):
     # Flight name: use session_key by default (can be renamed by user later)
     flight_name = session_key if session_key else folder_name
 
-    # Insert flight record
+    # Insert flight record. Manual record fields are separate from parsed
+    # duration/start/end values that importer.py fills later.
+    insert_columns = ['aircraft_id', 'name', 'source_path', 'session_key', 'flight_date']
+    insert_values = [aircraft_id, flight_name, source_path, session_key, flight_date]
+    for column in RECORD_FIELD_COLUMNS:
+        if column in record_fields:
+            insert_columns.append(column)
+            insert_values.append(record_fields[column])
+
+    placeholders = ', '.join(['?'] * len(insert_columns))
     conn.execute(
-        """INSERT INTO flights (aircraft_id, name, source_path, session_key, flight_date)
-           VALUES (?, ?, ?, ?, ?)""",
-        (aircraft_id, flight_name, source_path, session_key, flight_date)
+        f"""INSERT INTO flights ({', '.join(insert_columns)})
+            VALUES ({placeholders})""",
+        insert_values,
     )
     flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
