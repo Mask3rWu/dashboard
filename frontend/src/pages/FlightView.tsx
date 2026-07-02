@@ -26,6 +26,7 @@ interface Props {
   aircraft: Aircraft[];
   selectedAircraftId: number | null;
   onSelectAircraft: (id: number) => void;
+  canDeleteFlights: boolean;
 }
 
 type ViewMode = 'chart' | 'map' | 'alerts' | 'correlation' | 'anomaly';
@@ -331,6 +332,7 @@ export default function FlightView({
   flights, selectedFlightId, onSelectFlight, onFlightsChanged,
   models, selectedModelId, onSelectModel,
   aircraft, selectedAircraftId, onSelectAircraft,
+  canDeleteFlights,
 }: Props) {
   // ─── State ─────────────────────────────────────────────
   const [columnGroups, setColumnGroups] = useState<ColumnGroup[]>([]);
@@ -954,7 +956,7 @@ export default function FlightView({
           )}
 
           {/* Delete button */}
-          {selectedFlightId && deletingFlightId !== selectedFlightId && (
+          {selectedFlightId && canDeleteFlights && deletingFlightId !== selectedFlightId && (
             <button
               onClick={() => setDeletingFlightId(selectedFlightId)}
               className="text-gray-400 hover:text-red-500 px-1.5 py-1 rounded hover:bg-red-50 shrink-0 flex items-center"
@@ -997,7 +999,7 @@ export default function FlightView({
         )}
 
         {/* Inline delete confirmation */}
-        {deletingFlightId && (
+        {deletingFlightId && canDeleteFlights && (
           <div className="flex items-center gap-1">
             <span className="text-xs text-gray-500">确认删除?</span>
             <button

@@ -15,9 +15,10 @@ interface Props {
   onNavigateToFlight: (flightId: number) => void;
   flights: Flight[];
   modelsVersion: number;
+  capabilities: string[];
 }
 
-export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion }: Props) {
+export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities }: Props) {
   const [models, setModels] = useState<AircraftModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
@@ -65,6 +66,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [importData, setImportData] = useState<any>(null);
   const [importName, setImportName] = useState('');
   const [importError, setImportError] = useState('');
+  const canDeleteModels = capabilities.includes('delete_models');
+  const canDeleteAircraft = capabilities.includes('delete_aircraft');
+  const canDeleteFlights = capabilities.includes('delete_flights');
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -412,7 +416,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       >
                         <Download className="w-3 h-3" />
                       </button>
-                      {deletingModelId === m.id ? (
+                      {canDeleteModels && deletingModelId === m.id ? (
                         <span className="text-[10px] text-red-500 whitespace-nowrap">
                           确认?{' '}
                           <button
@@ -427,7 +431,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                             className="text-gray-400 hover:text-gray-500 px-0.5"
                           >否</button>
                         </span>
-                      ) : (
+                      ) : canDeleteModels ? (
                         <button
                           type="button"
                           onClick={() => setDeletingModelId(m.id)}
@@ -436,6 +440,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
+                      ) : (
+                        <span className="text-gray-200 p-0.5" title="当前环境或登录状态无删除机型权限">
+                          <Trash2 className="w-3 h-3" />
+                        </span>
                       )}
                     </div>
                   </div>
@@ -600,14 +608,14 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                   >
                                     重命名
                                   </button>
-                                  {deletingAcId === ac.id ? (
+                                  {canDeleteAircraft && deletingAcId === ac.id ? (
                                     <span className="text-xs text-gray-500">
                                       确认?{' '}
                                       <button type="button" onClick={() => handleDeleteAircraft(ac.id)} className="text-red-600 font-bold hover:text-red-700">是</button>
                                       {' / '}
                                       <button type="button" onClick={() => setDeletingAcId(null)} className="text-gray-400 hover:text-gray-500">否</button>
                                     </span>
-                                  ) : (
+                                  ) : canDeleteAircraft ? (
                                     <button
                                       type="button"
                                       onClick={() => setDeletingAcId(ac.id)}
@@ -615,6 +623,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                     >
                                       删除
                                     </button>
+                                  ) : (
+                                    <span className="text-xs text-gray-300" title="当前环境或登录状态无删除飞机权限">删除</span>
                                   )}
                                 </>
                               )}
@@ -671,14 +681,14 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                       >
                                         分析 →
                                       </button>
-                                      {deletingFlightId === f.id ? (
+                                      {canDeleteFlights && deletingFlightId === f.id ? (
                                         <span className="text-xs text-gray-500" onClick={(e) => e.stopPropagation()}>
                                           确认?{' '}
                                           <button type="button" onClick={() => handleDeleteFlight(f.id)} className="text-red-600 font-bold hover:text-red-700">是</button>
                                           {' / '}
                                           <button type="button" onClick={() => setDeletingFlightId(null)} className="text-gray-400 hover:text-gray-500">否</button>
                                         </span>
-                                      ) : (
+                                      ) : canDeleteFlights ? (
                                         <button
                                           type="button"
                                           onClick={() => setDeletingFlightId(f.id)}
@@ -686,6 +696,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                         >
                                           删除
                                         </button>
+                                      ) : (
+                                        <span className="text-xs text-gray-300" title="当前环境或登录状态无删除架次权限">删除</span>
                                       )}
                                     </div>
                                   </div>

@@ -16,13 +16,12 @@ else:
     DATA_DIR = os.path.join(os.path.expanduser('~'), '.flightanalyzer')
 
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
-# v9: dropped aircraft_models.format_category (dead placeholder field) and renamed
-# aircraft.serial_number → aircraft.name (it always held a free-form aircraft
-# label, not a numeric serial). v8 DBs are rebuilt from scratch on startup.
-CURRENT_SCHEMA_VERSION = 9
+# Current medium-term schema starts from v1 and rebuilds incompatible old DBs.
+CURRENT_SCHEMA_VERSION = 1
 CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
+    'app_settings', 'users', 'auth_sessions',
 }
 REQUIRED_COLUMNS = {
     'aircraft_models': {
@@ -45,6 +44,16 @@ REQUIRED_COLUMNS = {
         'id', 'model_id', 'data_type_key', 'table_name', 'column_name',
         'display_label', 'unit', 'data_type', 'ordinal', 'is_numeric',
         'scale_factor',
+    },
+    'app_settings': {
+        'key', 'value', 'updated_at',
+    },
+    'users': {
+        'id', 'username', 'password_hash', 'role', 'created_at',
+        'password_changed_at',
+    },
+    'auth_sessions': {
+        'token_hash', 'user_id', 'created_at', 'expires_at',
     },
 }
 
@@ -138,6 +147,31 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS schema_version (
     version     INTEGER PRIMARY KEY,
     applied_at  TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- Application settings (environment mode and offline node identity)
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- Local research-network users
+CREATE TABLE IF NOT EXISTS users (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    username              TEXT NOT NULL UNIQUE,
+    password_hash         TEXT NOT NULL,
+    role                  TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+    created_at            TEXT DEFAULT (datetime('now','localtime')),
+    password_changed_at   TEXT
+);
+
+-- Bearer sessions; only token hashes are stored
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash     TEXT PRIMARY KEY,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at     TEXT DEFAULT (datetime('now','localtime')),
+    expires_at     TEXT
 );
 
 -- Aircraft models (机型)

@@ -26,6 +26,14 @@ if BASE_DIR not in sys.path:
 
 from backend.database import init_db, get_db, DATA_DIR, DB_PATH
 from backend.parser import import_session
+from backend import auth as auth_helpers
+from backend.permissions import (
+    get_app_context,
+    set_app_context,
+    get_current_user,
+    get_capabilities,
+    require_capability,
+)
 from backend.format_configs import (
     register_model_tables, get_columns_for_model,
     save_model_config_to_db, generate_config_from_scan,
@@ -184,6 +192,175 @@ class FilterPresetCreate(BaseModel):
     config: dict
 
 
+class AppContextUpdate(BaseModel):
+    environment: str | None = None
+    node_id: str | None = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+
+def _public_user(user):
+    if not user:
+        return None
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "role": user["role"],
+        "created_at": user.get("created_at"),
+        "password_changed_at": user.get("password_changed_at"),
+    }
+
+
+def _context_payload(conn, request: Request, user=None):
+    context = get_app_context(conn, request)
+    if context["environment"] != "research":
+        user = None
+    elif user is None:
+        user = get_current_user(conn, request)
+    return {
+        **context,
+        "user": _public_user(user),
+        "capabilities": get_capabilities(context, user),
+    }
+
+
+# ─── App Context / Auth Routes ─────────────────────────────
+
+@app.get("/api/app/context")
+def get_app_context_api(request: Request):
+    conn = get_db()
+    try:
+        payload = _context_payload(conn, request)
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
+
+
+@app.patch("/api/app/context")
+def patch_app_context(req: AppContextUpdate, request: Request):
+    conn = get_db()
+    try:
+        set_app_context(conn, req.dict(exclude_none=True))
+        payload = _context_payload(conn, request)
+        conn.commit()
+        return payload
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest, request: Request):
+    conn = get_db()
+    try:
+        context = get_app_context(conn, request)
+        if context["environment"] != "research":
+            raise HTTPException(400, "外场模式不启用账号登录")
+
+        row = conn.execute(
+            "SELECT id, username, password_hash, role, created_at, password_changed_at FROM users WHERE username=?",
+            (req.username.strip(),),
+        ).fetchone()
+        if not row or not auth_helpers.verify_password(req.password, row["password_hash"]):
+            raise HTTPException(401, "用户名或密码不正确")
+
+        token = auth_helpers.create_session(conn, row["id"])
+        user = {
+            "id": row["id"],
+            "username": row["username"],
+            "role": row["role"],
+            "created_at": row["created_at"],
+            "password_changed_at": row["password_changed_at"],
+        }
+        conn.commit()
+        return {**_context_payload(conn, request, user=user), "token": token}
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    token = auth_helpers.extract_bearer_token(request)
+    conn = get_db()
+    try:
+        if token:
+            auth_helpers.delete_session(conn, token)
+            conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    conn = get_db()
+    try:
+        payload = _context_payload(conn, request)
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/change-password")
+def change_password(req: ChangePasswordRequest, request: Request):
+    if len(req.new_password) < 6:
+        raise HTTPException(400, "新密码至少 6 位")
+
+    conn = get_db()
+    try:
+        user = require_capability(conn, request, "change_own_password")
+        auth_helpers.change_password(conn, user["id"], req.old_password, req.new_password)
+        conn.commit()
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/users")
+def create_user_api(req: CreateUserRequest, request: Request):
+    username = req.username.strip()
+    if not username:
+        raise HTTPException(400, "用户名不能为空")
+    if len(req.password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    if req.role not in ("admin", "user"):
+        raise HTTPException(400, "角色必须是 admin 或 user")
+
+    conn = get_db()
+    try:
+        require_capability(conn, request, "manage_users")
+        user_id = auth_helpers.create_user(conn, username, req.password, req.role)
+        conn.commit()
+        return {"id": user_id, "username": username, "role": req.role}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(400, f"用户 '{username}' 已存在")
+        raise
+    finally:
+        conn.close()
+
+
 # ─── Folder Browser ────────────────────────────────────────
 
 @app.get("/api/folders/browse")
@@ -329,11 +506,12 @@ def update_model(model_id: int, req: UpdateModelRequest):
 
 
 @app.delete("/api/models/{model_id}")
-def delete_model(model_id: int):
+def delete_model(model_id: int, request: Request):
     """Delete a model and all related aircraft, flights, and data (cascade).
     Also deletes the per-model format config file from disk."""
     conn = get_db()
     try:
+        require_capability(conn, request, "delete_models")
         row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Model not found")
@@ -792,10 +970,11 @@ def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
 
 
 @app.delete("/api/aircraft/{aircraft_id}")
-def delete_aircraft(aircraft_id: int):
+def delete_aircraft(aircraft_id: int, request: Request):
     """Delete an aircraft and all its flights (cascade)."""
     conn = get_db()
     try:
+        require_capability(conn, request, "delete_aircraft")
         row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Aircraft not found")
@@ -850,10 +1029,11 @@ def get_flight(flight_id: int):
 
 
 @app.delete("/api/flights/{flight_id}")
-def delete_flight(flight_id: int):
+def delete_flight(flight_id: int, request: Request):
     """Delete a flight and all its data."""
     conn = get_db()
     try:
+        require_capability(conn, request, "delete_flights")
         conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
         conn.commit()
         return {"ok": True}

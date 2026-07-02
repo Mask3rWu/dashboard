@@ -1,4 +1,14 @@
 const BASE = '/api';
+const TOKEN_KEY = 'flight_analyzer_session_token';
+
+export function getSessionToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || '';
+}
+
+export function setSessionToken(token: string | null) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
 
 function parseErrorBody(text: string, fallback: string): string {
   if (!text) return fallback;
@@ -14,10 +24,16 @@ function parseErrorBody(text: string, fallback: string): string {
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let res: Response;
+  const token = getSessionToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options?.headers ?? {}),
+  };
   try {
     res = await fetch(`${BASE}${url}`, {
-      headers: { 'Content-Type': 'application/json' },
       ...options,
+      headers,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -39,6 +55,28 @@ export interface HealthStatus {
   db_path: string;
   db_exists: boolean;
   frontend_dir_exists: boolean;
+}
+
+export type Capability =
+  | 'manage_users'
+  | 'change_own_password'
+  | 'delete_models'
+  | 'delete_aircraft'
+  | 'delete_flights';
+
+export interface CurrentUser {
+  id: number;
+  username: string;
+  role: 'admin' | 'user';
+  created_at?: string;
+  password_changed_at?: string | null;
+}
+
+export interface AppContext {
+  environment: 'research' | 'field';
+  node_id: string;
+  user: CurrentUser | null;
+  capabilities: Capability[];
 }
 
 export interface AircraftModel {
@@ -237,6 +275,27 @@ export interface DataTypeGroup {
 
 // Health
 export const checkHealth = () => request<HealthStatus>('/health');
+
+// App context / auth
+export const getAppContext = () => request<AppContext>('/app/context');
+export const updateAppContext = (updates: { environment?: 'research' | 'field'; node_id?: string }) =>
+  request<AppContext>('/app/context', { method: 'PATCH', body: JSON.stringify(updates) });
+export const login = (username: string, password: string) =>
+  request<AppContext & { token: string }>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+export const logout = () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' });
+export const changePassword = (oldPassword: string, newPassword: string) =>
+  request<{ ok: boolean }>('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
+export const createUser = (username: string, password: string, role: 'admin' | 'user') =>
+  request<CurrentUser>('/users', {
+    method: 'POST',
+    body: JSON.stringify({ username, password, role }),
+  });
 
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');

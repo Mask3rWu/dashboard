@@ -9,6 +9,7 @@ import {
 
 interface Props {
   onImported: () => void;
+  canDeleteFlights: boolean;
 }
 
 // ── Directory structure validation ─────────────────────────
@@ -135,7 +136,7 @@ function DirStructureBanner({ sourcePath, scanResult }: { sourcePath: string; sc
 
 // ── ImportPage ─────────────────────────────────────────────
 
-export default function ImportPage({ onImported }: Props) {
+export default function ImportPage({ onImported, canDeleteFlights }: Props) {
   const [path, setPath] = useState('');
   const [scanning, setScanning] = useState(false);
   const [browsing, setBrowsing] = useState(false);
@@ -827,15 +828,17 @@ export default function ImportPage({ onImported }: Props) {
                   {f.session_key && <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>}
                   {f.duration_sec && <span className="text-xs text-gray-400">{Math.round(f.duration_sec / 60)}分钟</span>}
                 </div>
-                {deletingFlightId === f.id ? (
+                {canDeleteFlights && deletingFlightId === f.id ? (
                   <div className="flex items-center gap-1">
                     <span className="text-xs text-gray-500">确认删除?</span>
                     <button onClick={() => handleDelete(f.id)} className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500">是</button>
                     <button onClick={() => setDeletingFlightId(null)} className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">否</button>
                   </div>
-                ) : (
+                ) : canDeleteFlights ? (
                   <button onClick={() => setDeletingFlightId(f.id)}
                     className="text-xs text-red-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50">删除</button>
+                ) : (
+                  <span className="text-xs text-gray-300 px-2 py-1" title="当前环境或登录状态无删除权限">删除</span>
                 )}
               </div>
             ))}
