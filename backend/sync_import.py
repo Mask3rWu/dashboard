@@ -22,6 +22,7 @@ from backend.format_configs import (
 )
 from backend.raw_storage import OBJECT_ROOT
 from backend.sync_package import PACKAGE_VERSION
+from backend import sync_repository
 
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -166,10 +167,7 @@ def _model_row_by_source(manifest: dict, source_model_id: int) -> dict:
 
 
 def _existing_models(conn) -> list[dict]:
-    rows = conn.execute(
-        "SELECT id, name FROM aircraft_models ORDER BY name, id"
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return sync_repository.list_existing_models(conn)
 
 
 def _find_matching_model(conn, source_config: dict | None) -> dict | None:
@@ -270,11 +268,7 @@ def preview_import(conn, package_path: str) -> dict:
         existing = None
         choices = []
         if target_model_id:
-            rows = conn.execute(
-                "SELECT id, name FROM aircraft WHERE model_id=? ORDER BY name, id",
-                (target_model_id,),
-            ).fetchall()
-            choices = [dict(r) for r in rows]
+            choices = sync_repository.list_aircraft_for_model(conn, target_model_id)
             existing = next((r for r in choices if r["name"] == aircraft.get("name")), None)
         aircraft_plans.append({
             "source_aircraft_id": source_aircraft_id,
@@ -748,24 +742,17 @@ def _import_parsed_rows(
 
 
 def _save_report(conn, package_path: str, manifest: dict, status: str, report: dict) -> int:
-    conn.execute(
-        """INSERT INTO sync_imports (package_path, source_node_id, status, report_json)
-           VALUES (?, ?, ?, ?)""",
-        (
-            package_path,
-            manifest.get("source_node_id"),
-            status,
-            json.dumps(report, ensure_ascii=False),
-        ),
+    return sync_repository.insert_sync_import_report(
+        conn,
+        package_path,
+        manifest.get("source_node_id"),
+        status,
+        report,
     )
-    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
 def get_import_report(conn, import_id: int) -> dict | None:
-    row = conn.execute(
-        "SELECT * FROM sync_imports WHERE id=?",
-        (import_id,),
-    ).fetchone()
+    row = sync_repository.get_sync_import_report(conn, import_id)
     if not row:
         return None
     data = dict(row)

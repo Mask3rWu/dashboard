@@ -13,6 +13,7 @@ import zipfile
 from datetime import datetime
 from pathlib import PurePosixPath
 
+from backend import sync_repository
 from backend.database import CURRENT_SCHEMA_VERSION, DATA_DIR
 from backend.format_configs import build_model_config_from_db
 from backend.raw_storage import OBJECT_ROOT
@@ -70,43 +71,8 @@ def _unique_package_path(source_node_id: str) -> str:
     return candidate
 
 
-def _get_setting(conn, key: str, default: str) -> str:
-    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-    return row["value"] if row else default
-
-
-def _selected_ids(conn, flight_ids: list[int]) -> dict[str, set[int]]:
-    if not flight_ids:
-        raise ValueError("至少选择一个架次")
-    placeholders = ",".join("?" for _ in flight_ids)
-    rows = conn.execute(
-        f"""SELECT f.id as flight_id, a.id as aircraft_id, am.id as model_id
-            FROM flights f
-            JOIN aircraft a ON a.id = f.aircraft_id
-            JOIN aircraft_models am ON am.id = a.model_id
-            WHERE f.id IN ({placeholders})""",
-        flight_ids,
-    ).fetchall()
-    found_flights = {r["flight_id"] for r in rows}
-    missing = sorted(set(flight_ids) - found_flights)
-    if missing:
-        raise ValueError(f"架次不存在: {missing}")
-    return {
-        "flights": found_flights,
-        "aircraft": {r["aircraft_id"] for r in rows},
-        "models": {r["model_id"] for r in rows},
-    }
-
-
 def _rows_by_ids(conn, table: str, ids: set[int]) -> list[dict]:
-    if not ids:
-        return []
-    placeholders = ",".join("?" for _ in ids)
-    rows = conn.execute(
-        f"SELECT * FROM {_q(table)} WHERE id IN ({placeholders}) ORDER BY id",
-        sorted(ids),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return sync_repository.rows_by_ids(conn, _q, table, ids)
 
 
 def _manifest(conn, ids: dict[str, set[int]], source_node_id: str, source_environment: str) -> dict:
@@ -185,7 +151,7 @@ def write_parsed_sqlite(conn, flight_ids: set[int], out_path: str) -> None:
     dst = sqlite3.connect(out_path)
     dst.row_factory = sqlite3.Row
     try:
-        ids = _selected_ids(conn, sorted(flight_ids))
+        ids = sync_repository.selected_ids(conn, sorted(flight_ids))
         _create_source_table(dst, "aircraft_models", _rows_by_ids(conn, "aircraft_models", ids["models"]))
         _create_source_table(
             dst,
@@ -253,9 +219,9 @@ def write_parsed_sqlite(conn, flight_ids: set[int], out_path: str) -> None:
 def export_package(conn, flight_ids: list[int]) -> dict:
     """Export selected flights into a .fapkg zip under the fixed export dir."""
     clean_flight_ids = sorted({int(fid) for fid in flight_ids})
-    ids = _selected_ids(conn, clean_flight_ids)
-    source_node_id = _get_setting(conn, "node_id", "field-unknown")
-    source_environment = _get_setting(conn, "environment", "field")
+    ids = sync_repository.selected_ids(conn, clean_flight_ids)
+    source_node_id = sync_repository.get_setting(conn, "node_id", "field-unknown")
+    source_environment = sync_repository.get_setting(conn, "environment", "field")
     manifest = _manifest(conn, ids, source_node_id, source_environment)
     out_path = _unique_package_path(source_node_id)
 

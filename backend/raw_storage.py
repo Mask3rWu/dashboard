@@ -9,6 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from backend import raw_file_repository
 from backend.database import DATA_DIR
 
 
@@ -65,9 +66,7 @@ def _copy_object(source_path: str, object_abs_path: str, expected_sha256: str) -
 def store_file(conn, path: str) -> int:
     """Store a raw file by content hash and return file_objects.id."""
     sha256, size = hash_file(path)
-    existing = conn.execute(
-        "SELECT id FROM file_objects WHERE sha256=?", (sha256,)
-    ).fetchone()
+    existing = raw_file_repository.get_file_object_by_sha(conn, sha256)
     if existing:
         return existing["id"]
 
@@ -76,19 +75,12 @@ def store_file(conn, path: str) -> int:
     _copy_object(path, object_abs_path, sha256)
 
     try:
-        conn.execute(
-            """INSERT INTO file_objects (sha256, size_bytes, storage_rel_path)
-               VALUES (?, ?, ?)""",
-            (sha256, size, storage_rel_path),
-        )
+        return raw_file_repository.insert_file_object(conn, sha256, size, storage_rel_path)
     except Exception:
-        existing = conn.execute(
-            "SELECT id FROM file_objects WHERE sha256=?", (sha256,)
-        ).fetchone()
+        existing = raw_file_repository.get_file_object_by_sha(conn, sha256)
         if existing:
             return existing["id"]
         raise
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
 def attach_raw_files_to_flight(
@@ -114,19 +106,14 @@ def attach_raw_files_to_flight(
             file_object_id = store_file(conn, filepath)
             original_rel_path = _rel_to_posix(os.path.relpath(filepath, source_root))
             source_mtime = os.path.getmtime(filepath)
-            conn.execute(
-                """INSERT OR IGNORE INTO flight_raw_files
-                   (flight_id, file_object_id, original_name, original_rel_path,
-                    data_type_key, source_mtime)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    flight_id,
-                    file_object_id,
-                    info.get("filename") or os.path.basename(filepath),
-                    original_rel_path,
-                    info.get("data_type_key"),
-                    source_mtime,
-                ),
+            raw_file_repository.attach_raw_file(
+                conn,
+                flight_id,
+                file_object_id,
+                info.get("filename") or os.path.basename(filepath),
+                original_rel_path,
+                info.get("data_type_key"),
+                source_mtime,
             )
             attached += 1
         except Exception as e:
@@ -142,32 +129,12 @@ def attach_raw_files_to_flight(
 
 
 def get_raw_files_for_flight(conn, flight_id: int) -> list[dict]:
-    rows = conn.execute(
-        """SELECT frf.id, frf.flight_id, frf.original_name, frf.original_rel_path,
-                  frf.data_type_key, frf.source_mtime, frf.created_at,
-                  fo.id as file_object_id, fo.sha256, fo.size_bytes,
-                  fo.storage_rel_path
-           FROM flight_raw_files frf
-           JOIN file_objects fo ON fo.id = frf.file_object_id
-           WHERE frf.flight_id=?
-           ORDER BY frf.original_rel_path, frf.id""",
-        (flight_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return raw_file_repository.get_raw_files_for_flight(conn, flight_id)
 
 
 def build_flight_manifest(conn, flight_id: int) -> dict:
     """Build a logical manifest using current business names."""
-    flight = conn.execute(
-        """SELECT f.id, f.name, f.session_key, f.flight_date, f.raw_import_warnings,
-                  a.id as aircraft_id, a.name as aircraft_name,
-                  am.id as model_id, am.name as model_name
-           FROM flights f
-           JOIN aircraft a ON a.id = f.aircraft_id
-           JOIN aircraft_models am ON am.id = a.model_id
-           WHERE f.id=?""",
-        (flight_id,),
-    ).fetchone()
+    flight = raw_file_repository.get_flight_manifest_row(conn, flight_id)
     if not flight:
         return {}
 

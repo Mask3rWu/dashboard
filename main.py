@@ -24,7 +24,7 @@ else:
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from backend.database import init_db, get_db, DATA_DIR, DB_PATH
+from backend.database import init_db, get_db, DATA_DIR, DB_PATH, DB_BACKEND
 from backend.parser import import_session
 from backend import auth as auth_helpers
 from backend.permissions import (
@@ -43,6 +43,7 @@ from backend.scanner import scan_folder_sessions
 from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend.sync_package import export_package
 from backend.sync_import import preview_import, import_package, get_import_report
+from backend import flight_repository, user_repository
 from backend import analysis
 
 from datetime import datetime
@@ -104,6 +105,7 @@ def health_check():
         "status": "ok",
         "version": app.version,
         "data_dir": DATA_DIR,
+        "db_backend": DB_BACKEND,
         "db_path": DB_PATH,
         "db_exists": os.path.exists(DB_PATH),
         "frontend_dir_exists": os.path.isdir(FRONTEND_DIR),
@@ -377,10 +379,7 @@ def login(req: LoginRequest, request: Request):
         if context["environment"] != "research":
             raise HTTPException(400, "外场模式不启用账号登录")
 
-        row = conn.execute(
-            "SELECT id, username, password_hash, role, created_at, password_changed_at FROM users WHERE username=?",
-            (req.username.strip(),),
-        ).fetchone()
+        row = user_repository.get_user_by_username(conn, req.username.strip())
         if not row or not auth_helpers.verify_password(req.password, row["password_hash"]):
             raise HTTPException(401, "用户名或密码不正确")
 
@@ -1105,52 +1104,17 @@ def list_flights(
     """List all imported flights with model/aircraft info."""
     conn = get_db()
     try:
-        where = []
-        params = []
-        if model_id is not None:
-            where.append("am.id = ?")
-            params.append(model_id)
-        if aircraft_id is not None:
-            where.append("a.id = ?")
-            params.append(aircraft_id)
-        if date_from:
-            where.append("f.flight_date >= ?")
-            params.append(date_from)
-        if date_to:
-            where.append("f.flight_date <= ?")
-            params.append(date_to)
-        text_filters = [
-            ("f.record_batch_name", batch_name),
-            ("f.record_location", location),
-            ("f.record_weather", weather),
-            ("f.record_payload", payload),
-        ]
-        for column, value in text_filters:
-            if value and value.strip():
-                where.append(f"{column} LIKE ?")
-                params.append(f"%{value.strip()}%")
-
-        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        rows = conn.execute(
-            f"""SELECT f.*, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name,
-                      COALESCE(rf.raw_file_count, 0) as raw_file_count
-               FROM flights f
-               JOIN aircraft a ON a.id = f.aircraft_id
-               JOIN aircraft_models am ON am.id = a.model_id
-               LEFT JOIN (
-                   SELECT flight_id, COUNT(*) as raw_file_count
-                   FROM flight_raw_files
-                   GROUP BY flight_id
-               ) rf ON rf.flight_id = f.id
-               {where_sql}
-               ORDER BY f.import_time DESC"""
-            ,
-            params,
-        ).fetchall()
         flights = []
-        for r in rows:
-            item = dict(r)
+        for item in flight_repository.list_flights(conn, {
+            "model_id": model_id,
+            "aircraft_id": aircraft_id,
+            "date_from": date_from,
+            "date_to": date_to,
+            "batch_name": batch_name,
+            "location": location,
+            "weather": weather,
+            "payload": payload,
+        }):
             item["raw_warnings"] = _parse_raw_warnings(item.get("raw_import_warnings"))
             flights.append(item)
         return {"flights": flights}
@@ -1163,21 +1127,7 @@ def get_flight(flight_id: int):
     """Get flight details with available columns."""
     conn = get_db()
     try:
-        flight = conn.execute(
-            """SELECT f.*, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name,
-                      COALESCE(rf.raw_file_count, 0) as raw_file_count
-               FROM flights f
-               JOIN aircraft a ON a.id = f.aircraft_id
-               JOIN aircraft_models am ON am.id = a.model_id
-               LEFT JOIN (
-                   SELECT flight_id, COUNT(*) as raw_file_count
-                   FROM flight_raw_files
-                   GROUP BY flight_id
-               ) rf ON rf.flight_id = f.id
-               WHERE f.id=?""",
-            (flight_id,)
-        ).fetchone()
+        flight = flight_repository.get_flight_detail(conn, flight_id)
         if not flight:
             raise HTTPException(404, "Flight not found")
         result = dict(flight)
@@ -1193,9 +1143,7 @@ def get_flight_raw_files(flight_id: int):
     """List archived raw files attached to a flight."""
     conn = get_db()
     try:
-        flight = conn.execute(
-            "SELECT id, raw_import_warnings FROM flights WHERE id=?", (flight_id,)
-        ).fetchone()
+        flight = flight_repository.get_flight_raw_warning_row(conn, flight_id)
         if not flight:
             raise HTTPException(404, "Flight not found")
         return {
@@ -1228,21 +1176,9 @@ def get_sync_export_tree(q: str | None = None):
     keyword = (q or "").strip().lower()
     conn = get_db()
     try:
-        rows = conn.execute(
-            """SELECT f.id as flight_id, f.name as flight_name, f.session_key,
-                      f.flight_date, f.start_time, f.duration_sec,
-                      f.record_batch_name, f.record_location, f.record_weather,
-                      a.id as aircraft_id, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name
-               FROM flights f
-               JOIN aircraft a ON a.id = f.aircraft_id
-               JOIN aircraft_models am ON am.id = a.model_id
-               ORDER BY am.name, a.name, COALESCE(f.record_batch_name, ''), f.flight_date, f.session_key, f.id"""
-        ).fetchall()
-
         models = {}
-        for row in rows:
-            item = dict(row)
+        for item in flight_repository.export_tree_rows(conn):
+            item = dict(item)
             haystack = " ".join(
                 str(item.get(k) or "")
                 for k in (
@@ -1370,7 +1306,7 @@ def delete_flight(flight_id: int, request: Request):
     conn = get_db()
     try:
         require_capability(conn, request, "delete_flights")
-        conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
+        flight_repository.delete_flight(conn, flight_id)
         conn.commit()
         return {"ok": True}
     finally:
@@ -1384,10 +1320,9 @@ def update_flight(flight_id: int, req: UpdateFlightRequest):
         raise HTTPException(400, "Name cannot be empty")
     conn = get_db()
     try:
-        row = conn.execute("SELECT id FROM flights WHERE id=?", (flight_id,)).fetchone()
-        if not row:
+        if not flight_repository.flight_exists(conn, flight_id):
             raise HTTPException(404, "Flight not found")
-        conn.execute("UPDATE flights SET name=? WHERE id=?", (req.name.strip(), flight_id))
+        flight_repository.update_flight_name(conn, flight_id, req.name.strip())
         conn.commit()
         return {"ok": True}
     finally:
@@ -1403,14 +1338,9 @@ def update_flight_record(flight_id: int, req: FlightRecordRequest):
 
     conn = get_db()
     try:
-        row = conn.execute("SELECT id FROM flights WHERE id=?", (flight_id,)).fetchone()
-        if not row:
+        if not flight_repository.flight_exists(conn, flight_id):
             raise HTTPException(404, "Flight not found")
-        assignments = ", ".join([f"{key}=?" for key in data])
-        conn.execute(
-            f"UPDATE flights SET {assignments} WHERE id=?",
-            [*data.values(), flight_id],
-        )
+        flight_repository.update_flight_record(conn, flight_id, data)
         conn.commit()
         return {"ok": True}
     finally:

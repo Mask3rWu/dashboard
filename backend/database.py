@@ -1,4 +1,10 @@
-"""SQLite database initialization, connection management, and schema migration."""
+"""Database initialization, connection management, and schema validation.
+
+SQLite remains the only implemented backend for the local desktop/offline
+build. The ``DB_BACKEND`` switch is intentionally explicit so repository code
+has a stable connection boundary when the research-network deployment later
+moves to MySQL or another server database.
+"""
 
 import os
 import sys
@@ -15,6 +21,7 @@ if sys.platform == 'win32':
 else:
     DATA_DIR = os.path.join(os.path.expanduser('~'), '.flightanalyzer')
 
+DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").strip().lower() or "sqlite"
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
 # Current medium-term schema starts from v1 and rebuilds incompatible old DBs.
 CURRENT_SCHEMA_VERSION = 1
@@ -82,6 +89,15 @@ def ensure_data_dir():
             f"Cannot create data directory: {DATA_DIR}. "
             f"Check folder permissions and disk space. Original error: {e}"
         ) from e
+
+
+def _require_sqlite_backend():
+    if DB_BACKEND != "sqlite":
+        raise RuntimeError(
+            f"DB_BACKEND={DB_BACKEND!r} is configured, but only 'sqlite' is "
+            "implemented in this build. Use the repository layer as the "
+            "replacement boundary for future server database support."
+        )
 
 
 def _table_names(conn):
@@ -324,6 +340,7 @@ CREATE TABLE IF NOT EXISTS filter_presets (
 
 def get_db():
     """Get a database connection with row factory."""
+    _require_sqlite_backend()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -338,6 +355,7 @@ def init_db():
     normal startup. Instead, an incompatible database is moved aside as a
     timestamped backup and a clean current schema is created.
     """
+    _require_sqlite_backend()
     ensure_data_dir()
     db_existed = os.path.exists(DB_PATH)
 

@@ -8,6 +8,8 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
+from . import user_repository
+
 
 PASSWORD_SCHEME = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 260_000
@@ -54,13 +56,9 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def ensure_builtin_admin(conn) -> None:
     """Create the default research admin account if it does not exist."""
-    row = conn.execute("SELECT id FROM users WHERE username=?", ("admin",)).fetchone()
-    if row:
+    if user_repository.user_exists(conn, "admin"):
         return
-    conn.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-        ("admin", hash_password("123456"), "admin"),
-    )
+    user_repository.insert_user(conn, "admin", hash_password("123456"), "admin")
 
 
 def create_session(conn, user_id: int) -> str:
@@ -68,39 +66,26 @@ def create_session(conn, user_id: int) -> str:
     token = secrets.token_urlsafe(32)
     token_hash = _hash_token(token)
     expires_at = (datetime.utcnow() + timedelta(days=SESSION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-        (token_hash, user_id, expires_at),
-    )
+    user_repository.insert_session(conn, token_hash, user_id, expires_at)
     return token
 
 
 def delete_session(conn, token: str) -> None:
-    conn.execute("DELETE FROM auth_sessions WHERE token_hash=?", (_hash_token(token),))
+    user_repository.delete_session_by_hash(conn, _hash_token(token))
 
 
 def change_password(conn, user_id: int, old_password: str, new_password: str) -> None:
-    row = conn.execute(
-        "SELECT password_hash FROM users WHERE id=?",
-        (user_id,),
-    ).fetchone()
-    if not row or not verify_password(old_password, row["password_hash"]):
+    password_hash = user_repository.get_password_hash(conn, user_id)
+    if not password_hash or not verify_password(old_password, password_hash):
         raise ValueError("旧密码不正确")
-    conn.execute(
-        "UPDATE users SET password_hash=?, password_changed_at=? WHERE id=?",
-        (hash_password(new_password), _utcnow_text(), user_id),
-    )
-    conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+    user_repository.update_password(conn, user_id, hash_password(new_password), _utcnow_text())
+    user_repository.delete_sessions_for_user(conn, user_id)
 
 
 def create_user(conn, username: str, password: str, role: str = "user") -> int:
     if role not in ("admin", "user"):
         raise ValueError("角色必须是 admin 或 user")
-    conn.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-        (username, hash_password(password), role),
-    )
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return user_repository.insert_user(conn, username, hash_password(password), role)
 
 
 def extract_bearer_token(request) -> str | None:

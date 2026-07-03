@@ -28,19 +28,9 @@ from backend.importer import (
     import_data_type, import_alerts, import_files_for_session,
 )
 from backend.raw_storage import attach_raw_files_to_flight
+from backend import flight_repository
 
-RECORD_FIELD_COLUMNS = (
-    'record_daily_duration_min',
-    'record_batch_name',
-    'record_location',
-    'record_payload',
-    'record_weather',
-    'record_fuel_amount',
-    'record_takeoff_weight',
-    'record_altitude',
-    'record_wind_speed',
-    'record_note',
-)
+RECORD_FIELD_COLUMNS = flight_repository.RECORD_COLUMNS
 
 
 def _extract_flight_date(source_path):
@@ -87,12 +77,7 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
         return {'error': path_error}
 
     # Resolve aircraft → model
-    aircraft = conn.execute(
-        """SELECT a.id, a.name, am.id as model_id, am.name as model_name
-           FROM aircraft a JOIN aircraft_models am ON am.id = a.model_id
-           WHERE a.id=?""",
-        (aircraft_id,)
-    ).fetchone()
+    aircraft = flight_repository.get_aircraft_with_model(conn, aircraft_id)
 
     if not aircraft:
         conn.close()
@@ -169,10 +154,9 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
     # + session_key. source_path is stored for provenance only and deliberately
     # NOT used for dedup (a folder may be moved/re-imported from a new path).
     if flight_date:
-        existing = conn.execute(
-            "SELECT id FROM flights WHERE aircraft_id=? AND flight_date=? AND session_key=?",
-            (aircraft_id, flight_date, session_key)
-        ).fetchone()
+        existing = flight_repository.find_duplicate_flight(
+            conn, aircraft_id, flight_date, session_key
+        )
         if existing:
             conn.close()
             return {'error': f'飞机已有日期 {flight_date} 的架次 {session_key}（flight #{existing["id"]}）'}
@@ -182,20 +166,9 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
 
     # Insert flight record. Manual record fields are separate from parsed
     # duration/start/end values that importer.py fills later.
-    insert_columns = ['aircraft_id', 'name', 'source_path', 'session_key', 'flight_date']
-    insert_values = [aircraft_id, flight_name, source_path, session_key, flight_date]
-    for column in RECORD_FIELD_COLUMNS:
-        if column in record_fields:
-            insert_columns.append(column)
-            insert_values.append(record_fields[column])
-
-    placeholders = ', '.join(['?'] * len(insert_columns))
-    conn.execute(
-        f"""INSERT INTO flights ({', '.join(insert_columns)})
-            VALUES ({placeholders})""",
-        insert_values,
+    flight_id = flight_repository.insert_flight(
+        conn, aircraft_id, flight_name, source_path, session_key, flight_date, record_fields
     )
-    flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     try:
         # Import all files for this session. The scan above used the stored config,
@@ -215,9 +188,8 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
         raw_result = attach_raw_files_to_flight(conn, flight_id, source_path, matching)
         raw_warnings = raw_result.get('warnings', [])
         if raw_warnings:
-            conn.execute(
-                "UPDATE flights SET raw_import_warnings=? WHERE id=?",
-                (json.dumps(raw_warnings, ensure_ascii=False), flight_id),
+            flight_repository.set_raw_import_warnings(
+                conn, flight_id, json.dumps(raw_warnings, ensure_ascii=False)
             )
 
         conn.commit()
