@@ -149,7 +149,13 @@ def flight_exists(conn, flight_id: int) -> bool:
 
 
 def update_flight_name(conn, flight_id: int, name: str) -> None:
-    conn.execute("UPDATE flights SET name=? WHERE id=?", (name, flight_id))
+    conn.execute(
+        """UPDATE flights
+           SET name=?,
+               sync_state=CASE WHEN sync_state IN ('synced', 'server_cache') THEN 'dirty' ELSE sync_state END
+           WHERE id=?""",
+        (name, flight_id),
+    )
 
 
 def update_flight_record(conn, flight_id: int, data: dict) -> None:
@@ -158,7 +164,10 @@ def update_flight_record(conn, flight_id: int, data: dict) -> None:
         raise ValueError(f"Unsupported flight record columns: {invalid}")
     assignments = ", ".join([f"{key}=?" for key in data])
     conn.execute(
-        f"UPDATE flights SET {assignments} WHERE id=?",
+        f"""UPDATE flights
+            SET {assignments},
+                sync_state=CASE WHEN sync_state IN ('synced', 'server_cache') THEN 'dirty' ELSE sync_state END
+            WHERE id=?""",
         [*data.values(), flight_id],
     )
 

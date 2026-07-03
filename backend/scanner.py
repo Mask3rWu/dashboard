@@ -186,7 +186,7 @@ def resolve_model_for_scan(conn, source_path):
     """
     from backend.format_configs import (
         generate_config_from_scan, load_all_model_configs_with_ids,
-        compare_configs,
+        compare_configs, load_format_config_by_model,
     )
 
     # Step 1 — auto-generate config from the folder
@@ -216,12 +216,15 @@ def resolve_model_for_scan(conn, source_path):
     # Step 4a — match found: resolve to the existing model (no write)
     if best_model and best_score >= MATCH_THRESHOLD:
         model_id, model_name = best_model
+        stored_config = load_format_config_by_model(conn, model_id)
+        if not stored_config or not stored_config.get('data_types'):
+            return None
         return {
             'model_id': model_id,
             'model_name': model_name,
             'is_new': False,
             'match_confidence': round(best_score, 3),
-            'config': generated,
+            'config': stored_config,
             'matching_models': all_scores[:5],
         }
 
@@ -477,8 +480,16 @@ def scan_folder_sessions(source_path, conn=None):
             conn.close()
         return result
 
-    # Step 2 — scan files using the generated config (has correct file_patterns)
+    # Step 2 — scan files using the resolved config.
     scan_result = scan_folder(source_path, model_info['config'])
+
+    # The folder date is part of every session preview, including the
+    # new-model flow where duplicate checks are skipped until a model exists.
+    from backend.parser import _extract_flight_date
+    flight_date = _extract_flight_date(source_path)
+    for sess in scan_result.get('sessions', []):
+        sess['flight_date'] = flight_date
+        sess.setdefault('import_status', 'new')
 
     # When no existing model matches, the user must create one (choosing which
     # data types to keep) before any flight can be imported. We surface the
@@ -528,12 +539,7 @@ def scan_folder_sessions(source_path, conn=None):
     # Duplicate boundary: aircraft + flight_date + session_key.
     # A session is only a duplicate if the SAME aircraft already has this
     # date+time combination. Different aircraft with same time = new flights.
-    from backend.parser import _extract_flight_date
-    flight_date = _extract_flight_date(source_path)
-
     for sess in result['sessions']:
-        sess['flight_date'] = flight_date
-        sess['import_status'] = 'new'
         auto_serial = sess['aircraft_serial']
 
         if not flight_date:

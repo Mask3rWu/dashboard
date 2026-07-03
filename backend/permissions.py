@@ -28,12 +28,16 @@ def get_app_context(conn, request=None) -> dict:
         permission_repository.set_setting(conn, "environment", environment)
 
     node_id = permission_repository.get_setting(conn, "node_id")
+    local_node_id = permission_repository.get_setting(conn, "local_node_id")
+    if local_node_id and not node_id:
+        node_id = local_node_id
     if not node_id:
         node_id = f"{environment}-{uuid.uuid4().hex[:12]}"
         permission_repository.set_setting(conn, "node_id", node_id)
+    if not local_node_id:
+        permission_repository.set_setting(conn, "local_node_id", node_id)
 
-    if environment == "research":
-        ensure_builtin_admin(conn)
+    ensure_builtin_admin(conn)
 
     return {"environment": environment, "node_id": node_id}
 
@@ -51,11 +55,9 @@ def set_app_context(conn, updates: dict) -> dict:
         if not node_id:
             raise ValueError("node_id must not be empty")
         permission_repository.set_setting(conn, "node_id", node_id)
+        permission_repository.set_setting(conn, "local_node_id", node_id)
 
-    context = get_app_context(conn)
-    if context["environment"] == "research":
-        ensure_builtin_admin(conn)
-    return context
+    return get_app_context(conn)
 
 
 def get_current_user(conn, request):
@@ -67,7 +69,7 @@ def get_current_user(conn, request):
 
 
 def get_capabilities(context: dict, user: dict | None) -> list[str]:
-    if context.get("environment") != "research" or not user:
+    if not user:
         return []
 
     caps = {"change_own_password", "delete_models", "delete_aircraft", "delete_flights"}

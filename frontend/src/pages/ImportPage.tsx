@@ -13,8 +13,29 @@ import {
 interface Props {
   onImported: () => void;
   canDeleteFlights: boolean;
-  environment?: 'research' | 'field';
   isLoggedIn?: boolean;
+}
+
+function syncStateLabel(state?: string | null) {
+  const labels: Record<string, string> = {
+    local_only: '本地',
+    pending_upload: 'pending_upload',
+    syncing: '同步中',
+    synced: '已同步',
+    dirty: '待更新',
+    upload_failed: '上传失败',
+    conflict: '冲突',
+    server_cache: '服务器缓存',
+    server_deleted: '服务器已删',
+  };
+  return labels[state || ''] || state || '未标记';
+}
+
+function syncStateClass(state?: string | null) {
+  if (state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
+  if (state === 'upload_failed' || state === 'conflict') return 'bg-red-50 text-red-700 border-red-200';
+  if (state === 'synced' || state === 'server_cache') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  return 'bg-gray-50 text-gray-600 border-gray-200';
 }
 
 // ── Directory structure validation ─────────────────────────
@@ -142,7 +163,6 @@ function DirStructureBanner({ sourcePath, scanResult }: { sourcePath: string; sc
 function emptyRecord(): FlightRecordFields {
   return {
     record_daily_duration_min: null,
-    record_batch_name: '',
     record_location: '',
     record_payload: '',
     record_weather: '',
@@ -160,17 +180,6 @@ function parseNumberInput(value: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function recordSummary(record: FlightRecordFields): string {
-  const parts = [
-    record.record_batch_name,
-    record.record_location,
-    record.record_weather,
-    record.record_takeoff_weight != null ? `${record.record_takeoff_weight}kg` : '',
-    record.record_payload,
-  ].filter(Boolean);
-  return parts.length ? parts.join(' / ') : '未填写';
-}
-
 function RecordInput({
   label,
   value,
@@ -180,7 +189,7 @@ function RecordInput({
   label: string;
   value: string | number | null | undefined;
   onChange: (value: string) => void;
-  type?: 'text' | 'number';
+  type?: 'text' | 'number' | 'date';
 }) {
   return (
     <label className="space-y-1">
@@ -195,9 +204,79 @@ function RecordInput({
   );
 }
 
+function DurationInput({
+  value,
+  onChange,
+}: {
+  value: number | null | undefined;
+  onChange: (value: number | null) => void;
+}) {
+  const hasValue = value != null && Number.isFinite(Number(value));
+  const total = hasValue ? Math.max(0, Math.round(Number(value))) : 0;
+  const hours = hasValue ? Math.floor(total / 60) : '';
+  const minutes = hasValue ? total % 60 : '';
+
+  const update = (nextHours: string, nextMinutes: string) => {
+    if (nextHours.trim() === '' && nextMinutes.trim() === '') {
+      onChange(null);
+      return;
+    }
+    const h = Math.max(0, parseNumberInput(nextHours) ?? 0);
+    const m = Math.max(0, parseNumberInput(nextMinutes) ?? 0);
+    onChange(Math.round(h) * 60 + Math.round(m));
+  };
+
+  return (
+    <label className="space-y-1">
+      <span className="block text-[11px] text-gray-500">单日飞行时长</span>
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          min="0"
+          value={hours}
+          onChange={(e) => update(e.target.value, String(minutes))}
+          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+        />
+        <span className="text-[11px] text-gray-500">h</span>
+        <input
+          type="number"
+          min="0"
+          max="59"
+          value={minutes}
+          onChange={(e) => update(String(hours), e.target.value)}
+          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+        />
+        <span className="text-[11px] text-gray-500">min</span>
+      </div>
+    </label>
+  );
+}
+
+function RecordTextarea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string | null | undefined;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-1 block">
+      <span className="block text-[11px] text-gray-500">{label}</span>
+      <textarea
+        rows={2}
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full resize-none bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+      />
+    </label>
+  );
+}
+
 // ── ImportPage ─────────────────────────────────────────────
 
-export default function ImportPage({ onImported, canDeleteFlights, environment, isLoggedIn }: Props) {
+export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }: Props) {
   const [path, setPath] = useState('');
   const [scanning, setScanning] = useState(false);
   const [browsing, setBrowsing] = useState(false);
@@ -214,7 +293,7 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
   const [importedKeys, setImportedKeys] = useState<Set<string>>(new Set());
   const [errorKeys, setErrorKeys] = useState<Record<string, string>>({});
   const [sessionRecords, setSessionRecords] = useState<Record<string, FlightRecordFields>>({});
-  const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
+  const [sessionDates, setSessionDates] = useState<Record<string, string>>({});
 
   // Flight management
   const [flights, setFlights] = useState<Flight[]>([]);
@@ -270,7 +349,9 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
 
   type EffectiveStatus = 'new' | 'imported' | 'conflict';
 
-  function getEffectiveStatus(session: SessionPreview, selectedAircraftSerial: string | null): EffectiveStatus {
+  function getEffectiveStatus(session: SessionPreview, selectedAircraftSerial: string | null, flightDate: string): EffectiveStatus {
+    if (session.flight_date && flightDate && flightDate !== session.flight_date) return 'new';
+
     // Backend already confirmed: auto-detected serial matches an imported flight
     if (session.import_status === 'imported') return 'imported';
 
@@ -343,7 +424,7 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
       setErrorKeys({});
       setSessionAircraftMap({});
       setSessionRecords({});
-      setExpandedRecords(new Set());
+      setSessionDates({});
     } catch (e: any) {
       setScanResult({ source_path: scanPath, folder_name: scanPath, model: null, sessions: [], error: '扫描失败: ' + e.message });
     } finally { setScanning(false); }
@@ -412,6 +493,11 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
 
   const handleImport = async (session: SessionPreview) => {
     const key = sessionKey(session.aircraft_serial, session.session_key);
+    const flightDate = getSessionDate(session);
+    if (!flightDate) {
+      setErrorKeys((prev) => ({ ...prev, [key]: '请先填写飞行日期' }));
+      return;
+    }
 
     // Auto-create aircraft if needed
     const aid = await ensureAircraft(session);
@@ -424,7 +510,10 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
     setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
 
     try {
-      const result = await importSession(path, aid, session.session_key, sessionRecords[key] ?? emptyRecord());
+      const result = await importSession(path, aid, session.session_key, {
+        ...(sessionRecords[key] ?? emptyRecord()),
+        flight_date: flightDate,
+      });
       if (result.error) throw new Error(result.error);
       setImportedKeys((prev) => new Set(prev).add(key));
       onImported();
@@ -528,20 +617,21 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
 
   const getSessionRecord = (key: string): FlightRecordFields => sessionRecords[key] ?? emptyRecord();
 
+  const getSessionDate = (session: SessionPreview): string => {
+    const key = sessionKey(session.aircraft_serial, session.session_key);
+    return sessionDates[key] ?? session.flight_date ?? '';
+  };
+
+  const updateSessionDate = (key: string, value: string) => {
+    setSessionDates((prev) => ({ ...prev, [key]: value }));
+    setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
+  };
+
   const updateSessionRecord = (key: string, patch: Partial<FlightRecordFields>) => {
     setSessionRecords((prev) => ({
       ...prev,
       [key]: { ...emptyRecord(), ...(prev[key] ?? {}), ...patch },
     }));
-  };
-
-  const toggleRecordExpanded = (key: string) => {
-    setExpandedRecords((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
   };
 
   const visibleExportFlightIds = exportTree.flatMap((model) =>
@@ -705,7 +795,7 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
       || (f.model_name || '').toLowerCase().includes(s);
   });
 
-  const canImportSyncPackage = environment === 'research' && !!isLoggedIn;
+  const canImportSyncPackage = !!isLoggedIn;
 
   // ─── Render data type badges ──────────────────────────────
 
@@ -914,13 +1004,13 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
                 const selectedSerial = aid
                   ? (aircraftList.find(a => a.id === aid)?.name ?? session.aircraft_serial)
                   : session.aircraft_serial;
-                const effStatus = getEffectiveStatus(session, selectedSerial);
+                const flightDate = getSessionDate(session);
+                const effStatus = getEffectiveStatus(session, selectedSerial, flightDate);
                 const isImported = importedKeys.has(key)
                   || (effStatus === 'imported' && !importingKeys.has(key));
                 const isConflict = effStatus === 'conflict';
                 const errMsg = errorKeys[key];
                 const record = getSessionRecord(key);
-                const isRecordExpanded = expandedRecords.has(key);
 
                 // Card border based on effective status
                 const cardBorder = errMsg
@@ -957,12 +1047,21 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
                           )}
                           {/* Session key + flight date */}
                           <span className="text-sm font-mono text-gray-700">{session.session_key || '(默认场次)'}</span>
-                          {session.flight_date && (
-                            <span className="text-xs text-gray-400">{session.flight_date}</span>
+                          {!isImported && (
+                            <label className="flex items-center gap-1 text-xs text-gray-500">
+                              <span>时间</span>
+                              <input
+                                type="date"
+                                required
+                                value={flightDate}
+                                onChange={(e) => updateSessionDate(key, e.target.value)}
+                                className={`bg-white border rounded px-1.5 py-0.5 text-xs text-gray-700 focus:outline-none focus:border-blue-500 ${flightDate ? 'border-gray-300' : 'border-red-300'}`}
+                              />
+                            </label>
                           )}
 
                           {/* Aircraft assignment controls (always shown when model selected) */}
-                          {selectedModelId && (
+                          {selectedModelId && !isImported && (
                             <div className="flex items-center gap-1">
                               <select
                                 value={aid ?? ''}
@@ -1025,43 +1124,28 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
                           </div>
                         )}
                         {renderBadges(session.data_types)}
-                        <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="text-xs text-gray-500">
-                              飞行记录: <span className="text-gray-700">{recordSummary(record)}</span>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => toggleRecordExpanded(key)}
-                              className="text-xs text-blue-600 hover:text-blue-500"
-                            >
-                              {isRecordExpanded ? '收起字段' : '展开全部'}
-                            </button>
-                          </div>
-                          <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                            <RecordInput label="批次" value={record.record_batch_name} onChange={(v) => updateSessionRecord(key, { record_batch_name: v })} />
-                            <RecordInput label="地点" value={record.record_location} onChange={(v) => updateSessionRecord(key, { record_location: v })} />
-                            <RecordInput label="天气" value={record.record_weather} onChange={(v) => updateSessionRecord(key, { record_weather: v })} />
-                            <RecordInput label="起飞重量（kg）" type="number" value={record.record_takeoff_weight} onChange={(v) => updateSessionRecord(key, { record_takeoff_weight: parseNumberInput(v) })} />
-                            <RecordInput label="备注" value={record.record_note} onChange={(v) => updateSessionRecord(key, { record_note: v })} />
-                          </div>
-                          {isRecordExpanded && (
-                            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                              <RecordInput label="单日飞行时长（分钟）" type="number" value={record.record_daily_duration_min} onChange={(v) => updateSessionRecord(key, { record_daily_duration_min: parseNumberInput(v) })} />
-                              <RecordInput label="设备载荷" value={record.record_payload} onChange={(v) => updateSessionRecord(key, { record_payload: v })} />
+                        {!isImported && (
+                          <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                              <DurationInput value={record.record_daily_duration_min} onChange={(v) => updateSessionRecord(key, { record_daily_duration_min: v })} />
+                              <RecordInput label="地点" value={record.record_location} onChange={(v) => updateSessionRecord(key, { record_location: v })} />
+                              <RecordInput label="天气" value={record.record_weather} onChange={(v) => updateSessionRecord(key, { record_weather: v })} />
+                              <RecordInput label="设备载荷（kg）" type="number" value={record.record_payload} onChange={(v) => updateSessionRecord(key, { record_payload: v })} />
                               <RecordInput label="燃油量（kg）" type="number" value={record.record_fuel_amount} onChange={(v) => updateSessionRecord(key, { record_fuel_amount: parseNumberInput(v) })} />
+                              <RecordInput label="起飞重量（kg）" type="number" value={record.record_takeoff_weight} onChange={(v) => updateSessionRecord(key, { record_takeoff_weight: parseNumberInput(v) })} />
                               <RecordInput label="海拔高度（m）" type="number" value={record.record_altitude} onChange={(v) => updateSessionRecord(key, { record_altitude: parseNumberInput(v) })} />
                               <RecordInput label="风速（m/s）" type="number" value={record.record_wind_speed} onChange={(v) => updateSessionRecord(key, { record_wind_speed: parseNumberInput(v) })} />
                             </div>
-                          )}
-                        </div>
+                            <RecordTextarea label="备注" value={record.record_note} onChange={(v) => updateSessionRecord(key, { record_note: v })} />
+                          </div>
+                        )}
                         {errMsg && <p className="text-xs text-red-500">{errMsg}</p>}
                       </div>
                       <div className="shrink-0 flex items-center gap-2">
                         {!isImported && !isImporting && (
-                          <button onClick={() => handleImport(session)} disabled={!selectedModelId && !aid}
+                          <button onClick={() => handleImport(session)} disabled={(!selectedModelId && !aid) || !flightDate}
                             className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs font-medium"
-                            title={isConflict ? '该日期+时间已有其他飞机导入，如确认为不同飞机则可导入' : (!selectedModelId && !aid ? '请先选择机型' : '导入')}>
+                            title={!flightDate ? '请先填写飞行日期' : (isConflict ? '该日期+时间已有其他飞机导入，如确认为不同飞机则可导入' : (!selectedModelId && !aid ? '请先选择机型' : '导入'))}>
                             导入
                           </button>
                         )}
@@ -1141,6 +1225,9 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
                   {f.session_key && <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>}
                   {f.duration_sec && <span className="text-xs text-gray-400">{Math.round(f.duration_sec / 60)}分钟</span>}
                   <span className="text-xs text-gray-400">原始文件 {f.raw_file_count ?? 0}</span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded border ${syncStateClass(f.sync_state)}`}>
+                    {syncStateLabel(f.sync_state)}
+                  </span>
                   {(f.raw_warnings?.length ?? 0) > 0 && (
                     <span className="text-xs text-amber-600">warning {f.raw_warnings!.length}</span>
                   )}
@@ -1184,7 +1271,7 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
               <input
                 value={exportFilter}
                 onChange={(e) => setExportFilter(e.target.value)}
-                placeholder="筛选机型、飞机、批次、架次、日期、地点、天气"
+                placeholder="筛选机型、飞机、架次、日期、地点、天气"
                 className="flex-1 bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-blue-500"
               />
               <button
@@ -1216,7 +1303,6 @@ export default function ImportPage({ onImported, canDeleteFlights, environment, 
                         <div className="text-xs font-medium text-blue-700">{aircraft.name}</div>
                         {aircraft.batches.map((batch) => (
                           <div key={batch.name} className="ml-3 space-y-1">
-                            <div className="text-xs text-gray-500">{batch.name}</div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
                               {batch.flights.map((flight) => (
                                 <label

@@ -44,6 +44,7 @@ from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend.sync_package import export_package
 from backend.sync_import import preview_import, import_package, get_import_report
 from backend import flight_repository, user_repository
+from backend import runtime_context
 from backend import analysis
 
 from datetime import datetime
@@ -122,6 +123,7 @@ class ImportSessionRequest(BaseModel):
     source_path: str
     aircraft_id: int       # required — aircraft.id
     session_key: str = ''  # empty = import all sessions for this aircraft
+    flight_date: str | None = None
     record_daily_duration_min: float | None = None
     record_batch_name: str | None = ''
     record_location: str | None = ''
@@ -257,6 +259,16 @@ def _normalize_record_fields(data: dict, include_unset: bool = True) -> dict:
     return normalized
 
 
+def _normalize_flight_date(value: str | None) -> str | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "飞行日期格式必须为 YYYY-MM-DD")
+
+
 class PresetCreate(BaseModel):
     model_id: int
     name: str
@@ -272,6 +284,12 @@ class FilterPresetCreate(BaseModel):
 class AppContextUpdate(BaseModel):
     environment: str | None = None
     node_id: str | None = None
+
+
+class RuntimeConfigUpdate(BaseModel):
+    data_dir: str | None = None
+    server_base_url: str | None = None
+    sync_enabled: bool | None = None
 
 
 class LoginRequest(BaseModel):
@@ -333,9 +351,7 @@ def _public_user(user):
 
 def _context_payload(conn, request: Request, user=None):
     context = get_app_context(conn, request)
-    if context["environment"] != "research":
-        user = None
-    elif user is None:
+    if user is None:
         user = get_current_user(conn, request)
     return {
         **context,
@@ -375,9 +391,7 @@ def patch_app_context(req: AppContextUpdate, request: Request):
 def login(req: LoginRequest, request: Request):
     conn = get_db()
     try:
-        context = get_app_context(conn, request)
-        if context["environment"] != "research":
-            raise HTTPException(400, "外场模式不启用账号登录")
+        get_app_context(conn, request)
 
         row = user_repository.get_user_by_username(conn, req.username.strip())
         if not row or not auth_helpers.verify_password(req.password, row["password_hash"]):
@@ -597,7 +611,13 @@ def update_model(model_id: int, req: UpdateModelRequest):
         row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Model not found")
-        conn.execute("UPDATE aircraft_models SET name=? WHERE id=?", (req.name.strip(), model_id))
+        conn.execute(
+            """UPDATE aircraft_models
+               SET name=?,
+                   sync_state=CASE WHEN sync_state IN ('synced', 'server_cache') THEN 'dirty' ELSE sync_state END
+               WHERE id=?""",
+            (req.name.strip(), model_id),
+        )
         conn.commit()
         return {"ok": True}
     except HTTPException:
@@ -1059,7 +1079,13 @@ def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
         row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Aircraft not found")
-        conn.execute("UPDATE aircraft SET name=? WHERE id=?", (req.name.strip(), aircraft_id))
+        conn.execute(
+            """UPDATE aircraft
+               SET name=?,
+                   sync_state=CASE WHEN sync_state IN ('synced', 'server_cache') THEN 'dirty' ELSE sync_state END
+               WHERE id=?""",
+            (req.name.strip(), aircraft_id),
+        )
         conn.commit()
         return {"ok": True}
     except HTTPException:
@@ -1134,6 +1160,31 @@ def get_flight(flight_id: int):
         result["raw_warnings"] = _parse_raw_warnings(result.get("raw_import_warnings"))
         result['columns'] = analysis.get_columns_for_flight_api(flight_id)
         return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/runtime/context")
+def get_runtime_context_api():
+    conn = get_db()
+    try:
+        payload = runtime_context.runtime_context(conn)
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
+
+
+@app.patch("/api/runtime/config")
+def patch_runtime_config(req: RuntimeConfigUpdate):
+    conn = get_db()
+    try:
+        runtime_context.update_runtime_config(conn, _model_dump(req, exclude_unset=True))
+        payload = runtime_context.runtime_context(conn)
+        conn.commit()
+        return payload
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     finally:
         conn.close()
 
@@ -1367,10 +1418,14 @@ def import_flight_api(req: ImportSessionRequest):
     """Import a flight session (or all sessions if session_key is empty)."""
     try:
         record_fields = _normalize_record_fields(_model_dump(req), include_unset=True)
+        flight_date = _normalize_flight_date(req.flight_date)
+        if not flight_date:
+            raise HTTPException(400, "飞行日期必填")
         if req.session_key:
             result = import_session(
                 os.path.normpath(req.source_path), req.aircraft_id, req.session_key,
                 record_fields=record_fields,
+                flight_date_override=flight_date,
             )
             return result
         else:
@@ -1383,6 +1438,7 @@ def import_flight_api(req: ImportSessionRequest):
                     result = import_session(
                         os.path.normpath(req.source_path), req.aircraft_id, sess['session_key'],
                         record_fields=record_fields,
+                        flight_date_override=flight_date,
                     )
                     if 'error' not in result:
                         imported.append(result)
@@ -1391,6 +1447,8 @@ def import_flight_api(req: ImportSessionRequest):
                 return {'imported': imported}
             finally:
                 conn.close()
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))

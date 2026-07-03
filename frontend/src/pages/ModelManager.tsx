@@ -19,10 +19,31 @@ interface Props {
   capabilities: string[];
 }
 
+function syncStateLabel(state?: string | null) {
+  const labels: Record<string, string> = {
+    local_only: '本地',
+    pending_upload: 'pending_upload',
+    syncing: '同步中',
+    synced: '已同步',
+    dirty: '待更新',
+    upload_failed: '上传失败',
+    conflict: '冲突',
+    server_cache: '服务器缓存',
+    server_deleted: '服务器已删',
+  };
+  return labels[state || ''] || state || '未标记';
+}
+
+function syncStateClass(state?: string | null) {
+  if (state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
+  if (state === 'upload_failed' || state === 'conflict') return 'bg-red-50 text-red-700 border-red-200';
+  if (state === 'synced' || state === 'server_cache') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  return 'bg-gray-50 text-gray-600 border-gray-200';
+}
+
 function emptyRecord(): FlightRecordFields {
   return {
     record_daily_duration_min: null,
-    record_batch_name: '',
     record_location: '',
     record_payload: '',
     record_weather: '',
@@ -37,7 +58,6 @@ function emptyRecord(): FlightRecordFields {
 function recordFromFlight(f: Flight): FlightRecordFields {
   return {
     record_daily_duration_min: f.record_daily_duration_min ?? null,
-    record_batch_name: f.record_batch_name ?? '',
     record_location: f.record_location ?? '',
     record_payload: f.record_payload ?? '',
     record_weather: f.record_weather ?? '',
@@ -55,12 +75,26 @@ function parseNumberInput(value: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function formatDurationMinutes(value: number | null | undefined): string {
+  if (value == null) return '';
+  const total = Math.max(0, Math.round(Number(value)));
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return `${hours} h ${minutes} min`;
+}
+
+function formatKgValue(value: string | number | null | undefined): string {
+  if (value == null || String(value).trim() === '') return '';
+  const text = String(value).trim();
+  return /kg$/i.test(text) ? text : `${text}kg`;
+}
+
 function recordSummary(f: Flight) {
   const parts = [
-    f.record_batch_name ? `批次 ${f.record_batch_name}` : '',
     f.record_location ? `地点 ${f.record_location}` : '',
     f.record_weather ? `天气 ${f.record_weather}` : '',
-    f.record_payload ? `载荷 ${f.record_payload}` : '',
+    f.record_daily_duration_min != null ? `记录 ${formatDurationMinutes(f.record_daily_duration_min)}` : '',
+    f.record_payload ? `载荷 ${formatKgValue(f.record_payload)}` : '',
     f.record_takeoff_weight != null ? `起飞 ${f.record_takeoff_weight}kg` : '',
   ].filter(Boolean);
   return parts.length ? parts.join(' · ') : '未填写记录';
@@ -91,6 +125,76 @@ function RecordField({
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value)}
         className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+      />
+    </label>
+  );
+}
+
+function DurationField({
+  value,
+  onChange,
+}: {
+  value: number | null | undefined;
+  onChange: (value: number | null) => void;
+}) {
+  const hasValue = value != null && Number.isFinite(Number(value));
+  const total = hasValue ? Math.max(0, Math.round(Number(value))) : 0;
+  const hours = hasValue ? Math.floor(total / 60) : '';
+  const minutes = hasValue ? total % 60 : '';
+
+  const update = (nextHours: string, nextMinutes: string) => {
+    if (nextHours.trim() === '' && nextMinutes.trim() === '') {
+      onChange(null);
+      return;
+    }
+    const h = Math.max(0, parseNumberInput(nextHours) ?? 0);
+    const m = Math.max(0, parseNumberInput(nextMinutes) ?? 0);
+    onChange(Math.round(h) * 60 + Math.round(m));
+  };
+
+  return (
+    <label className="space-y-1">
+      <span className="block text-[10px] text-gray-500">当日飞行时长</span>
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          min="0"
+          value={hours}
+          onChange={(e) => update(e.target.value, String(minutes))}
+          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+        />
+        <span className="text-[10px] text-gray-500">h</span>
+        <input
+          type="number"
+          min="0"
+          max="59"
+          value={minutes}
+          onChange={(e) => update(String(hours), e.target.value)}
+          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+        />
+        <span className="text-[10px] text-gray-500">min</span>
+      </div>
+    </label>
+  );
+}
+
+function RecordTextarea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string | null | undefined;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-1 block">
+      <span className="block text-[10px] text-gray-500">{label}</span>
+      <textarea
+        rows={2}
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full resize-none bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
       />
     </label>
   );
@@ -193,7 +297,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [aircraftSearch, setAircraftSearch] = useState('');
   const [timeFilterStart, setTimeFilterStart] = useState('');
   const [timeFilterEnd, setTimeFilterEnd] = useState('');
-  const [batchFilter, setBatchFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
   const [weatherFilter, setWeatherFilter] = useState('');
   const [payloadFilter, setPayloadFilter] = useState('');
@@ -398,7 +501,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   const flightMatchesRecordFilters = (f: Flight): boolean => {
     const filters: [string, string | undefined][] = [
-      [batchFilter, f.record_batch_name],
       [locationFilter, f.record_location],
       [weatherFilter, f.record_weather],
       [payloadFilter, f.record_payload],
@@ -451,7 +553,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   };
 
   const clearRecordFilters = () => {
-    setBatchFilter('');
     setLocationFilter('');
     setWeatherFilter('');
     setPayloadFilter('');
@@ -489,7 +590,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     }
   };
 
-  const recordFiltersActive = [batchFilter, locationFilter, weatherFilter, payloadFilter].some((v) => v.trim());
+  const recordFiltersActive = [locationFilter, weatherFilter, payloadFilter].some((v) => v.trim());
 
   return (
     <div className="h-full flex">
@@ -688,15 +789,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                     </button>
                   )}
                   <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500 shrink-0">批次:</span>
-                    <input
-                      type="text"
-                      value={batchFilter}
-                      onChange={(e) => setBatchFilter(e.target.value)}
-                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1">
                     <span className="text-xs text-gray-500 shrink-0">地点:</span>
                     <input
                       type="text"
@@ -879,10 +971,13 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                           <span className="text-xs text-gray-400">解析 {Math.round(f.duration_sec / 60)}分钟</span>
                                         )}
                                         {f.record_daily_duration_min != null && (
-                                          <span className="text-xs text-gray-500">记录 {f.record_daily_duration_min}分钟</span>
+                                          <span className="text-xs text-gray-500">记录 {formatDurationMinutes(f.record_daily_duration_min)}</span>
                                         )}
                                         <span className="text-xs text-gray-400">
                                           原始文件 {f.raw_file_count ?? 0}
+                                        </span>
+                                        <span className={`text-[10px] px-2 py-0.5 rounded border ${syncStateClass(f.sync_state)}`}>
+                                          {syncStateLabel(f.sync_state)}
                                         </span>
                                         <span className="text-xs text-gray-400">
                                           {f.start_time && `${f.start_time}${f.end_time ? ` ~ ${f.end_time.split(' ').pop()}` : ''}`}
@@ -938,18 +1033,17 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                     </div>
                                     {editingRecordFlightId === f.id && (
                                       <div className="mt-3 rounded border border-blue-100 bg-blue-50/40 p-3 space-y-3">
-                                        <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
-                                          <RecordField label="单日飞行时长（分钟）" type="number" value={recordForm.record_daily_duration_min} onChange={(v) => updateRecordForm({ record_daily_duration_min: parseNumberInput(v) })} />
-                                          <RecordField label="批次" value={recordForm.record_batch_name} onChange={(v) => updateRecordForm({ record_batch_name: v })} />
+                                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                                          <DurationField value={recordForm.record_daily_duration_min} onChange={(v) => updateRecordForm({ record_daily_duration_min: v })} />
                                           <RecordField label="地点" value={recordForm.record_location} onChange={(v) => updateRecordForm({ record_location: v })} />
-                                          <RecordField label="设备载荷" value={recordForm.record_payload} onChange={(v) => updateRecordForm({ record_payload: v })} />
                                           <RecordField label="天气" value={recordForm.record_weather} onChange={(v) => updateRecordForm({ record_weather: v })} />
+                                          <RecordField label="设备载荷（kg）" type="number" value={recordForm.record_payload} onChange={(v) => updateRecordForm({ record_payload: v })} />
                                           <RecordField label="燃油量（kg）" type="number" value={recordForm.record_fuel_amount} onChange={(v) => updateRecordForm({ record_fuel_amount: parseNumberInput(v) })} />
                                           <RecordField label="起飞重量（kg）" type="number" value={recordForm.record_takeoff_weight} onChange={(v) => updateRecordForm({ record_takeoff_weight: parseNumberInput(v) })} />
                                           <RecordField label="海拔高度（m）" type="number" value={recordForm.record_altitude} onChange={(v) => updateRecordForm({ record_altitude: parseNumberInput(v) })} />
                                           <RecordField label="风速（m/s）" type="number" value={recordForm.record_wind_speed} onChange={(v) => updateRecordForm({ record_wind_speed: parseNumberInput(v) })} />
-                                          <RecordField label="备注" value={recordForm.record_note} onChange={(v) => updateRecordForm({ record_note: v })} />
                                         </div>
+                                        <RecordTextarea label="备注" value={recordForm.record_note} onChange={(v) => updateRecordForm({ record_note: v })} />
                                         <div className="flex items-center gap-2 justify-end">
                                           <button
                                             type="button"

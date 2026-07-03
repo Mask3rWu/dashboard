@@ -11,34 +11,44 @@ import sys
 import sqlite3
 import logging
 import shutil
+import uuid
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Data directory: %APPDATA%/FlightAnalyzer on Windows, ~/.flightanalyzer elsewhere
-if sys.platform == 'win32':
-    DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'FlightAnalyzer')
-else:
-    DATA_DIR = os.path.join(os.path.expanduser('~'), '.flightanalyzer')
+def _default_data_dir():
+    if sys.platform == 'win32':
+        return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'FlightAnalyzer')
+    return os.path.join(os.path.expanduser('~'), '.flightanalyzer')
+
+
+# Data directory: DATA_DIR env override, otherwise %APPDATA%/FlightAnalyzer on
+# Windows and ~/.flightanalyzer elsewhere. The value is fixed for one process.
+DATA_DIR = os.path.abspath(os.path.expanduser(os.environ.get('DATA_DIR') or _default_data_dir()))
 
 DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").strip().lower() or "sqlite"
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
-# Current medium-term schema starts from v1 and rebuilds incompatible old DBs.
-CURRENT_SCHEMA_VERSION = 1
+# Current medium-term schema starts from v2 and rebuilds incompatible old DBs.
+CURRENT_SCHEMA_VERSION = 2
 CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
     'app_settings', 'users', 'auth_sessions',
-    'file_objects', 'flight_raw_files', 'sync_imports',
+    'file_objects', 'flight_raw_files', 'sync_imports', 'sync_runs',
+}
+SYNC_COLUMNS = {
+    'client_uid', 'server_id', 'source_node_id', 'sync_origin', 'sync_state',
+    'server_version', 'last_sync_at', 'sync_error_json', 'updated_at',
+    'deleted_at', 'server_deleted_at',
 }
 REQUIRED_COLUMNS = {
     'aircraft_models': {
         'id', 'name', 'has_header', 'has_uav_send_id',
         'extract_serial_from_path', 'created_at',
-    },
+    } | SYNC_COLUMNS,
     'aircraft': {
         'id', 'model_id', 'name', 'created_at',
-    },
+    } | SYNC_COLUMNS,
     'flights': {
         'id', 'aircraft_id', 'name', 'source_path', 'session_key',
         'flight_date', 'start_time', 'end_time', 'duration_sec',
@@ -47,7 +57,7 @@ REQUIRED_COLUMNS = {
         'record_weather', 'record_fuel_amount', 'record_takeoff_weight',
         'record_altitude', 'record_wind_speed', 'record_note',
         'raw_import_warnings',
-    },
+    } | SYNC_COLUMNS,
     'data_table_registry': {
         'id', 'model_id', 'data_type_key', 'table_name', 'display_label',
         'file_patterns', 'is_alert',
@@ -69,14 +79,18 @@ REQUIRED_COLUMNS = {
     },
     'file_objects': {
         'id', 'sha256', 'size_bytes', 'storage_rel_path', 'created_at',
-    },
+    } | SYNC_COLUMNS,
     'flight_raw_files': {
         'id', 'flight_id', 'file_object_id', 'original_name',
         'original_rel_path', 'data_type_key', 'source_mtime', 'created_at',
-    },
+    } | SYNC_COLUMNS,
     'sync_imports': {
         'id', 'package_path', 'source_node_id', 'status', 'report_json',
         'created_at',
+    } | SYNC_COLUMNS,
+    'sync_runs': {
+        'id', 'run_type', 'status', 'started_at', 'finished_at',
+        'summary_json', 'error_json',
     },
 }
 
@@ -84,6 +98,8 @@ def ensure_data_dir():
     """Create the application data directory with contextual errors."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
+        for name in ('objects', 'sync_exports', 'sync_cache', 'manifests'):
+            os.makedirs(os.path.join(DATA_DIR, name), exist_ok=True)
     except OSError as e:
         raise RuntimeError(
             f"Cannot create data directory: {DATA_DIR}. "
@@ -167,6 +183,46 @@ def _create_fresh_schema(conn):
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (v,)
         )
+    _seed_runtime_settings(conn)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _upsert_setting(conn, key: str, value: str) -> None:
+    conn.execute(
+        """INSERT INTO app_settings (key, value, updated_at)
+           VALUES (?, ?, datetime('now','localtime'))
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+        (key, value),
+    )
+
+
+def _get_setting(conn, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _seed_runtime_settings(conn) -> None:
+    """Seed local runtime settings used by sync triggers and context APIs."""
+    local_node_id = _get_setting(conn, 'local_node_id') or _get_setting(conn, 'node_id')
+    if not local_node_id:
+        local_node_id = f"node-{uuid.uuid4().hex[:8]}"
+    _upsert_setting(conn, 'local_node_id', local_node_id)
+
+    # Keep legacy app/context consumers working while new sync code uses
+    # local_node_id.
+    if not _get_setting(conn, 'node_id'):
+        _upsert_setting(conn, 'node_id', local_node_id)
+
+    if os.environ.get('SERVER_BASE_URL') is not None or _get_setting(conn, 'server_base_url') is None:
+        _upsert_setting(conn, 'server_base_url', os.environ.get('SERVER_BASE_URL', '').strip())
+    if os.environ.get('SYNC_ENABLED') is not None or _get_setting(conn, 'sync_enabled') is None:
+        _upsert_setting(conn, 'sync_enabled', 'true' if _env_bool('SYNC_ENABLED', True) else 'false')
 
 
 # ── Schema fragments ──
@@ -209,25 +265,55 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 -- Aircraft models (机型)
 CREATE TABLE IF NOT EXISTS aircraft_models (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_uid      TEXT,
+    server_id       INTEGER,
+    source_node_id  TEXT,
+    sync_origin     TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local', 'server', 'package')),
+    sync_state      TEXT NOT NULL DEFAULT 'pending_upload',
+    server_version  INTEGER,
+    last_sync_at    TEXT,
+    sync_error_json TEXT,
     name            TEXT NOT NULL UNIQUE,
     has_header      INTEGER DEFAULT 1,
     has_uav_send_id INTEGER DEFAULT 0,
     extract_serial_from_path INTEGER DEFAULT 0,
-    created_at      TEXT DEFAULT (datetime('now','localtime'))
+    created_at      TEXT DEFAULT (datetime('now','localtime')),
+    updated_at      TEXT DEFAULT (datetime('now','localtime')),
+    deleted_at      TEXT,
+    server_deleted_at TEXT
 );
 
 -- Individual aircraft (飞机) — `name` is a free-form aircraft label
 CREATE TABLE IF NOT EXISTS aircraft (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_uid      TEXT,
+    server_id       INTEGER,
+    source_node_id  TEXT,
+    sync_origin     TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local', 'server', 'package')),
+    sync_state      TEXT NOT NULL DEFAULT 'pending_upload',
+    server_version  INTEGER,
+    last_sync_at    TEXT,
+    sync_error_json TEXT,
     model_id        INTEGER NOT NULL REFERENCES aircraft_models(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
     created_at      TEXT DEFAULT (datetime('now','localtime')),
+    updated_at      TEXT DEFAULT (datetime('now','localtime')),
+    deleted_at      TEXT,
+    server_deleted_at TEXT,
     UNIQUE(model_id, name)
 );
 
 -- Flight sessions (飞行架次)
 CREATE TABLE IF NOT EXISTS flights (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_uid      TEXT,
+    server_id       INTEGER,
+    source_node_id  TEXT,
+    sync_origin     TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local', 'server', 'package')),
+    sync_state      TEXT NOT NULL DEFAULT 'pending_upload',
+    server_version  INTEGER,
+    last_sync_at    TEXT,
+    sync_error_json TEXT,
     aircraft_id     INTEGER NOT NULL REFERENCES aircraft(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
     source_path     TEXT NOT NULL,
@@ -249,6 +335,9 @@ CREATE TABLE IF NOT EXISTS flights (
     record_wind_speed REAL,
     record_note TEXT DEFAULT '',
     raw_import_warnings TEXT DEFAULT '',
+    updated_at      TEXT DEFAULT (datetime('now','localtime')),
+    deleted_at      TEXT,
+    server_deleted_at TEXT,
     -- Dedup boundary: same aircraft + date + session_key. source_path is
     -- stored for provenance only and intentionally excluded from the unique
     -- constraint (a folder may be moved and re-imported from a new path).
@@ -260,14 +349,33 @@ CREATE TABLE IF NOT EXISTS flights (
 -- resolved through flight_raw_files.
 CREATE TABLE IF NOT EXISTS file_objects (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_uid       TEXT,
+    server_id        INTEGER,
+    source_node_id   TEXT,
+    sync_origin      TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local', 'server', 'package')),
+    sync_state       TEXT NOT NULL DEFAULT 'pending_upload',
+    server_version   INTEGER,
+    last_sync_at     TEXT,
+    sync_error_json  TEXT,
     sha256           TEXT NOT NULL UNIQUE,
     size_bytes       INTEGER NOT NULL,
     storage_rel_path TEXT NOT NULL,
-    created_at       TEXT DEFAULT (datetime('now','localtime'))
+    created_at       TEXT DEFAULT (datetime('now','localtime')),
+    updated_at       TEXT DEFAULT (datetime('now','localtime')),
+    deleted_at       TEXT,
+    server_deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS flight_raw_files (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_uid        TEXT,
+    server_id         INTEGER,
+    source_node_id    TEXT,
+    sync_origin       TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local', 'server', 'package')),
+    sync_state        TEXT NOT NULL DEFAULT 'pending_upload',
+    server_version    INTEGER,
+    last_sync_at      TEXT,
+    sync_error_json   TEXT,
     flight_id         INTEGER NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
     file_object_id    INTEGER NOT NULL REFERENCES file_objects(id),
     original_name     TEXT NOT NULL,
@@ -275,6 +383,9 @@ CREATE TABLE IF NOT EXISTS flight_raw_files (
     data_type_key     TEXT,
     source_mtime      REAL,
     created_at        TEXT DEFAULT (datetime('now','localtime')),
+    updated_at        TEXT DEFAULT (datetime('now','localtime')),
+    deleted_at        TEXT,
+    server_deleted_at TEXT,
     UNIQUE(flight_id, file_object_id, original_rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_flight_raw_files_flight ON flight_raw_files(flight_id);
@@ -282,11 +393,31 @@ CREATE INDEX IF NOT EXISTS idx_flight_raw_files_flight ON flight_raw_files(fligh
 -- Offline sync import reports for research-network package ingestion.
 CREATE TABLE IF NOT EXISTS sync_imports (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    package_path   TEXT NOT NULL,
+    client_uid     TEXT,
+    server_id      INTEGER,
     source_node_id TEXT,
+    sync_origin    TEXT NOT NULL DEFAULT 'package' CHECK(sync_origin IN ('local', 'server', 'package')),
+    sync_state     TEXT NOT NULL DEFAULT 'local_only',
+    server_version INTEGER,
+    last_sync_at   TEXT,
+    sync_error_json TEXT,
+    package_path   TEXT NOT NULL,
     status         TEXT NOT NULL,
     report_json    TEXT NOT NULL,
-    created_at     TEXT DEFAULT (datetime('now','localtime'))
+    created_at     TEXT DEFAULT (datetime('now','localtime')),
+    updated_at     TEXT DEFAULT (datetime('now','localtime')),
+    deleted_at     TEXT,
+    server_deleted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_type     TEXT NOT NULL CHECK(run_type IN ('push', 'pull', 'full')),
+    status       TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed')),
+    started_at   TEXT DEFAULT (datetime('now','localtime')),
+    finished_at  TEXT,
+    summary_json TEXT,
+    error_json   TEXT
 );
 
 -- Data table registry (maps model × data_type → table_name)
@@ -335,6 +466,115 @@ CREATE TABLE IF NOT EXISTS filter_presets (
     config_json     TEXT NOT NULL,
     UNIQUE(model_id, name)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_aircraft_models_client_uid ON aircraft_models(client_uid) WHERE client_uid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_aircraft_client_uid ON aircraft(client_uid) WHERE client_uid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_flights_client_uid ON flights(client_uid) WHERE client_uid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_objects_client_uid ON file_objects(client_uid) WHERE client_uid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_flight_raw_files_client_uid ON flight_raw_files(client_uid) WHERE client_uid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_imports_client_uid ON sync_imports(client_uid) WHERE client_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_flights_sync_state ON flights(sync_state);
+
+CREATE TRIGGER IF NOT EXISTS trg_aircraft_models_sync_insert
+AFTER INSERT ON aircraft_models
+WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
+BEGIN
+    UPDATE aircraft_models
+       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
+           source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
+     WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_aircraft_sync_insert
+AFTER INSERT ON aircraft
+WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
+BEGIN
+    UPDATE aircraft
+       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
+           source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
+     WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_flights_sync_insert
+AFTER INSERT ON flights
+WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
+BEGIN
+    UPDATE flights
+       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
+           source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
+     WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_file_objects_sync_insert
+AFTER INSERT ON file_objects
+WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
+BEGIN
+    UPDATE file_objects
+       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
+           source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
+     WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_flight_raw_files_sync_insert
+AFTER INSERT ON flight_raw_files
+WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
+BEGIN
+    UPDATE flight_raw_files
+       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
+           source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
+     WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_imports_sync_insert
+AFTER INSERT ON sync_imports
+WHEN NEW.client_uid IS NULL
+BEGIN
+    UPDATE sync_imports
+       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16))))
+     WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_aircraft_models_updated_at
+AFTER UPDATE ON aircraft_models
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE aircraft_models SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_aircraft_updated_at
+AFTER UPDATE ON aircraft
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE aircraft SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_flights_updated_at
+AFTER UPDATE ON flights
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE flights SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_file_objects_updated_at
+AFTER UPDATE ON file_objects
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE file_objects SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_flight_raw_files_updated_at
+AFTER UPDATE ON flight_raw_files
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE flight_raw_files SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_imports_updated_at
+AFTER UPDATE ON sync_imports
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE sync_imports SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
+END;
 """
 
 
@@ -386,6 +626,7 @@ def init_db():
                 return {"created": True, "rebuilt": True, "backup_path": backup_path, "reason": reason}
 
             logger.info("Current database schema verified at %s", DB_PATH)
+            _seed_runtime_settings(conn)
             conn.execute("PRAGMA foreign_keys=ON")
             conn.commit()
             return {"created": False, "rebuilt": False, "backup_path": None, "reason": None}

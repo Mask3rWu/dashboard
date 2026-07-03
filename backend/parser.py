@@ -52,7 +52,7 @@ def _extract_flight_date(source_path):
     return None
 
 
-def import_session(source_path, aircraft_id, session_key, record_fields=None):
+def import_session(source_path, aircraft_id, session_key, record_fields=None, flight_date_override=None):
     """Import a single flight session into the hierarchy.
 
     Args:
@@ -60,6 +60,7 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
         aircraft_id: aircraft.id (must exist)
         session_key: Target session key
         record_fields: Optional manual flight record field values
+        flight_date_override: Optional YYYY-MM-DD date chosen by the user
 
     Returns:
         {flight_id, aircraft_id, session_key, name, rows, details} or {error: ...}
@@ -147,8 +148,9 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
     session_key = canonical_key
     folder_name = os.path.basename(source_path.rstrip('/\\'))
 
-    # Determine flight_date from directory hierarchy
-    flight_date = _extract_flight_date(source_path)
+    # Determine flight_date. The directory date is the default, but the import
+    # form lets the user correct it before the record is created.
+    flight_date = flight_date_override or _extract_flight_date(source_path)
 
     # Reject if already imported — duplicate boundary is aircraft + flight_date
     # + session_key. source_path is stored for provenance only and deliberately

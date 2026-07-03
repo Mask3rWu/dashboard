@@ -5,7 +5,7 @@ import ComparePage from './pages/ComparePage';
 import ModelManager from './pages/ModelManager';
 import {
   checkHealth, listFlights, listModels, listAircraft,
-  getAppContext, updateAppContext, login, logout, changePassword, createUser, setSessionToken,
+  getAppContext, login, logout, changePassword, createUser, setSessionToken,
   type Flight, type AircraftModel, type Aircraft, type AppContext,
 } from './api';
 
@@ -134,10 +134,6 @@ function AccountPanel({
     }
   };
 
-  if (context.environment === 'field') {
-    return <span className="text-xs text-gray-400">外场离线模式</span>;
-  }
-
   return (
     <div className="relative">
       <button
@@ -151,7 +147,7 @@ function AccountPanel({
         <div className="absolute right-0 top-full mt-2 w-80 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-4 space-y-4">
           {!context.user ? (
             <div className="space-y-2">
-              <div className="text-sm font-medium text-gray-800">科研网登录</div>
+              <div className="text-sm font-medium text-gray-800">登录</div>
               <input
                 value={loginName}
                 onChange={(e) => setLoginName(e.target.value)}
@@ -316,17 +312,6 @@ export default function App() {
     setModelsVersion(v => v + 1);
   };
 
-  const handleEnvironmentChange = async (environment: 'research' | 'field') => {
-    const ctx = await updateAppContext({ environment });
-    if (environment === 'field') {
-      setSessionToken(null);
-      const fresh = await getAppContext();
-      setAppContextState(fresh);
-    } else {
-      setAppContextState(ctx);
-    }
-  };
-
   const doInit = async () => {
     setLoading(true);
     setInitError(null);
@@ -428,21 +413,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-3">
           {appContext && (
-            <>
-              <select
-                value={appContext.environment}
-                onChange={(e) => handleEnvironmentChange(e.target.value as 'research' | 'field')}
-                className="bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-600"
-                title="环境模式"
-              >
-                <option value="research">科研网</option>
-                <option value="field">外场</option>
-              </select>
-              <span className="text-xs text-gray-400" title={appContext.node_id}>
-                {appContext.node_id}
-              </span>
-              <AccountPanel context={appContext} onContextChanged={setAppContextState} />
-            </>
+            <AccountPanel context={appContext} onContextChanged={setAppContextState} />
           )}
           {flights.length > 0 && (
             <span className="text-xs text-gray-400">{flights.length} 架次已导入</span>
@@ -478,7 +449,6 @@ export default function App() {
                 <ImportPage
                   onImported={onDataChanged}
                   canDeleteFlights={hasCapability(appContext, 'delete_flights')}
-                  environment={appContext?.environment}
                   isLoggedIn={!!appContext?.user}
                 />
               </ErrorBoundary>

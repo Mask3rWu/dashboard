@@ -79,6 +79,25 @@ export interface AppContext {
   capabilities: Capability[];
 }
 
+export interface RuntimeContext {
+  data_dir: string;
+  sync_enabled: boolean;
+  server_base_url: string;
+  server_reachable: boolean;
+  server_status: 'online' | 'offline' | 'disabled' | 'not_configured' | string;
+  local_node_id: string;
+  last_server_check_at: string;
+  server_user: CurrentUser | null;
+  server_capabilities: string[];
+  sync_summary: {
+    pending_upload: number;
+    upload_failed: number;
+    conflict: number;
+    last_push_at?: string | null;
+    last_pull_at?: string | null;
+  };
+}
+
 export interface AircraftModel {
   id: number;
   name: string;
@@ -111,6 +130,24 @@ export interface FlightRecordFields {
 
 export interface Flight extends FlightRecordFields {
   id: number;
+  client_uid?: string;
+  server_id?: number | null;
+  source_node_id?: string | null;
+  sync_origin?: 'local' | 'server' | 'package' | string;
+  sync_state?:
+    | 'local_only'
+    | 'pending_upload'
+    | 'syncing'
+    | 'synced'
+    | 'dirty'
+    | 'upload_failed'
+    | 'conflict'
+    | 'server_cache'
+    | 'server_deleted'
+    | string;
+  server_version?: number | null;
+  last_sync_at?: string | null;
+  sync_error_json?: string | null;
   name: string;
   aircraft_id: number;
   aircraft_name: string;
@@ -437,6 +474,9 @@ export const checkHealth = () => request<HealthStatus>('/health');
 export const getAppContext = () => request<AppContext>('/app/context');
 export const updateAppContext = (updates: { environment?: 'research' | 'field'; node_id?: string }) =>
   request<AppContext>('/app/context', { method: 'PATCH', body: JSON.stringify(updates) });
+export const getRuntimeContext = () => request<RuntimeContext>('/runtime/context');
+export const updateRuntimeConfig = (updates: { data_dir?: string; server_base_url?: string; sync_enabled?: boolean }) =>
+  request<RuntimeContext>('/runtime/config', { method: 'PATCH', body: JSON.stringify(updates) });
 export const login = (username: string, password: string) =>
   request<AppContext & { token: string }>('/auth/login', {
     method: 'POST',
@@ -574,7 +614,12 @@ export const scanFolder = (sourcePath: string) =>
   request<ScanResult>(
     '/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) }
   );
-export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string, record: FlightRecordFields = {}) =>
+export const importSession = (
+  sourcePath: string,
+  aircraftId: number,
+  sessionKey: string,
+  record: FlightRecordFields & { flight_date?: string | null } = {},
+) =>
   request<ImportSessionResult>(
     '/flights/import', {
       method: 'POST',

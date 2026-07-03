@@ -220,7 +220,9 @@ def export_package(conn, flight_ids: list[int]) -> dict:
     """Export selected flights into a .fapkg zip under the fixed export dir."""
     clean_flight_ids = sorted({int(fid) for fid in flight_ids})
     ids = sync_repository.selected_ids(conn, clean_flight_ids)
-    source_node_id = sync_repository.get_setting(conn, "node_id", "field-unknown")
+    source_node_id = sync_repository.get_setting(
+        conn, "local_node_id", sync_repository.get_setting(conn, "node_id", "field-unknown")
+    )
     source_environment = sync_repository.get_setting(conn, "environment", "field")
     manifest = _manifest(conn, ids, source_node_id, source_environment)
     out_path = _unique_package_path(source_node_id)
