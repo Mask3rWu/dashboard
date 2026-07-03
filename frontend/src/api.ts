@@ -153,6 +153,43 @@ export interface RawManifest {
   manifest_path: string;
 }
 
+export interface SyncExportFlightNode {
+  id: number;
+  name: string;
+  session_key?: string;
+  flight_date?: string | null;
+  start_time?: string | null;
+  duration_sec?: number | null;
+  record_location?: string;
+  record_weather?: string;
+}
+
+export interface SyncExportBatchNode {
+  name: string;
+  flights: SyncExportFlightNode[];
+}
+
+export interface SyncExportAircraftNode {
+  id: number;
+  name: string;
+  batches: SyncExportBatchNode[];
+}
+
+export interface SyncExportModelNode {
+  id: number;
+  name: string;
+  aircraft: SyncExportAircraftNode[];
+}
+
+export interface SyncExportResult {
+  ok: boolean;
+  path: string;
+  filename: string;
+  flight_count: number;
+  raw_file_count: number;
+  parsed_sha256: string;
+}
+
 export interface SessionPreview {
   aircraft_serial: string;
   session_key: string;
@@ -431,6 +468,13 @@ export const getRawFiles = (id: number) =>
   request<{ flight_id: number; files: RawFileItem[]; warnings: { file?: string; path?: string; error: string }[] }>(`/flights/${id}/raw-files`);
 export const getRawManifest = (id: number) =>
   request<RawManifest>(`/flights/${id}/raw-manifest`);
+export const getSyncExportTree = (q = '') =>
+  request<{ tree: SyncExportModelNode[]; flight_count: number }>(`/sync/export-tree${buildQuery({ q })}`);
+export const exportSyncPackage = (flightIds: number[]) =>
+  request<SyncExportResult>('/sync/export', {
+    method: 'POST',
+    body: JSON.stringify({ flight_ids: flightIds }),
+  });
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>
   request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });

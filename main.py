@@ -41,6 +41,7 @@ from backend.format_configs import (
 )
 from backend.scanner import scan_folder_sessions
 from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
+from backend.sync_package import export_package
 from backend import analysis
 
 from datetime import datetime
@@ -284,6 +285,10 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     role: str = "user"
+
+
+class SyncExportRequest(BaseModel):
+    flight_ids: list[int]
 
 
 def _public_user(user):
@@ -1185,6 +1190,102 @@ def get_flight_raw_manifest(flight_id: int):
         if not manifest:
             raise HTTPException(404, "Flight not found")
         return manifest
+    finally:
+        conn.close()
+
+
+# ─── Offline Sync Export Routes ────────────────────────────
+
+@app.get("/api/sync/export-tree")
+def get_sync_export_tree(q: str | None = None):
+    """Return model -> aircraft -> batch -> flight selection tree."""
+    keyword = (q or "").strip().lower()
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT f.id as flight_id, f.name as flight_name, f.session_key,
+                      f.flight_date, f.start_time, f.duration_sec,
+                      f.record_batch_name, f.record_location, f.record_weather,
+                      a.id as aircraft_id, a.name as aircraft_name,
+                      am.id as model_id, am.name as model_name
+               FROM flights f
+               JOIN aircraft a ON a.id = f.aircraft_id
+               JOIN aircraft_models am ON am.id = a.model_id
+               ORDER BY am.name, a.name, COALESCE(f.record_batch_name, ''), f.flight_date, f.session_key, f.id"""
+        ).fetchall()
+
+        models = {}
+        for row in rows:
+            item = dict(row)
+            haystack = " ".join(
+                str(item.get(k) or "")
+                for k in (
+                    "model_name", "aircraft_name", "record_batch_name",
+                    "flight_name", "session_key", "flight_date",
+                    "record_location", "record_weather",
+                )
+            ).lower()
+            if keyword and keyword not in haystack:
+                continue
+
+            model = models.setdefault(
+                item["model_id"],
+                {"id": item["model_id"], "name": item["model_name"], "aircraft": {}},
+            )
+            aircraft = model["aircraft"].setdefault(
+                item["aircraft_id"],
+                {"id": item["aircraft_id"], "name": item["aircraft_name"], "batches": {}},
+            )
+            batch_name = item["record_batch_name"] or "未填写批次"
+            batch = aircraft["batches"].setdefault(
+                batch_name,
+                {"name": batch_name, "flights": []},
+            )
+            batch["flights"].append(
+                {
+                    "id": item["flight_id"],
+                    "name": item["flight_name"],
+                    "session_key": item["session_key"],
+                    "flight_date": item["flight_date"],
+                    "start_time": item["start_time"],
+                    "duration_sec": item["duration_sec"],
+                    "record_location": item["record_location"],
+                    "record_weather": item["record_weather"],
+                }
+            )
+
+        tree = []
+        for model in models.values():
+            aircraft_list = []
+            for aircraft in model["aircraft"].values():
+                aircraft_list.append(
+                    {
+                        "id": aircraft["id"],
+                        "name": aircraft["name"],
+                        "batches": list(aircraft["batches"].values()),
+                    }
+                )
+            tree.append({"id": model["id"], "name": model["name"], "aircraft": aircraft_list})
+        flight_count = sum(
+            len(batch["flights"])
+            for model in tree
+            for aircraft in model["aircraft"]
+            for batch in aircraft["batches"]
+        )
+        return {"tree": tree, "flight_count": flight_count}
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/export")
+def post_sync_export(req: SyncExportRequest):
+    """Export selected flights to the fixed sync_exports directory."""
+    conn = get_db()
+    try:
+        result = export_package(conn, req.flight_ids)
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     finally:
         conn.close()
 
