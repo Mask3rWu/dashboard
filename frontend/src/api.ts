@@ -123,9 +123,34 @@ export interface Flight extends FlightRecordFields {
   end_time: string;
   duration_sec: number;
   import_time: string;
+  raw_file_count?: number;
+  raw_import_warnings?: string;
+  raw_warnings?: { file?: string; path?: string; error: string }[];
   // Legacy fields (present in migrated data)
   drone_id?: string;
   drone_model?: string;
+}
+
+export interface RawFileItem {
+  id: number;
+  flight_id: number;
+  original_name: string;
+  original_rel_path: string;
+  data_type_key?: string | null;
+  source_mtime?: number | null;
+  created_at: string;
+  file_object_id: number;
+  sha256: string;
+  size_bytes: number;
+  storage_rel_path: string;
+}
+
+export interface RawManifest {
+  flight: Flight;
+  logical_prefix: string;
+  files: (RawFileItem & { logical_rel_path: string })[];
+  warnings: { file?: string; path?: string; error: string }[];
+  manifest_path: string;
 }
 
 export interface SessionPreview {
@@ -177,6 +202,8 @@ export interface ImportSessionResult {
   name: string;
   rows: number;
   details: Record<string, number | string>;
+  raw_files?: number;
+  raw_warnings?: { file?: string; path?: string; error: string }[];
   error?: string;
 }
 
@@ -400,6 +427,10 @@ function buildQuery(params: Record<string, string | number | null | undefined>) 
 export const listFlights = (filters: FlightListFilters = {}) =>
   request<{ flights: Flight[] }>(`/flights${buildQuery(filters as Record<string, string | number | null | undefined>)}`);
 export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup[] }>(`/flights/${id}`);
+export const getRawFiles = (id: number) =>
+  request<{ flight_id: number; files: RawFileItem[]; warnings: { file?: string; path?: string; error: string }[] }>(`/flights/${id}/raw-files`);
+export const getRawManifest = (id: number) =>
+  request<RawManifest>(`/flights/${id}/raw-manifest`);
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>
   request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });

@@ -4,10 +4,11 @@ import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight, updateFlightRecord,
+  getRawFiles, getRawManifest,
   getModelColumns, updateModelColumn, updateModelDataTypeLabel,
   exportModel, importModel,
   type AircraftModel, type Aircraft, type Flight,
-  type DataTypeGroup, type FlightRecordFields,
+  type DataTypeGroup, type FlightRecordFields, type RawFileItem,
 } from '../api';
 
 interface Props {
@@ -63,6 +64,12 @@ function recordSummary(f: Flight) {
     f.record_takeoff_weight != null ? `起飞 ${f.record_takeoff_weight}kg` : '',
   ].filter(Boolean);
   return parts.length ? parts.join(' · ') : '未填写记录';
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function RecordField({
@@ -122,6 +129,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [editingRecordFlightId, setEditingRecordFlightId] = useState<number | null>(null);
   const [recordForm, setRecordForm] = useState<FlightRecordFields>(emptyRecord());
   const [savingRecord, setSavingRecord] = useState(false);
+  const [expandedRawFlightId, setExpandedRawFlightId] = useState<number | null>(null);
+  const [rawFilesByFlight, setRawFilesByFlight] = useState<Record<number, RawFileItem[]>>({});
+  const [rawWarningsByFlight, setRawWarningsByFlight] = useState<Record<number, { file?: string; path?: string; error: string }[]>>({});
+  const [loadingRawFlightId, setLoadingRawFlightId] = useState<number | null>(null);
 
   // Column groups
   const [columnGroups, setColumnGroups] = useState<DataTypeGroup[]>([]);
@@ -444,6 +455,38 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     setLocationFilter('');
     setWeatherFilter('');
     setPayloadFilter('');
+  };
+
+  const toggleRawFiles = async (flightId: number) => {
+    if (expandedRawFlightId === flightId) {
+      setExpandedRawFlightId(null);
+      return;
+    }
+    setExpandedRawFlightId(flightId);
+    if (rawFilesByFlight[flightId]) return;
+
+    setLoadingRawFlightId(flightId);
+    try {
+      const data = await getRawFiles(flightId);
+      setRawFilesByFlight((prev) => ({ ...prev, [flightId]: data.files }));
+      setRawWarningsByFlight((prev) => ({ ...prev, [flightId]: data.warnings }));
+    } catch (e: any) {
+      setRawWarningsByFlight((prev) => ({
+        ...prev,
+        [flightId]: [{ error: e.message || String(e) }],
+      }));
+    } finally {
+      setLoadingRawFlightId(null);
+    }
+  };
+
+  const createRawManifest = async (flightId: number) => {
+    try {
+      const manifest = await getRawManifest(flightId);
+      alert(`原始文件清单已生成:\n${manifest.manifest_path}`);
+    } catch (e: any) {
+      alert('生成清单失败: ' + (e.message || e));
+    }
   };
 
   const recordFiltersActive = [batchFilter, locationFilter, weatherFilter, payloadFilter].some((v) => v.trim());
@@ -839,6 +882,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                           <span className="text-xs text-gray-500">记录 {f.record_daily_duration_min}分钟</span>
                                         )}
                                         <span className="text-xs text-gray-400">
+                                          原始文件 {f.raw_file_count ?? 0}
+                                        </span>
+                                        <span className="text-xs text-gray-400">
                                           {f.start_time && `${f.start_time}${f.end_time ? ` ~ ${f.end_time.split(' ').pop()}` : ''}`}
                                         </span>
                                       </div>
@@ -849,6 +895,13 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                           className="text-xs text-gray-500 hover:text-blue-600"
                                         >
                                           编辑记录
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleRawFiles(f.id)}
+                                          className="text-xs text-gray-500 hover:text-blue-600"
+                                        >
+                                          原始文件
                                         </button>
                                         <button
                                           onClick={() => onNavigateToFlight(f.id)}
@@ -879,6 +932,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                     <div className="mt-1 text-xs text-gray-500 truncate">
                                       {recordSummary(f)}
                                       {f.record_note && <span className="text-gray-400"> · 备注 {f.record_note}</span>}
+                                      {(f.raw_warnings?.length ?? 0) > 0 && (
+                                        <span className="text-amber-600"> · 原始文件转存 warning {f.raw_warnings!.length}</span>
+                                      )}
                                     </div>
                                     {editingRecordFlightId === f.id && (
                                       <div className="mt-3 rounded border border-blue-100 bg-blue-50/40 p-3 space-y-3">
@@ -912,6 +968,58 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                             取消
                                           </button>
                                         </div>
+                                      </div>
+                                    )}
+                                    {expandedRawFlightId === f.id && (
+                                      <div className="mt-3 rounded border border-gray-200 bg-white p-3 space-y-2">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-xs font-medium text-gray-600">
+                                            原始文件清单
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() => createRawManifest(f.id)}
+                                            className="text-xs text-blue-600 hover:text-blue-500"
+                                          >
+                                            生成 manifest
+                                          </button>
+                                        </div>
+                                        {loadingRawFlightId === f.id ? (
+                                          <p className="text-xs text-gray-400">加载中...</p>
+                                        ) : (
+                                          <>
+                                            {(rawWarningsByFlight[f.id]?.length ?? f.raw_warnings?.length ?? 0) > 0 && (
+                                              <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 space-y-1">
+                                                {(rawWarningsByFlight[f.id] ?? f.raw_warnings ?? []).map((w, idx) => (
+                                                  <div key={`${w.file ?? 'warning'}-${idx}`} className="text-xs text-amber-700">
+                                                    {w.file ? `${w.file}: ` : ''}{w.error}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                            {(rawFilesByFlight[f.id]?.length ?? 0) === 0 ? (
+                                              <p className="text-xs text-gray-400">暂无已转存原始文件</p>
+                                            ) : (
+                                              <div className="divide-y divide-gray-100">
+                                                {rawFilesByFlight[f.id].map((raw) => (
+                                                  <div key={raw.id} className="py-1.5 text-xs">
+                                                    <div className="flex items-center justify-between gap-3">
+                                                      <span className="font-medium text-gray-700 truncate" title={raw.original_rel_path}>
+                                                        {raw.original_name}
+                                                      </span>
+                                                      <span className="text-gray-400 shrink-0">{formatBytes(raw.size_bytes)}</span>
+                                                    </div>
+                                                    <div className="mt-0.5 flex items-center gap-2 text-[10px] text-gray-400 min-w-0">
+                                                      {raw.data_type_key && <span>{raw.data_type_key}</span>}
+                                                      <span className="font-mono truncate" title={raw.sha256}>{raw.sha256.slice(0, 16)}...</span>
+                                                      <span className="truncate" title={raw.storage_rel_path}>{raw.storage_rel_path}</span>
+                                                    </div>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </>
+                                        )}
                                       </div>
                                     )}
                                   </div>

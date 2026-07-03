@@ -937,6 +937,10 @@ export default function ImportPage({ onImported, canDeleteFlights }: Props) {
                   )}
                   {f.session_key && <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>}
                   {f.duration_sec && <span className="text-xs text-gray-400">{Math.round(f.duration_sec / 60)}分钟</span>}
+                  <span className="text-xs text-gray-400">原始文件 {f.raw_file_count ?? 0}</span>
+                  {(f.raw_warnings?.length ?? 0) > 0 && (
+                    <span className="text-xs text-amber-600">warning {f.raw_warnings!.length}</span>
+                  )}
                 </div>
                 {canDeleteFlights && deletingFlightId === f.id ? (
                   <div className="flex items-center gap-1">

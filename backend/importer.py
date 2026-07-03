@@ -282,7 +282,6 @@ def _fix_duplicate_seconds(conn, table_name, flight_id):
             f"UPDATE {table_name} SET time_sec=? WHERE id=?",
             updates
         )
-        conn.commit()
         logger.info(
             "Fixed %d duplicate second(s) in %s for flight %d",
             len(updates), table_name, flight_id,
@@ -290,10 +289,9 @@ def _fix_duplicate_seconds(conn, table_name, flight_id):
 
 
 def _batch_insert(conn, sql, data, batch_size=1000):
-    """Batch insert with commit."""
+    """Batch insert rows; the caller owns transaction commit/rollback."""
     for i in range(0, len(data), batch_size):
         conn.executemany(sql, data[i:i + batch_size])
-    conn.commit()
 
 
 def import_files_for_session(conn, flight_id, files_info, model_id, format_config=None):
@@ -403,4 +401,3 @@ def _update_flight_meta(conn, flight_id, total_rows, format_config, model_id):
         conn.execute(
             "UPDATE flights SET total_rows=? WHERE id=?", (total_rows, flight_id)
         )
-    conn.commit()

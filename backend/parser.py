@@ -4,6 +4,7 @@ Refactored: delegates format detection and scanning to scanner.py,
 config-driven import to importer.py, config loading to format_configs.py.
 """
 
+import json
 import os
 import logging
 from backend.database import get_db
@@ -26,6 +27,7 @@ from backend.format_configs import (
 from backend.importer import (
     import_data_type, import_alerts, import_files_for_session,
 )
+from backend.raw_storage import attach_raw_files_to_flight
 
 RECORD_FIELD_COLUMNS = (
     'record_daily_duration_min',
@@ -195,20 +197,39 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
     )
     flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    # Import all files for this session. The scan above used the stored config,
-    # so files_info's data_type_keys line up with the stored config's
-    # definitions. Types the user deselected at creation time are not in the
-    # stored config's file_patterns and were never picked up by the scan.
-    # Cross-model import (writing A's data into B's tables) is no longer
-    # supported — the import target is the model the scan resolved to.
-    import_result = import_files_for_session(
-        conn, flight_id, matching, model_id, format_config=stored_config
-    )
+    try:
+        # Import all files for this session. The scan above used the stored config,
+        # so files_info's data_type_keys line up with the stored config's
+        # definitions. Types the user deselected at creation time are not in the
+        # stored config's file_patterns and were never picked up by the scan.
+        # Cross-model import (writing A's data into B's tables) is no longer
+        # supported — the import target is the model the scan resolved to.
+        import_result = import_files_for_session(
+            conn, flight_id, matching, model_id, format_config=stored_config
+        )
 
-    conn.close()
+        if isinstance(import_result, dict) and 'error' in import_result:
+            conn.rollback()
+            return import_result
 
-    if isinstance(import_result, dict) and 'error' in import_result:
-        return import_result
+        raw_result = attach_raw_files_to_flight(conn, flight_id, source_path, matching)
+        raw_warnings = raw_result.get('warnings', [])
+        if raw_warnings:
+            conn.execute(
+                "UPDATE flights SET raw_import_warnings=? WHERE id=?",
+                (json.dumps(raw_warnings, ensure_ascii=False), flight_id),
+            )
+
+        conn.commit()
+    except Exception as e:
+        logger.exception("Import session failed; rolling back flight %s", flight_id)
+        conn.rollback()
+        return {'error': str(e)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     return {
         'flight_id': flight_id,
@@ -217,4 +238,6 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None):
         'name': flight_name,
         'rows': import_result.get('rows', 0),
         'details': import_result.get('details', {}),
+        'raw_files': raw_result.get('attached', 0),
+        'raw_warnings': raw_warnings,
     }

@@ -40,6 +40,7 @@ from backend.format_configs import (
     update_column_metadata, data_table_name,
 )
 from backend.scanner import scan_folder_sessions
+from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend import analysis
 
 from datetime import datetime
@@ -144,6 +145,16 @@ class FlightRecordRequest(BaseModel):
     record_altitude: float | None = None
     record_wind_speed: float | None = None
     record_note: str | None = None
+
+
+def _parse_raw_warnings(value: str | None):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
 
 
 class CreateModelRequest(BaseModel):
@@ -1091,16 +1102,27 @@ def list_flights(
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         rows = conn.execute(
             f"""SELECT f.*, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name
+                      am.id as model_id, am.name as model_name,
+                      COALESCE(rf.raw_file_count, 0) as raw_file_count
                FROM flights f
                JOIN aircraft a ON a.id = f.aircraft_id
                JOIN aircraft_models am ON am.id = a.model_id
+               LEFT JOIN (
+                   SELECT flight_id, COUNT(*) as raw_file_count
+                   FROM flight_raw_files
+                   GROUP BY flight_id
+               ) rf ON rf.flight_id = f.id
                {where_sql}
                ORDER BY f.import_time DESC"""
             ,
             params,
         ).fetchall()
-        return {"flights": [dict(r) for r in rows]}
+        flights = []
+        for r in rows:
+            item = dict(r)
+            item["raw_warnings"] = _parse_raw_warnings(item.get("raw_import_warnings"))
+            flights.append(item)
+        return {"flights": flights}
     finally:
         conn.close()
 
@@ -1112,18 +1134,57 @@ def get_flight(flight_id: int):
     try:
         flight = conn.execute(
             """SELECT f.*, a.name as aircraft_name,
-                      am.id as model_id, am.name as model_name
+                      am.id as model_id, am.name as model_name,
+                      COALESCE(rf.raw_file_count, 0) as raw_file_count
                FROM flights f
                JOIN aircraft a ON a.id = f.aircraft_id
                JOIN aircraft_models am ON am.id = a.model_id
+               LEFT JOIN (
+                   SELECT flight_id, COUNT(*) as raw_file_count
+                   FROM flight_raw_files
+                   GROUP BY flight_id
+               ) rf ON rf.flight_id = f.id
                WHERE f.id=?""",
             (flight_id,)
         ).fetchone()
         if not flight:
             raise HTTPException(404, "Flight not found")
         result = dict(flight)
+        result["raw_warnings"] = _parse_raw_warnings(result.get("raw_import_warnings"))
         result['columns'] = analysis.get_columns_for_flight_api(flight_id)
         return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/flights/{flight_id}/raw-files")
+def get_flight_raw_files(flight_id: int):
+    """List archived raw files attached to a flight."""
+    conn = get_db()
+    try:
+        flight = conn.execute(
+            "SELECT id, raw_import_warnings FROM flights WHERE id=?", (flight_id,)
+        ).fetchone()
+        if not flight:
+            raise HTTPException(404, "Flight not found")
+        return {
+            "flight_id": flight_id,
+            "files": get_raw_files_for_flight(conn, flight_id),
+            "warnings": _parse_raw_warnings(flight["raw_import_warnings"]),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/flights/{flight_id}/raw-manifest")
+def get_flight_raw_manifest(flight_id: int):
+    """Return and persist the current logical raw-file manifest for a flight."""
+    conn = get_db()
+    try:
+        manifest = build_flight_manifest(conn, flight_id)
+        if not manifest:
+            raise HTTPException(404, "Flight not found")
+        return manifest
     finally:
         conn.close()
 

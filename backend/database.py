@@ -22,6 +22,7 @@ CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
     'app_settings', 'users', 'auth_sessions',
+    'file_objects', 'flight_raw_files',
 }
 REQUIRED_COLUMNS = {
     'aircraft_models': {
@@ -38,6 +39,7 @@ REQUIRED_COLUMNS = {
         'record_batch_name', 'record_location', 'record_payload',
         'record_weather', 'record_fuel_amount', 'record_takeoff_weight',
         'record_altitude', 'record_wind_speed', 'record_note',
+        'raw_import_warnings',
     },
     'data_table_registry': {
         'id', 'model_id', 'data_type_key', 'table_name', 'display_label',
@@ -57,6 +59,13 @@ REQUIRED_COLUMNS = {
     },
     'auth_sessions': {
         'token_hash', 'user_id', 'created_at', 'expires_at',
+    },
+    'file_objects': {
+        'id', 'sha256', 'size_bytes', 'storage_rel_path', 'created_at',
+    },
+    'flight_raw_files': {
+        'id', 'flight_id', 'file_object_id', 'original_name',
+        'original_rel_path', 'data_type_key', 'source_mtime', 'created_at',
     },
 }
 
@@ -219,11 +228,36 @@ CREATE TABLE IF NOT EXISTS flights (
     record_altitude REAL,
     record_wind_speed REAL,
     record_note TEXT DEFAULT '',
+    raw_import_warnings TEXT DEFAULT '',
     -- Dedup boundary: same aircraft + date + session_key. source_path is
     -- stored for provenance only and intentionally excluded from the unique
     -- constraint (a folder may be moved and re-imported from a new path).
     UNIQUE(aircraft_id, flight_date, session_key)
 );
+
+-- Content-addressed raw file object store. Files are physically stored under
+-- DATA_DIR/objects/sha256/<prefix>/<sha256>.<ext>, while business ownership is
+-- resolved through flight_raw_files.
+CREATE TABLE IF NOT EXISTS file_objects (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256           TEXT NOT NULL UNIQUE,
+    size_bytes       INTEGER NOT NULL,
+    storage_rel_path TEXT NOT NULL,
+    created_at       TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS flight_raw_files (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    flight_id         INTEGER NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
+    file_object_id    INTEGER NOT NULL REFERENCES file_objects(id),
+    original_name     TEXT NOT NULL,
+    original_rel_path TEXT NOT NULL,
+    data_type_key     TEXT,
+    source_mtime      REAL,
+    created_at        TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(flight_id, file_object_id, original_rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_flight_raw_files_flight ON flight_raw_files(flight_id);
 
 -- Data table registry (maps model × data_type → table_name)
 CREATE TABLE IF NOT EXISTS data_table_registry (
