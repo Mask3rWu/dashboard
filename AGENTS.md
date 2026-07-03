@@ -25,7 +25,7 @@ npm run dev          # 开发模式（Vite HMR）
 
 ## 打包
 
-**最小依赖原则：用 `.venv` 打包，避免 Anaconda 全量环境导致体积膨胀和依赖冲突。**
+**最小依赖原则：用** `.venv` **打包，避免 Anaconda 全量环境导致体积膨胀和依赖冲突。**
 
 ```bash
 cd frontend && npm run build && cd ..

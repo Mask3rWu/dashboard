@@ -1469,7 +1469,16 @@ _server_error = None
 
 
 def _build_log_config():
-    """Build a log config that works in PyInstaller frozen (no-console) mode."""
+    """Build a uvicorn log config for PyInstaller frozen (no-console) mode.
+
+    Why this exists: under ``console=False`` (FlightAnalyzer.spec), PyInstaller
+    leaves ``sys.stdout`` as ``None``. uvicorn's default formatter calls
+    ``sys.stdout.isatty()`` and crashes with ``AttributeError: 'NoneType'
+    object has no attribute 'isatty'``. This config forces ``use_colors=False``
+    and routes both handlers to ``ext://sys.stderr`` (which is still attached),
+    sidestepping the ``None`` stdout. Dev mode (non-frozen) keeps uvicorn's
+    default config via ``run_server`` so colored output is preserved.
+    """
     return {
         "version": 1,
         "disable_existing_loggers": False,

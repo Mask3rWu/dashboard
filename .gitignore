@@ -27,3 +27,9 @@ Thumbs.db
 data/
 data.db
 *.export.json
+
+# Others
+.understand-anything/
+docs/
+*export.json
+generate_requirements_docx.ps1
