@@ -190,6 +190,86 @@ export interface SyncExportResult {
   parsed_sha256: string;
 }
 
+export interface SyncImportModelPlan {
+  source_model_id: number;
+  source_name: string;
+  matched_model?: { id: number; name: string } | null;
+  requires_confirmation: boolean;
+  default_action: 'use_existing' | 'create';
+  create_name: string;
+}
+
+export interface SyncImportAircraftPlan {
+  source_aircraft_id: number;
+  source_model_id: number;
+  source_name: string;
+  target_model_id?: number | null;
+  matched_aircraft?: { id: number; name: string } | null;
+  existing_aircraft: { id: number; name: string }[];
+  requires_mapping: boolean;
+  default_action: 'use_existing' | 'create';
+  create_name: string;
+}
+
+export interface SyncImportPreview {
+  package_path: string;
+  summary: {
+    source_node_id?: string;
+    source_environment?: string;
+    exported_at?: string;
+    flight_count: number;
+    aircraft_count: number;
+    model_count: number;
+    date_from?: string | null;
+    date_to?: string | null;
+    package_version: number;
+    schema_version: number;
+    compatible: boolean;
+    import_path: 'parsed_sqlite' | 'raw_reparse_required';
+  };
+  model_plans: SyncImportModelPlan[];
+  aircraft_plans: SyncImportAircraftPlan[];
+  duplicates: {
+    source_flight_id: number;
+    source_name?: string;
+    target_flight_id: number;
+    target_name: string;
+    target_aircraft_id: number;
+  }[];
+  warnings: string[];
+}
+
+export interface SyncImportRequest {
+  package_path: string;
+  model_actions: {
+    source_model_id: number;
+    action: 'use_existing' | 'create';
+    target_model_id?: number | null;
+    name?: string | null;
+  }[];
+  aircraft_mappings: {
+    source_aircraft_id: number;
+    action: 'use_existing' | 'create';
+    target_aircraft_id?: number | null;
+    name?: string | null;
+  }[];
+  conflict_policy: 'skip' | 'update_records';
+}
+
+export interface SyncImportReport {
+  id: number;
+  status: 'success' | 'partial' | 'failed' | string;
+  imported_flights: unknown[];
+  skipped_flights: unknown[];
+  updated_flights: unknown[];
+  created_models: unknown[];
+  created_aircraft: unknown[];
+  warnings: unknown[];
+  failures: unknown[];
+  raw_files?: { attached: number; warnings: number };
+  parsed_rows?: number;
+}
+
 export interface SessionPreview {
   aircraft_serial: string;
   session_key: string;
@@ -474,6 +554,16 @@ export const exportSyncPackage = (flightIds: number[]) =>
   request<SyncExportResult>('/sync/export', {
     method: 'POST',
     body: JSON.stringify({ flight_ids: flightIds }),
+  });
+export const previewSyncImport = (packagePath: string) =>
+  request<SyncImportPreview>('/sync/import/preview', {
+    method: 'POST',
+    body: JSON.stringify({ package_path: packagePath }),
+  });
+export const importSyncPackage = (payload: SyncImportRequest) =>
+  request<SyncImportReport>('/sync/import', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>

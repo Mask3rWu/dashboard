@@ -42,6 +42,7 @@ from backend.format_configs import (
 from backend.scanner import scan_folder_sessions
 from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend.sync_package import export_package
+from backend.sync_import import preview_import, import_package, get_import_report
 from backend import analysis
 
 from datetime import datetime
@@ -289,6 +290,31 @@ class CreateUserRequest(BaseModel):
 
 class SyncExportRequest(BaseModel):
     flight_ids: list[int]
+
+
+class SyncImportPreviewRequest(BaseModel):
+    package_path: str
+
+
+class SyncModelAction(BaseModel):
+    source_model_id: int
+    action: str
+    target_model_id: int | None = None
+    name: str | None = None
+
+
+class SyncAircraftMapping(BaseModel):
+    source_aircraft_id: int
+    action: str
+    target_aircraft_id: int | None = None
+    name: str | None = None
+
+
+class SyncImportRequest(BaseModel):
+    package_path: str
+    model_actions: list[SyncModelAction] = []
+    aircraft_mappings: list[SyncAircraftMapping] = []
+    conflict_policy: str = "skip"
 
 
 def _public_user(user):
@@ -1286,6 +1312,54 @@ def post_sync_export(req: SyncExportRequest):
         return result
     except ValueError as e:
         raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/import/preview")
+def post_sync_import_preview(req: SyncImportPreviewRequest):
+    """Read a .fapkg package and return the import plan without writing data."""
+    conn = get_db()
+    try:
+        return preview_import(conn, req.package_path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/import")
+def post_sync_import(req: SyncImportRequest):
+    """Import a confirmed field sync package into the current database."""
+    if req.conflict_policy not in ("skip", "update_records"):
+        raise HTTPException(400, "Unsupported conflict_policy")
+    conn = get_db()
+    try:
+        options = {
+            "model_actions": [
+                _model_dump(item, exclude_unset=True) for item in req.model_actions
+            ],
+            "aircraft_mappings": [
+                _model_dump(item, exclude_unset=True) for item in req.aircraft_mappings
+            ],
+            "conflict_policy": req.conflict_policy,
+        }
+        report = import_package(conn, req.package_path, options)
+        return report
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/api/sync/imports/{import_id}")
+def get_sync_import(import_id: int):
+    conn = get_db()
+    try:
+        report = get_import_report(conn, import_id)
+        if not report:
+            raise HTTPException(404, "Import report not found")
+        return report
     finally:
         conn.close()
 

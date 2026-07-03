@@ -478,6 +478,8 @@ export default function App() {
                 <ImportPage
                   onImported={onDataChanged}
                   canDeleteFlights={hasCapability(appContext, 'delete_flights')}
+                  environment={appContext?.environment}
+                  isLoggedIn={!!appContext?.user}
                 />
               </ErrorBoundary>
             </div>

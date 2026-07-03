@@ -22,7 +22,7 @@ CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
     'app_settings', 'users', 'auth_sessions',
-    'file_objects', 'flight_raw_files',
+    'file_objects', 'flight_raw_files', 'sync_imports',
 }
 REQUIRED_COLUMNS = {
     'aircraft_models': {
@@ -66,6 +66,10 @@ REQUIRED_COLUMNS = {
     'flight_raw_files': {
         'id', 'flight_id', 'file_object_id', 'original_name',
         'original_rel_path', 'data_type_key', 'source_mtime', 'created_at',
+    },
+    'sync_imports': {
+        'id', 'package_path', 'source_node_id', 'status', 'report_json',
+        'created_at',
     },
 }
 
@@ -258,6 +262,16 @@ CREATE TABLE IF NOT EXISTS flight_raw_files (
     UNIQUE(flight_id, file_object_id, original_rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_flight_raw_files_flight ON flight_raw_files(flight_id);
+
+-- Offline sync import reports for research-network package ingestion.
+CREATE TABLE IF NOT EXISTS sync_imports (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_path   TEXT NOT NULL,
+    source_node_id TEXT,
+    status         TEXT NOT NULL,
+    report_json    TEXT NOT NULL,
+    created_at     TEXT DEFAULT (datetime('now','localtime'))
+);
 
 -- Data table registry (maps model × data_type → table_name)
 CREATE TABLE IF NOT EXISTS data_table_registry (

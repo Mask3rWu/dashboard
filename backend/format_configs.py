@@ -687,7 +687,7 @@ def generate_index_sql(model_id, data_type_key):
 # Column registry and data table registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-def register_model_tables(conn, model_id, config=None):
+def register_model_tables(conn, model_id, config=None, commit=True):
     """Create all data tables and populate registry for a new model.
 
     If a ``config`` dict is provided it is used directly; otherwise the
@@ -760,7 +760,8 @@ def register_model_tables(conn, model_id, config=None):
 
         count += 1
 
-    conn.commit()
+    if commit:
+        conn.commit()
     logger.info(f"Registered {count} tables for model {model_id}")
     return count
 
