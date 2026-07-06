@@ -25,14 +25,14 @@ SYNC_PROTOCOL_VERSION = 1
 APP_VERSION = "2.0.0"
 EXPORT_DIR = os.path.join(DATA_DIR, "sync_exports")
 
-_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 def _q(identifier: str) -> str:
-    if not _SAFE_IDENTIFIER.match(identifier):
+    value = str(identifier or "")
+    if not value or "\x00" in value:
         raise ValueError(f"Unsafe SQL identifier: {identifier}")
-    return f'"{identifier}"'
+    return f'"{value.replace(chr(34), chr(34) + chr(34))}"'
 
 
 def _dict(row) -> dict:
