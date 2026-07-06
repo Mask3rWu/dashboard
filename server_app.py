@@ -7,20 +7,28 @@ Run with:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
+import traceback
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+from backend.config import load_app_config
+
+load_app_config()
 
 from backend import auth as auth_helpers
 from backend import server_database as db
 from backend import server_sync
 
+
+logger = logging.getLogger("flight_analyzer.server")
 
 app = FastAPI(title="Flight Analyzer Server", version="0.2.0")
 app.add_middleware(
@@ -29,6 +37,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(
+        "Unhandled server error %s %s: %s\n%s",
+        request.method,
+        request.url.path,
+        exc,
+        traceback.format_exc(),
+    )
+    detail = str(exc) or "Internal Server Error"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": detail[:1000], "error_type": type(exc).__name__},
+    )
 
 
 class LoginRequest(BaseModel):
