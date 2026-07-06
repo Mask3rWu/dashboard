@@ -139,6 +139,27 @@ def auth_me(
     return _request_get_json(url, token=token, timeout=timeout)
 
 
+def login(
+    base_url: str,
+    username: str,
+    password: str,
+    *,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/auth/login"
+    return _request_json(url, {"username": username, "password": password}, token=None, timeout=timeout)
+
+
+def logout(
+    base_url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/auth/logout"
+    return _request_json(url, {}, token=token, timeout=timeout)
+
+
 def preflight(
     base_url: str,
     manifest: dict[str, Any],
