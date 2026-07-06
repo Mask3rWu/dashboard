@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 
 UPLOAD_QUEUE_STATES = ("pending_upload", "dirty", "upload_failed")
+
+
+def now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_setting(conn, key: str, default: str) -> str:
@@ -132,6 +137,142 @@ def validate_uploadable_flights(conn, flight_ids: list[int]) -> list[dict]:
     if invalid:
         raise ValueError(f"架次不在上传队列中: {invalid}")
     return [found[fid] for fid in clean_ids]
+
+
+def create_sync_run(conn, run_type: str) -> int:
+    if run_type not in {"push", "pull", "full"}:
+        raise ValueError(f"Unsupported sync run type: {run_type}")
+    conn.execute(
+        "INSERT INTO sync_runs (run_type, status, started_at) VALUES (?, 'running', ?)",
+        (run_type, now_text()),
+    )
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def finish_sync_run(
+    conn,
+    run_id: int,
+    status: str,
+    *,
+    summary: dict | None = None,
+    error: dict | None = None,
+) -> None:
+    if status not in {"success", "failed"}:
+        raise ValueError(f"Unsupported sync run status: {status}")
+    conn.execute(
+        """UPDATE sync_runs
+           SET status=?, finished_at=?, summary_json=?, error_json=?
+           WHERE id=?""",
+        (
+            status,
+            now_text(),
+            json.dumps(summary or {}, ensure_ascii=False),
+            json.dumps(error or {}, ensure_ascii=False) if error else None,
+            int(run_id),
+        ),
+    )
+
+
+def _json_error(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def mark_upload_failed(conn, flight_ids: list[int], error: dict) -> None:
+    clean_ids = sorted({int(fid) for fid in flight_ids})
+    if not clean_ids:
+        return
+    placeholders = ",".join("?" for _ in clean_ids)
+    conn.execute(
+        f"""UPDATE flights
+            SET sync_state='upload_failed',
+                sync_error_json=?,
+                updated_at=updated_at
+            WHERE id IN ({placeholders})
+              AND sync_state IN ('pending_upload', 'dirty', 'upload_failed', 'syncing')""",
+        [_json_error(error), *clean_ids],
+    )
+
+
+def mark_conflict(conn, flight_ids: list[int], report: dict) -> None:
+    clean_ids = sorted({int(fid) for fid in flight_ids})
+    if not clean_ids:
+        return
+    conflict_ids = {
+        int(item["source_id"])
+        for item in (report.get("conflicts") or [])
+        if item.get("entity_type") == "flight" and item.get("source_id") is not None
+    }
+    if not conflict_ids:
+        conflict_ids = set(clean_ids)
+    target_ids = sorted(set(clean_ids) & conflict_ids)
+    if not target_ids:
+        target_ids = clean_ids
+    placeholders = ",".join("?" for _ in target_ids)
+    conn.execute(
+        f"""UPDATE flights
+            SET sync_state='conflict',
+                sync_error_json=?
+            WHERE id IN ({placeholders})""",
+        [_json_error({"phase": "preflight", "report": report}), *target_ids],
+    )
+
+
+def _apply_table_mappings(conn, table: str, mappings: list[dict], synced_at: str) -> int:
+    applied = 0
+    for item in mappings or []:
+        source_id = item.get("source_id")
+        server_id = item.get("server_id")
+        if source_id is None or server_id is None:
+            continue
+        server_version = item.get("server_version") or 1
+        conn.execute(
+            f"""UPDATE {table}
+                SET server_id=?,
+                    server_version=?,
+                    sync_state='synced',
+                    last_sync_at=?,
+                    sync_error_json=NULL
+                WHERE id=?""",
+            (int(server_id), int(server_version), synced_at, int(source_id)),
+        )
+        applied += 1
+    return applied
+
+
+def apply_push_report(conn, report: dict, selected_flight_ids: list[int]) -> dict:
+    """Write server mappings from a successful push report into local sync fields."""
+    mappings = report.get("mappings") or {}
+    synced_at = now_text()
+    applied = {
+        "models": _apply_table_mappings(conn, "aircraft_models", mappings.get("models") or [], synced_at),
+        "aircraft": _apply_table_mappings(conn, "aircraft", mappings.get("aircraft") or [], synced_at),
+        "flights": _apply_table_mappings(conn, "flights", mappings.get("flights") or [], synced_at),
+        "file_objects": _apply_table_mappings(conn, "file_objects", mappings.get("file_objects") or [], synced_at),
+        "raw_files": _apply_table_mappings(conn, "flight_raw_files", mappings.get("raw_files") or [], synced_at),
+    }
+    mapped_flight_ids = {
+        int(item["source_id"])
+        for item in (mappings.get("flights") or [])
+        if item.get("source_id") is not None and item.get("server_id") is not None
+    }
+    missing = sorted(set(int(fid) for fid in selected_flight_ids) - mapped_flight_ids)
+    if missing:
+        mark_upload_failed(
+            conn,
+            missing,
+            {
+                "phase": "writeback",
+                "message": "Server push succeeded but did not return mappings for these flights",
+                "flight_ids": missing,
+            },
+        )
+    conn.execute(
+        """INSERT INTO app_settings (key, value, updated_at)
+           VALUES ('last_successful_push_at', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+        (synced_at, synced_at),
+    )
+    return {"applied": applied, "missing_flight_ids": missing, "synced_at": synced_at}
 
 
 def list_existing_models(conn) -> list[dict]:

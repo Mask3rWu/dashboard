@@ -1,0 +1,159 @@
+"""Local client helpers for pushing sync bundles to the collaboration server."""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import uuid
+import zipfile
+import urllib.error
+import urllib.request
+from typing import Any
+
+
+class SyncClientError(RuntimeError):
+    """Raised when the local sync proxy cannot complete a server request."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, response: Any = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = response
+
+    def to_error_json(self, phase: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "phase": phase,
+            "message": str(self),
+        }
+        if self.status_code is not None:
+            payload["status_code"] = self.status_code
+        if self.response is not None:
+            payload["response"] = self.response
+        return payload
+
+
+def normalize_base_url(base_url: str | None) -> str:
+    text = (base_url or "").strip().rstrip("/")
+    if not text:
+        raise SyncClientError("SERVER_BASE_URL is not configured")
+    return text
+
+
+def read_bundle_manifest(bundle_path: str) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            with zf.open("manifest.json") as f:
+                manifest = json.loads(f.read().decode("utf-8"))
+    except FileNotFoundError as exc:
+        raise SyncClientError(f"Bundle does not exist: {bundle_path}") from exc
+    except KeyError as exc:
+        raise SyncClientError("Bundle is missing manifest.json") from exc
+    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SyncClientError(f"Cannot read bundle manifest: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise SyncClientError("Bundle manifest must be a JSON object")
+    return manifest
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    token = (token or "").strip()
+    if not token:
+        return {}
+    if token.lower().startswith("bearer "):
+        return {"Authorization": token}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _decode_response(raw: bytes) -> Any:
+    text = raw.decode("utf-8", errors="replace")
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw": text}
+
+
+def _request_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    token: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        **_auth_headers(token),
+    }
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            parsed = _decode_response(resp.read())
+    except urllib.error.HTTPError as exc:
+        parsed = _decode_response(exc.read())
+        message = parsed.get("detail") if isinstance(parsed, dict) else None
+        raise SyncClientError(message or f"Server returned HTTP {exc.code}", status_code=exc.code, response=parsed) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SyncClientError("Server returned a non-object JSON response", response=parsed)
+    return parsed
+
+
+def preflight(
+    base_url: str,
+    manifest: dict[str, Any],
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/sync/preflight"
+    return _request_json(url, {"manifest": manifest, "client_cursor": manifest.get("base_server_cursor")}, token=token, timeout=timeout)
+
+
+def _multipart_body(field_name: str, file_path: str) -> tuple[bytes, str]:
+    boundary = f"----FlightAnalyzerSync{uuid.uuid4().hex}"
+    filename = os.path.basename(file_path) or "bundle.fapkg"
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    parts = [
+        f"--{boundary}\r\n".encode("ascii"),
+        (
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8"),
+    ]
+    with open(file_path, "rb") as f:
+        parts.append(f.read())
+    parts.extend([b"\r\n", f"--{boundary}--\r\n".encode("ascii")])
+    return b"".join(parts), boundary
+
+
+def push_bundle(
+    base_url: str,
+    bundle_path: str,
+    *,
+    token: str | None = None,
+    timeout: float = 300.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/sync/push"
+    body, boundary = _multipart_body("bundle", bundle_path)
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Accept": "application/json",
+        **_auth_headers(token),
+    }
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            parsed = _decode_response(resp.read())
+    except urllib.error.HTTPError as exc:
+        parsed = _decode_response(exc.read())
+        message = parsed.get("detail") if isinstance(parsed, dict) else None
+        raise SyncClientError(message or f"Server returned HTTP {exc.code}", status_code=exc.code, response=parsed) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SyncClientError("Server returned a non-object JSON response", response=parsed)
+    return parsed

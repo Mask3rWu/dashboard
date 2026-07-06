@@ -43,7 +43,7 @@ from backend.scanner import scan_folder_sessions
 from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend.sync_package import export_package
 from backend.sync_import import preview_import, import_package, get_import_report
-from backend import flight_repository, user_repository, sync_repository
+from backend import flight_repository, user_repository, sync_repository, sync_client
 from backend import runtime_context
 from backend import analysis
 
@@ -314,6 +314,7 @@ class SyncExportRequest(BaseModel):
 
 class SyncPushBatchRequest(BaseModel):
     flight_ids: list[int] | None = None
+    server_token: str | None = None
 
 
 class SyncImportPreviewRequest(BaseModel):
@@ -1303,6 +1304,18 @@ def _json_or_none(value: str | None):
         return {"raw": value}
 
 
+def _server_token(req: SyncPushBatchRequest, request: Request) -> str | None:
+    if req.server_token:
+        return req.server_token
+    token = request.headers.get("x-server-token")
+    if token:
+        return token.strip()
+    auth = request.headers.get("authorization")
+    if auth:
+        return auth.strip()
+    return None
+
+
 @app.get("/api/sync/queue")
 def get_sync_queue():
     """Return local flights waiting for upload-oriented synchronization."""
@@ -1334,15 +1347,9 @@ def post_sync_export(req: SyncExportRequest):
         conn.close()
 
 
-@app.post("/api/sync/push")
 @app.post("/api/sync/push-batch")
 def post_sync_push_batch(req: SyncPushBatchRequest):
-    """Generate the internal push_batch bundle for selected queued flights.
-
-    Stage 3 stops at local bundle generation. Server preflight/upload and local
-    state writeback are added in later stages, so this endpoint does not mutate
-    sync_state.
-    """
+    """Generate the internal push_batch bundle for selected queued flights."""
     conn = get_db()
     try:
         if req.flight_ids is None:
@@ -1359,6 +1366,145 @@ def post_sync_push_batch(req: SyncPushBatchRequest):
         }
     except ValueError as e:
         raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/push")
+@app.post("/api/sync/retry")
+def post_sync_push(req: SyncPushBatchRequest, request: Request):
+    """Push selected queued flights to the configured collaboration server."""
+    conn = get_db()
+    run_id = None
+    selected_ids: list[int] = []
+    try:
+        if req.flight_ids is None:
+            flight_ids = [int(item["id"]) for item in sync_repository.list_upload_queue(conn)]
+        else:
+            flight_ids = req.flight_ids
+        selected = sync_repository.validate_uploadable_flights(conn, flight_ids)
+        skipped_dirty = [item for item in selected if item.get("sync_state") == "dirty"]
+        selected = [item for item in selected if item.get("sync_state") != "dirty"]
+        selected_ids = [int(item["id"]) for item in selected]
+        if not selected_ids:
+            raise ValueError("dirty 元数据推送需要服务器更新协议支持，当前阶段不会自动标记为已同步")
+        if not runtime_context.get_sync_enabled(conn):
+            raise sync_client.SyncClientError("SYNC_ENABLED is false")
+        server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+        run_id = sync_repository.create_sync_run(conn, "push")
+        bundle = export_package(conn, selected_ids, bundle_kind="push_batch")
+        conn.commit()
+
+        manifest = sync_client.read_bundle_manifest(bundle["path"])
+        token = _server_token(req, request)
+        preflight = sync_client.preflight(server_base_url, manifest, token=token)
+        if preflight.get("status") == "conflict" or preflight.get("conflicts"):
+            sync_repository.mark_conflict(conn, selected_ids, preflight)
+            summary = {
+                "status": "conflict",
+                "selected_flight_ids": selected_ids,
+                "bundle": bundle,
+                "preflight": preflight,
+            }
+            sync_repository.finish_sync_run(
+                conn,
+                run_id,
+                "failed",
+                summary=summary,
+                error={"phase": "preflight", "report": preflight},
+            )
+            conn.commit()
+            return {
+                "ok": False,
+                "status": "conflict",
+                "run_id": run_id,
+                "selected_flights": selected,
+                "skipped_dirty": skipped_dirty,
+                "bundle": bundle,
+                "preflight": preflight,
+                "summary": sync_repository.upload_queue_summary(conn),
+            }
+
+        server_report = sync_client.push_bundle(server_base_url, bundle["path"], token=token)
+        if not server_report.get("ok"):
+            error = {"phase": "push", "report": server_report}
+            if server_report.get("status") == "conflict" or server_report.get("conflicts"):
+                sync_repository.mark_conflict(conn, selected_ids, server_report)
+            else:
+                sync_repository.mark_upload_failed(conn, selected_ids, error)
+            sync_repository.finish_sync_run(
+                conn,
+                run_id,
+                "failed",
+                summary={"selected_flight_ids": selected_ids, "bundle": bundle, "preflight": preflight},
+                error=error,
+            )
+            conn.commit()
+            return {
+                "ok": False,
+                "status": server_report.get("status") or "failed",
+                "run_id": run_id,
+                "selected_flights": selected,
+                "skipped_dirty": skipped_dirty,
+                "bundle": bundle,
+                "preflight": preflight,
+                "server_report": server_report,
+                "summary": sync_repository.upload_queue_summary(conn),
+            }
+
+        writeback = sync_repository.apply_push_report(conn, server_report, selected_ids)
+        status = "success" if not writeback["missing_flight_ids"] else "partial"
+        run_status = "success" if status == "success" else "failed"
+        response_summary = {
+            "selected_flight_ids": selected_ids,
+            "bundle": bundle,
+            "preflight_summary": preflight.get("summary"),
+            "server_imported": server_report.get("imported"),
+            "server_existing": server_report.get("existing"),
+            "writeback": writeback,
+        }
+        sync_repository.finish_sync_run(conn, run_id, run_status, summary=response_summary)
+        conn.commit()
+        return {
+            "ok": status == "success",
+            "status": status,
+            "run_id": run_id,
+            "selected_flights": selected,
+            "skipped_dirty": skipped_dirty,
+            "bundle": bundle,
+            "preflight": preflight,
+            "server_report": server_report,
+            "writeback": writeback,
+            "summary": sync_repository.upload_queue_summary(conn),
+        }
+    except sync_client.SyncClientError as e:
+        error = e.to_error_json("push")
+        if selected_ids:
+            sync_repository.mark_upload_failed(conn, selected_ids, error)
+        if run_id is not None:
+            sync_repository.finish_sync_run(conn, run_id, "failed", error=error)
+        conn.commit()
+        raise HTTPException(502, error)
+    except ValueError as e:
+        if run_id is not None:
+            sync_repository.finish_sync_run(conn, run_id, "failed", error={"phase": "local", "message": str(e)})
+            conn.commit()
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/api/sync/runs/{run_id}")
+def get_sync_run(run_id: int):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM sync_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Sync run not found")
+        item = dict(row)
+        item["summary"] = _json_or_none(item.get("summary_json"))
+        item["error"] = _json_or_none(item.get("error_json"))
+        return item
     finally:
         conn.close()
 
