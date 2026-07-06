@@ -6,12 +6,19 @@ Run with:
 
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+import json
+import os
+import shutil
+import tempfile
+from typing import Any
+
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend import auth as auth_helpers
 from backend import server_database as db
+from backend import server_sync
 
 
 app = FastAPI(title="Flight Analyzer Server", version="0.2.0")
@@ -198,3 +205,46 @@ def create_model(
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return created
+
+
+@app.post("/api/sync/preflight")
+def sync_preflight(
+    payload: dict[str, Any],
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "sync_push")
+    manifest = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else payload
+    client_cursor = payload.get("client_cursor")
+    if client_cursor is not None and not manifest.get("base_server_cursor"):
+        manifest = {**manifest, "base_server_cursor": client_cursor}
+    try:
+        return server_sync.build_preflight_plan(conn, manifest)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/sync/push")
+def sync_push(
+    bundle: UploadFile = File(...),
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "sync_push")
+    suffix = os.path.splitext(bundle.filename or "")[1] or ".fapkg"
+    fd, tmp_path = tempfile.mkstemp(prefix="flightanalyzer_push_", suffix=suffix)
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as f:
+            shutil.copyfileobj(bundle.file, f)
+        try:
+            return server_sync.import_push_bundle(conn, tmp_path, imported_by=int(user["id"]))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, f"Invalid manifest JSON: {exc}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
