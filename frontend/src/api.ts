@@ -1,5 +1,6 @@
 const BASE = '/api';
 const TOKEN_KEY = 'flight_analyzer_session_token';
+const SERVER_TOKEN_KEY = 'flight_analyzer_server_token';
 
 export function getSessionToken(): string {
   return localStorage.getItem(TOKEN_KEY) || '';
@@ -10,11 +11,21 @@ export function setSessionToken(token: string | null) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+export function getServerToken(): string {
+  return localStorage.getItem(SERVER_TOKEN_KEY) || '';
+}
+
+export function setServerToken(token: string | null) {
+  if (token) localStorage.setItem(SERVER_TOKEN_KEY, token);
+  else localStorage.removeItem(SERVER_TOKEN_KEY);
+}
+
 function parseErrorBody(text: string, fallback: string): string {
   if (!text) return fallback;
   try {
     const body = JSON.parse(text);
-    const detail = body.detail || body.error || fallback;
+    const rawDetail = body.detail || body.error || fallback;
+    const detail = typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail);
     const errorType = body.error_type ? ` (${body.error_type})` : '';
     return `${detail}${errorType}`;
   } catch {
@@ -25,9 +36,11 @@ function parseErrorBody(text: string, fallback: string): string {
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let res: Response;
   const token = getSessionToken();
+  const serverToken = getServerToken();
   const headers = {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(serverToken ? { 'x-server-token': serverToken } : {}),
     ...(options?.headers ?? {}),
   };
   try {
@@ -96,6 +109,12 @@ export interface RuntimeContext {
     last_push_at?: string | null;
     last_pull_at?: string | null;
   };
+}
+
+export interface ServerAuthPayload {
+  user: CurrentUser | null;
+  capabilities: string[];
+  token?: string;
 }
 
 export interface SyncQueueSummary {
@@ -556,6 +575,12 @@ export const updateAppContext = (updates: { environment?: 'research' | 'field'; 
 export const getRuntimeContext = () => request<RuntimeContext>('/runtime/context');
 export const updateRuntimeConfig = (updates: { data_dir?: string; server_base_url?: string; sync_enabled?: boolean }) =>
   request<RuntimeContext>('/runtime/config', { method: 'PATCH', body: JSON.stringify(updates) });
+export const serverLogin = (username: string, password: string) =>
+  request<ServerAuthPayload>('/server-auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+export const serverLogout = () => request<{ ok: boolean }>('/server-auth/logout', { method: 'POST' });
 export const login = (username: string, password: string) =>
   request<AppContext & { token: string }>('/auth/login', {
     method: 'POST',

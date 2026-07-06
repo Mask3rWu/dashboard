@@ -6,13 +6,12 @@ import ModelManager from './pages/ModelManager';
 import SyncPage from './pages/SyncPage';
 import {
   checkHealth, listFlights, listModels, listAircraft,
-  getAppContext, getRuntimeContext, login, logout, changePassword, createUser, setSessionToken,
-  type Flight, type AircraftModel, type Aircraft, type AppContext, type RuntimeContext,
+  getRuntimeContext,
+  type Flight, type AircraftModel, type Aircraft, type Capability, type RuntimeContext,
 } from './api';
 import { Server, Wifi, WifiOff } from 'lucide-react';
 
 type Tab = 'import' | 'models' | 'flight' | 'compare' | 'sync';
-type Capability = AppContext['capabilities'][number];
 
 // ═══════════════════════════════════════════════════════════════
 // Error Boundary — prevents a single component error from
@@ -44,10 +43,6 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNod
     }
     return this.props.children;
   }
-}
-
-function hasCapability(context: AppContext | null, cap: Capability): boolean {
-  return context?.capabilities.includes(cap) ?? false;
 }
 
 function formatTime(value?: string | null) {
@@ -82,207 +77,6 @@ function RuntimeStatus({ runtime, onOpenSync }: { runtime: RuntimeContext | null
   );
 }
 
-function AccountPanel({
-  context,
-  onContextChanged,
-}: {
-  context: AppContext;
-  onContextChanged: (ctx: AppContext) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [loginName, setLoginName] = useState('admin');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [oldPassword, setOldPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [newUsername, setNewUsername] = useState('');
-  const [newUserPassword, setNewUserPassword] = useState('');
-  const [newUserRole, setNewUserRole] = useState<'admin' | 'user'>('user');
-  const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const canManageUsers = context.capabilities.includes('manage_users');
-
-  const submitLogin = async () => {
-    if (!loginName.trim() || !loginPassword) return;
-    setBusy(true);
-    setMessage('');
-    try {
-      const result = await login(loginName.trim(), loginPassword);
-      setSessionToken(result.token);
-      onContextChanged(result);
-      setLoginPassword('');
-      setOpen(false);
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submitLogout = async () => {
-    setBusy(true);
-    try {
-      await logout();
-    } catch {
-      // Local logout should still clear the stored token.
-    } finally {
-      setSessionToken(null);
-      onContextChanged(await getAppContext());
-      setBusy(false);
-      setOpen(false);
-    }
-  };
-
-  const submitPasswordChange = async () => {
-    if (!oldPassword || !newPassword) return;
-    setBusy(true);
-    setMessage('');
-    try {
-      await changePassword(oldPassword, newPassword);
-      setSessionToken(null);
-      setOldPassword('');
-      setNewPassword('');
-      onContextChanged(await getAppContext());
-      setMessage('密码已修改，请重新登录');
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submitCreateUser = async () => {
-    if (!newUsername.trim() || !newUserPassword) return;
-    setBusy(true);
-    setMessage('');
-    try {
-      await createUser(newUsername.trim(), newUserPassword, newUserRole);
-      setNewUsername('');
-      setNewUserPassword('');
-      setNewUserRole('user');
-      setMessage('用户已创建');
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => { setOpen((v) => !v); setMessage(''); }}
-        className="px-2 py-1 text-xs border border-gray-300 rounded bg-white hover:bg-gray-50 text-gray-600"
-      >
-        {context.user ? `${context.user.username} (${context.user.role === 'admin' ? '管理员' : '用户'})` : '登录'}
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-2 w-80 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-4 space-y-4">
-          {!context.user ? (
-            <div className="space-y-2">
-              <div className="text-sm font-medium text-gray-800">登录</div>
-              <input
-                value={loginName}
-                onChange={(e) => setLoginName(e.target.value)}
-                className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                placeholder="用户名"
-              />
-              <input
-                type="password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') submitLogin(); }}
-                className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                placeholder="密码"
-              />
-              <button
-                type="button"
-                disabled={busy}
-                onClick={submitLogin}
-                className="w-full px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
-              >
-                登录
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-gray-800">修改密码</div>
-                <input
-                  type="password"
-                  value={oldPassword}
-                  onChange={(e) => setOldPassword(e.target.value)}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                  placeholder="旧密码"
-                />
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                  placeholder="新密码"
-                />
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={submitPasswordChange}
-                  className="w-full px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
-                >
-                  修改密码
-                </button>
-              </div>
-              {canManageUsers && (
-                <div className="space-y-2 border-t border-gray-100 pt-3">
-                  <div className="text-sm font-medium text-gray-800">新建用户</div>
-                  <input
-                    value={newUsername}
-                    onChange={(e) => setNewUsername(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                    placeholder="用户名"
-                  />
-                  <input
-                    type="password"
-                    value={newUserPassword}
-                    onChange={(e) => setNewUserPassword(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                    placeholder="初始密码"
-                  />
-                  <select
-                    value={newUserRole}
-                    onChange={(e) => setNewUserRole(e.target.value as 'admin' | 'user')}
-                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm bg-white"
-                  >
-                    <option value="user">普通用户</option>
-                    <option value="admin">管理员</option>
-                  </select>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={submitCreateUser}
-                    className="w-full px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
-                  >
-                    创建用户
-                  </button>
-                </div>
-              )}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={submitLogout}
-                className="w-full px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded hover:bg-gray-200 disabled:opacity-50"
-              >
-                退出登录
-              </button>
-            </>
-          )}
-          {message && <div className="text-xs text-red-500 bg-red-50 rounded px-2 py-1">{message}</div>}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function App() {
   const [tab, setTab] = useState<Tab>('flight');
   const [flights, setFlights] = useState<Flight[]>([]);
@@ -290,12 +84,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [initError, setInitError] = useState<string | null>(null);
   const [modelsVersion, setModelsVersion] = useState(0);
-  const [appContext, setAppContextState] = useState<AppContext | null>(null);
   const [runtimeContext, setRuntimeContext] = useState<RuntimeContext | null>(null);
   const hasDeleteCapability = (cap: Capability) =>
-    hasCapability(appContext, cap) || (runtimeContext?.server_capabilities ?? []).includes(cap);
+    (runtimeContext?.server_capabilities ?? []).includes(cap);
   const mergedCapabilities = Array.from(new Set([
-    ...(appContext?.capabilities ?? []),
     ...(runtimeContext?.server_capabilities ?? []),
   ]));
 
@@ -367,8 +159,7 @@ export default function App() {
     setInitError(null);
     try {
       await checkHealth();
-      const [contextData, runtimeData, modelsData, flightsData] = await Promise.all([getAppContext(), getRuntimeContext(), listModels(), listFlights()]);
-      setAppContextState(contextData);
+      const [runtimeData, modelsData, flightsData] = await Promise.all([getRuntimeContext(), listModels(), listFlights()]);
       setRuntimeContext(runtimeData);
       setModels(modelsData.models);
       setFlights(flightsData.flights);
@@ -468,9 +259,6 @@ export default function App() {
         </div>
         <div className="flex items-center gap-3">
           <RuntimeStatus runtime={runtimeContext} onOpenSync={() => setTab('sync')} />
-          {appContext && (
-            <AccountPanel context={appContext} onContextChanged={setAppContextState} />
-          )}
           {flights.length > 0 && (
             <span className="text-xs text-gray-400">{flights.length} 架次已导入</span>
           )}
@@ -505,7 +293,7 @@ export default function App() {
                 <ImportPage
                   onImported={onDataChanged}
                   canDeleteFlights={hasDeleteCapability('delete_flights')}
-                  isLoggedIn={!!appContext?.user}
+                  isLoggedIn={!!runtimeContext?.server_user}
                 />
               </ErrorBoundary>
             </div>
