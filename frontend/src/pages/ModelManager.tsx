@@ -9,7 +9,9 @@ import {
   exportModel, importModel,
   type AircraftModel, type Aircraft, type Flight,
   type DataTypeGroup, type FlightRecordFields, type RawFileItem,
+  type DeleteScope,
 } from '../api';
+import { deleteActionLabel, deleteScopeFor } from '../syncStatus';
 
 interface Props {
   onModelsChanged: () => void;
@@ -356,11 +358,11 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     onModelsChanged();  // refresh flight list so dropdown labels update
   };
 
-  const handleDeleteModel = async (id: number) => {
+  const handleDeleteModel = async (model: AircraftModel) => {
     try {
-      await deleteModel(id);
+      await deleteModel(model.id, deleteScopeFor(model) as DeleteScope);
       setDeletingModelId(null);
-      if (selectedModelId === id) setSelectedModelId(null);
+      if (selectedModelId === model.id) setSelectedModelId(null);
       refresh();
     } catch (e) {
       console.error('删除机型失败:', e);
@@ -386,8 +388,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     refresh();
   };
 
-  const handleDeleteAircraft = async (id: number) => {
-    await deleteAircraft(id);
+  const handleDeleteAircraft = async (aircraftItem: Aircraft) => {
+    await deleteAircraft(aircraftItem.id, deleteScopeFor(aircraftItem) as DeleteScope);
     setDeletingAcId(null);
     if (selectedModelId) loadAircraft(selectedModelId);
     refresh();
@@ -400,8 +402,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     refresh();
   };
 
-  const handleDeleteFlight = async (id: number) => {
-    await deleteFlight(id);
+  const handleDeleteFlight = async (flight: Flight) => {
+    await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
     setDeletingFlightId(null);
     refresh();
   };
@@ -682,10 +684,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       </button>
                       {canDeleteModels && deletingModelId === m.id ? (
                         <span className="text-[10px] text-red-500 whitespace-nowrap">
-                          确认?{' '}
+                          {deleteActionLabel(m)}?{' '}
                           <button
                             type="button"
-                            onClick={() => handleDeleteModel(m.id)}
+                            onClick={() => handleDeleteModel(m)}
                             className="text-red-600 font-bold hover:text-red-700 px-0.5"
                           >是</button>
                           {' / '}
@@ -909,8 +911,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                   </button>
                                   {canDeleteAircraft && deletingAcId === ac.id ? (
                                     <span className="text-xs text-gray-500">
-                                      确认?{' '}
-                                      <button type="button" onClick={() => handleDeleteAircraft(ac.id)} className="text-red-600 font-bold hover:text-red-700">是</button>
+                                      {deleteActionLabel(ac)}?{' '}
+                                      <button type="button" onClick={() => handleDeleteAircraft(ac)} className="text-red-600 font-bold hover:text-red-700">是</button>
                                       {' / '}
                                       <button type="button" onClick={() => setDeletingAcId(null)} className="text-gray-400 hover:text-gray-500">否</button>
                                     </span>
@@ -1006,8 +1008,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                         </button>
                                         {canDeleteFlights && deletingFlightId === f.id ? (
                                           <span className="text-xs text-gray-500" onClick={(e) => e.stopPropagation()}>
-                                            确认?{' '}
-                                            <button type="button" onClick={() => handleDeleteFlight(f.id)} className="text-red-600 font-bold hover:text-red-700">是</button>
+                                            {deleteActionLabel(f)}?{' '}
+                                            <button type="button" onClick={() => handleDeleteFlight(f)} className="text-red-600 font-bold hover:text-red-700">是</button>
                                             {' / '}
                                             <button type="button" onClick={() => setDeletingFlightId(null)} className="text-gray-400 hover:text-gray-500">否</button>
                                           </span>

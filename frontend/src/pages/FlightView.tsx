@@ -9,10 +9,10 @@ import {
   listAircraft,
   type Flight, type ColumnGroup, type AircraftModel, type Aircraft,
   type AlignedData, type AlertItem, type FlightStats, type Preset,
-  type FilterSpec, type FilterPreset,
+  type FilterSpec, type FilterPreset, type DeleteScope,
 } from '../api';
 import FilterBar from '../components/FilterBar';
-import { syncStateClass, syncStateLabel } from '../syncStatus';
+import { deleteActionLabel, deleteScopeFor, syncStateClass, syncStateLabel } from '../syncStatus';
 
 interface Props {
   active: boolean;
@@ -800,11 +800,11 @@ export default function FlightView({
     }
   };
 
-  const handleDeleteFlight = async (id: number) => {
+  const handleDeleteFlight = async (flight: Flight) => {
     try {
-      await deleteFlight(id);
-      if (selectedFlightId === id) {
-        const remaining = flights.filter((f) => f.id !== id);
+      await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
+      if (selectedFlightId === flight.id) {
+        const remaining = flights.filter((f) => f.id !== flight.id);
         onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
       }
       setDeletingFlightId(null);
@@ -828,6 +828,7 @@ export default function FlightView({
     { key: 'correlation', label: '相关性' },
     { key: 'anomaly', label: '异常检测' },
   ];
+  const deletingFlight = deletingFlightId ? flights.find((f) => f.id === deletingFlightId) : null;
 
   return (
     <div className="h-full flex flex-col">
@@ -1005,12 +1006,12 @@ export default function FlightView({
         )}
 
         {/* Inline delete confirmation */}
-        {deletingFlightId && canDeleteFlights && (
+        {deletingFlight && canDeleteFlights && (
           <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-500">确认删除?</span>
+            <span className="text-xs text-gray-500">{deleteActionLabel(deletingFlight)}?</span>
             <button
               type="button"
-              onClick={() => handleDeleteFlight(deletingFlightId)}
+              onClick={() => handleDeleteFlight(deletingFlight)}
               className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500"
             >
               是

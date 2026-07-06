@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+from . import sync_client
 from . import permission_repository
 from .database import DATA_DIR
 
@@ -119,18 +120,31 @@ def _sync_summary(conn) -> dict:
     }
 
 
-def runtime_context(conn) -> dict:
+def _server_auth_context(base_url: str, sync_enabled: bool, token: str | None) -> dict:
+    if not sync_enabled or not base_url or not token:
+        return {"server_user": None, "server_capabilities": []}
+    try:
+        payload = sync_client.auth_me(base_url, token=token, timeout=2)
+    except sync_client.SyncClientError:
+        return {"server_user": None, "server_capabilities": []}
+    return {
+        "server_user": payload.get("user") if isinstance(payload.get("user"), dict) else None,
+        "server_capabilities": payload.get("capabilities") if isinstance(payload.get("capabilities"), list) else [],
+    }
+
+
+def runtime_context(conn, server_token: str | None = None) -> dict:
     local_node_id = get_local_node_id(conn)
     server_base_url = get_server_base_url(conn)
     sync_enabled = get_sync_enabled(conn)
     server = _check_server(server_base_url, sync_enabled)
+    server_auth = _server_auth_context(server_base_url, sync_enabled, server_token)
     return {
         "data_dir": DATA_DIR,
         "sync_enabled": sync_enabled,
         "server_base_url": server_base_url,
         **server,
         "local_node_id": local_node_id,
-        "server_user": None,
-        "server_capabilities": [],
+        **server_auth,
         "sync_summary": _sync_summary(conn),
     }

@@ -332,6 +332,12 @@ class SyncAbandonRequest(BaseModel):
     flight_ids: list[int]
 
 
+class DeleteEntityRequest(BaseModel):
+    scope: str = "auto"
+    reason: str | None = None
+    server_token: str | None = None
+
+
 class SyncImportPreviewRequest(BaseModel):
     package_path: str
 
@@ -544,14 +550,22 @@ def list_models():
     try:
         rows = conn.execute(
             """SELECT am.*,
-               (SELECT COUNT(*) FROM aircraft a WHERE a.model_id = am.id) as aircraft_count,
+               (SELECT COUNT(*) FROM aircraft a
+                WHERE a.model_id = am.id
+                  AND a.deleted_at IS NULL AND a.server_deleted_at IS NULL) as aircraft_count,
                COALESCE((SELECT COUNT(*) FROM flights f
                          JOIN aircraft a2 ON a2.id = f.aircraft_id
-                         WHERE a2.model_id = am.id), 0) as total_flights,
+                         WHERE a2.model_id = am.id
+                           AND f.deleted_at IS NULL AND f.server_deleted_at IS NULL
+                           AND a2.deleted_at IS NULL AND a2.server_deleted_at IS NULL), 0) as total_flights,
                COALESCE((SELECT SUM(f2.duration_sec) FROM flights f2
                          JOIN aircraft a3 ON a3.id = f2.aircraft_id
-                         WHERE a3.model_id = am.id), 0) as total_flight_hours
-               FROM aircraft_models am ORDER BY am.created_at"""
+                         WHERE a3.model_id = am.id
+                           AND f2.deleted_at IS NULL AND f2.server_deleted_at IS NULL
+                           AND a3.deleted_at IS NULL AND a3.server_deleted_at IS NULL), 0) as total_flight_hours
+               FROM aircraft_models am
+               WHERE am.deleted_at IS NULL AND am.server_deleted_at IS NULL
+               ORDER BY am.created_at"""
         ).fetchall()
         return {"models": [dict(r) for r in rows]}
     finally:
@@ -649,34 +663,29 @@ def update_model(model_id: int, req: UpdateModelRequest):
 
 
 @app.delete("/api/models/{model_id}")
-def delete_model(model_id: int, request: Request):
+def delete_model(model_id: int, request: Request, req: DeleteEntityRequest | None = None):
     """Delete a model and all related aircraft, flights, and data (cascade).
     Also deletes the per-model format config file from disk."""
     conn = get_db()
     try:
-        require_capability(conn, request, "delete_models")
-        row = conn.execute("SELECT id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
+        row = conn.execute("SELECT * FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Model not found")
-
-        # Get table names to drop (before cascade deletes registry rows)
-        tables = conn.execute(
-            "SELECT table_name FROM data_table_registry WHERE model_id=?", (model_id,)
-        ).fetchall()
-
-        # Cascade delete: aircraft_models → aircraft → flights → data rows
-        # Also cascades to column_registry and data_table_registry
-        conn.execute("DELETE FROM aircraft_models WHERE id=?", (model_id,))
-
-        # Drop the now-empty per-model data tables
-        for t in tables:
-            try:
-                conn.execute(f"DROP TABLE IF EXISTS {t['table_name']}")
-            except Exception:
-                pass
-
+        scope = _delete_scope(row, req.scope if req else "auto")
+        if scope == "server":
+            server_id = row["server_id"]
+            if server_id is None:
+                raise HTTPException(400, "Model has not been synced to the server")
+            result = _server_delete(conn, request, req, "model", int(server_id))
+            _mark_local_server_deleted(conn, "model", model_id, result)
+            conn.commit()
+            return {"ok": True, "scope": "server", "server": result}
+        _require_local_delete_capability(conn, request, "model")
+        if scope == "local_unsynced" and row["server_id"] is not None:
+            raise HTTPException(400, "Server-backed model cannot be deleted as local_unsynced")
+        _delete_local_model(conn, model_id)
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "scope": scope}
     finally:
         conn.close()
 
@@ -1057,9 +1066,16 @@ def list_aircraft(model_id: int):
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT a.*, (SELECT COUNT(*) FROM flights f WHERE f.aircraft_id = a.id) as flight_count "
-            "FROM aircraft a WHERE a.model_id = ? ORDER BY a.name",
-            (model_id,)
+            """SELECT a.*,
+                      (SELECT COUNT(*) FROM flights f
+                       WHERE f.aircraft_id = a.id
+                         AND f.deleted_at IS NULL AND f.server_deleted_at IS NULL) as flight_count
+               FROM aircraft a
+               WHERE a.model_id = ?
+                 AND a.deleted_at IS NULL
+                 AND a.server_deleted_at IS NULL
+               ORDER BY a.name""",
+            (model_id,),
         ).fetchall()
         return {"aircraft": [dict(r) for r in rows]}
     finally:
@@ -1119,17 +1135,28 @@ def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
 
 
 @app.delete("/api/aircraft/{aircraft_id}")
-def delete_aircraft(aircraft_id: int, request: Request):
+def delete_aircraft(aircraft_id: int, request: Request, req: DeleteEntityRequest | None = None):
     """Delete an aircraft and all its flights (cascade)."""
     conn = get_db()
     try:
-        require_capability(conn, request, "delete_aircraft")
-        row = conn.execute("SELECT id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
+        row = conn.execute("SELECT * FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Aircraft not found")
+        scope = _delete_scope(row, req.scope if req else "auto")
+        if scope == "server":
+            server_id = row["server_id"]
+            if server_id is None:
+                raise HTTPException(400, "Aircraft has not been synced to the server")
+            result = _server_delete(conn, request, req, "aircraft", int(server_id))
+            _mark_local_server_deleted(conn, "aircraft", aircraft_id, result)
+            conn.commit()
+            return {"ok": True, "scope": "server", "server": result}
+        _require_local_delete_capability(conn, request, "aircraft")
+        if scope == "local_unsynced" and row["server_id"] is not None:
+            raise HTTPException(400, "Server-backed aircraft cannot be deleted as local_unsynced")
         conn.execute("DELETE FROM aircraft WHERE id=?", (aircraft_id,))
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "scope": scope}
     finally:
         conn.close()
 
@@ -1185,10 +1212,10 @@ def get_flight(flight_id: int):
 
 
 @app.get("/api/runtime/context")
-def get_runtime_context_api():
+def get_runtime_context_api(request: Request):
     conn = get_db()
     try:
-        payload = runtime_context.runtime_context(conn)
+        payload = runtime_context.runtime_context(conn, _server_token(None, request))
         conn.commit()
         return payload
     finally:
@@ -1196,11 +1223,11 @@ def get_runtime_context_api():
 
 
 @app.patch("/api/runtime/config")
-def patch_runtime_config(req: RuntimeConfigUpdate):
+def patch_runtime_config(req: RuntimeConfigUpdate, request: Request):
     conn = get_db()
     try:
         runtime_context.update_runtime_config(conn, _model_dump(req, exclude_unset=True))
-        payload = runtime_context.runtime_context(conn)
+        payload = runtime_context.runtime_context(conn, _server_token(None, request))
         conn.commit()
         return payload
     except ValueError as e:
@@ -1336,6 +1363,119 @@ def _server_token_from_query(server_token: str | None, request: Request) -> str 
     if server_token:
         return server_token
     return _server_token(None, request)
+
+
+SERVER_BACKED_DELETE_STATES = {"synced", "server_cache", "dirty"}
+
+
+def _delete_scope(row, requested_scope: str | None) -> str:
+    scope = (requested_scope or "auto").strip()
+    if scope not in {"auto", "local_cache", "local_unsynced", "server"}:
+        raise HTTPException(400, "Unsupported delete scope")
+    if scope != "auto":
+        return scope
+
+    sync_state = row["sync_state"] if "sync_state" in row.keys() else None
+    server_id = row["server_id"] if "server_id" in row.keys() else None
+    if server_id is not None and sync_state in SERVER_BACKED_DELETE_STATES:
+        return "server"
+    if sync_state == "server_deleted" or server_id is not None:
+        return "local_cache"
+    return "local_unsynced"
+
+
+def _require_local_delete_capability(conn, request: Request, entity_type: str) -> None:
+    capability = {
+        "model": "delete_models",
+        "aircraft": "delete_aircraft",
+        "flight": "delete_flights",
+    }[entity_type]
+    require_capability(conn, request, capability)
+
+
+def _server_delete(
+    conn,
+    request: Request,
+    req: DeleteEntityRequest | None,
+    entity_type: str,
+    server_id: int,
+) -> dict:
+    if not runtime_context.get_sync_enabled(conn):
+        raise HTTPException(400, "SYNC_ENABLED is false")
+    server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+    try:
+        return sync_client.delete_entity(
+            server_base_url,
+            entity_type,
+            server_id,
+            reason=req.reason if req else None,
+            token=_server_token(req, request),
+        )
+    except sync_client.SyncClientError as e:
+        status = e.status_code or 502
+        raise HTTPException(status, e.to_error_json(f"delete_{entity_type}"))
+
+
+def _mark_local_server_deleted(conn, entity_type: str, local_id: int, result: dict) -> None:
+    deleted_at = result.get("deleted_at") or datetime.now().isoformat(timespec="seconds")
+    version = int(result.get("version") or 1)
+    if entity_type == "model":
+        conn.execute(
+            """UPDATE aircraft_models
+               SET sync_state='server_deleted', server_deleted_at=?, server_version=?,
+                   last_sync_at=datetime('now','localtime')
+               WHERE id=?""",
+            (deleted_at, version, local_id),
+        )
+        conn.execute(
+            """UPDATE aircraft
+               SET sync_state='server_deleted', server_deleted_at=?,
+                   last_sync_at=datetime('now','localtime')
+               WHERE model_id=?""",
+            (deleted_at, local_id),
+        )
+        conn.execute(
+            """UPDATE flights
+               SET sync_state='server_deleted', server_deleted_at=?,
+                   last_sync_at=datetime('now','localtime')
+               WHERE aircraft_id IN (SELECT id FROM aircraft WHERE model_id=?)""",
+            (deleted_at, local_id),
+        )
+    elif entity_type == "aircraft":
+        conn.execute(
+            """UPDATE aircraft
+               SET sync_state='server_deleted', server_deleted_at=?, server_version=?,
+                   last_sync_at=datetime('now','localtime')
+               WHERE id=?""",
+            (deleted_at, version, local_id),
+        )
+        conn.execute(
+            """UPDATE flights
+               SET sync_state='server_deleted', server_deleted_at=?,
+                   last_sync_at=datetime('now','localtime')
+               WHERE aircraft_id=?""",
+            (deleted_at, local_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE flights
+               SET sync_state='server_deleted', server_deleted_at=?, server_version=?,
+                   last_sync_at=datetime('now','localtime')
+               WHERE id=?""",
+            (deleted_at, version, local_id),
+        )
+
+
+def _delete_local_model(conn, model_id: int) -> None:
+    tables = conn.execute(
+        "SELECT table_name FROM data_table_registry WHERE model_id=?", (model_id,)
+    ).fetchall()
+    conn.execute("DELETE FROM aircraft_models WHERE id=?", (model_id,))
+    for t in tables:
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {t['table_name']}")
+        except Exception:
+            pass
 
 
 @app.get("/api/sync/queue")
@@ -1764,14 +1904,28 @@ def get_sync_import(import_id: int):
 
 
 @app.delete("/api/flights/{flight_id}")
-def delete_flight(flight_id: int, request: Request):
+def delete_flight(flight_id: int, request: Request, req: DeleteEntityRequest | None = None):
     """Delete a flight and all its data."""
     conn = get_db()
     try:
-        require_capability(conn, request, "delete_flights")
+        row = conn.execute("SELECT * FROM flights WHERE id=?", (flight_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Flight not found")
+        scope = _delete_scope(row, req.scope if req else "auto")
+        if scope == "server":
+            server_id = row["server_id"]
+            if server_id is None:
+                raise HTTPException(400, "Flight has not been synced to the server")
+            result = _server_delete(conn, request, req, "flight", int(server_id))
+            _mark_local_server_deleted(conn, "flight", flight_id, result)
+            conn.commit()
+            return {"ok": True, "scope": "server", "server": result}
+        _require_local_delete_capability(conn, request, "flight")
+        if scope == "local_unsynced" and row["server_id"] is not None:
+            raise HTTPException(400, "Server-backed flight cannot be deleted as local_unsynced")
         flight_repository.delete_flight(conn, flight_id)
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "scope": scope}
     finally:
         conn.close()
 

@@ -842,7 +842,16 @@ def _upsert_pull_models(
         target_name = row.get("name") or f"server_model_{server_id}"
         if existing:
             local_id = int(existing["id"])
-            if existing["sync_state"] == "dirty":
+            deleted_at = row.get("deleted_at")
+            if deleted_at and existing["sync_state"] == "dirty":
+                conn.execute(
+                    """UPDATE aircraft_models
+                       SET sync_state='conflict', sync_error_json=?
+                       WHERE id=?""",
+                    (json.dumps({"phase": "pull", "reason": "server_deleted_dirty_local"}, ensure_ascii=False), local_id),
+                )
+                report["conflicts"].append({"entity_type": "model", "server_id": server_id, "local_id": local_id})
+            elif existing["sync_state"] == "dirty":
                 conn.execute(
                     """UPDATE aircraft_models
                        SET sync_state='conflict', sync_error_json=?
@@ -855,7 +864,7 @@ def _upsert_pull_models(
                     """UPDATE aircraft_models
                        SET name=?, client_uid=COALESCE(client_uid, ?),
                            source_node_id=?, sync_origin='server',
-                           sync_state='server_cache', server_version=?,
+                           sync_state=?, server_version=?,
                            last_sync_at=datetime('now','localtime'), sync_error_json=NULL,
                            updated_at=COALESCE(?, updated_at),
                            server_deleted_at=?
@@ -864,12 +873,15 @@ def _upsert_pull_models(
                         target_name,
                         row.get("client_uid"),
                         row.get("source_node_id") or source_node_id,
+                        "server_deleted" if deleted_at else "server_cache",
                         row.get("version") or 1,
                         row.get("updated_at"),
-                        row.get("deleted_at"),
+                        deleted_at,
                         local_id,
                     ),
                 )
+                if deleted_at:
+                    report["tombstones"]["models"] += 1
             register_model_tables(conn, local_id, config=config, commit=False)
             model_map[server_id] = local_id
             report["updated"]["models"] += 1
@@ -881,13 +893,14 @@ def _upsert_pull_models(
                (client_uid, server_id, source_node_id, sync_origin, sync_state,
                 server_version, last_sync_at, name, has_header, has_uav_send_id,
                 extract_serial_from_path, created_at, updated_at, server_deleted_at)
-               VALUES (?, ?, ?, 'server', 'server_cache', ?, datetime('now','localtime'),
+               VALUES (?, ?, ?, 'server', ?, ?, datetime('now','localtime'),
                        ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')),
                        COALESCE(?, datetime('now','localtime')), ?)""",
             (
                 row.get("client_uid"),
                 server_id,
                 row.get("source_node_id") or source_node_id,
+                "server_deleted" if row.get("deleted_at") else "server_cache",
                 row.get("version") or 1,
                 create_name,
                 1 if row.get("has_header", 1) else 0,
@@ -902,6 +915,8 @@ def _upsert_pull_models(
         register_model_tables(conn, local_id, config=config, commit=False)
         model_map[server_id] = local_id
         report["created"]["models"] += 1
+        if row.get("deleted_at"):
+            report["tombstones"]["models"] += 1
     return model_map
 
 
@@ -918,7 +933,14 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
         target_name = row.get("name") or f"server_aircraft_{server_id}"
         if existing:
             local_id = int(existing["id"])
-            if existing["sync_state"] == "dirty":
+            deleted_at = row.get("deleted_at")
+            if deleted_at and existing["sync_state"] == "dirty":
+                conn.execute(
+                    "UPDATE aircraft SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                    (json.dumps({"phase": "pull", "reason": "server_deleted_dirty_local"}, ensure_ascii=False), local_id),
+                )
+                report["conflicts"].append({"entity_type": "aircraft", "server_id": server_id, "local_id": local_id})
+            elif existing["sync_state"] == "dirty":
                 conn.execute(
                     "UPDATE aircraft SET sync_state='conflict', sync_error_json=? WHERE id=?",
                     (json.dumps({"phase": "pull", "reason": "dirty_aircraft"}, ensure_ascii=False), local_id),
@@ -929,7 +951,7 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
                     """UPDATE aircraft
                        SET model_id=?, name=?, client_uid=COALESCE(client_uid, ?),
                            source_node_id=?, sync_origin='server',
-                           sync_state='server_cache', server_version=?,
+                           sync_state=?, server_version=?,
                            last_sync_at=datetime('now','localtime'), sync_error_json=NULL,
                            updated_at=COALESCE(?, updated_at),
                            server_deleted_at=?
@@ -939,12 +961,15 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
                         target_name,
                         row.get("client_uid"),
                         row.get("source_node_id") or source_node_id,
+                        "server_deleted" if deleted_at else "server_cache",
                         row.get("version") or 1,
                         row.get("updated_at"),
-                        row.get("deleted_at"),
+                        deleted_at,
                         local_id,
                     ),
                 )
+                if deleted_at:
+                    report["tombstones"]["aircraft"] += 1
             aircraft_map[server_id] = local_id
             report["updated"]["aircraft"] += 1
             continue
@@ -954,13 +979,14 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
                (client_uid, server_id, source_node_id, sync_origin, sync_state,
                 server_version, last_sync_at, model_id, name, created_at, updated_at,
                 server_deleted_at)
-               VALUES (?, ?, ?, 'server', 'server_cache', ?, datetime('now','localtime'),
+               VALUES (?, ?, ?, 'server', ?, ?, datetime('now','localtime'),
                        ?, ?, COALESCE(?, datetime('now','localtime')),
                        COALESCE(?, datetime('now','localtime')), ?)""",
             (
                 row.get("client_uid"),
                 server_id,
                 row.get("source_node_id") or source_node_id,
+                "server_deleted" if row.get("deleted_at") else "server_cache",
                 row.get("version") or 1,
                 local_model_id,
                 create_name,
@@ -972,6 +998,8 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
         local_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         aircraft_map[server_id] = local_id
         report["created"]["aircraft"] += 1
+        if row.get("deleted_at"):
+            report["tombstones"]["aircraft"] += 1
     return aircraft_map
 
 
@@ -1291,7 +1319,7 @@ def import_pull_bundle(conn, package_path: str) -> dict:
         "status": "running",
         "created": {"models": 0, "aircraft": 0, "flights": 0},
         "updated": {"models": 0, "aircraft": 0, "flights": 0},
-        "tombstones": {"flights": 0},
+        "tombstones": {"models": 0, "aircraft": 0, "flights": 0},
         "conflicts": [],
         "warnings": [{"scope": "package", "message": w} for w in package_warnings],
         "raw_files": {"attached": 0, "warnings": 0},

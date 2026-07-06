@@ -169,6 +169,12 @@ export interface AircraftModel {
   id: number;
   name: string;
   created_at: string;
+  client_uid?: string | null;
+  server_id?: number | null;
+  sync_origin?: string | null;
+  sync_state?: Flight['sync_state'];
+  server_version?: number | null;
+  server_deleted_at?: string | null;
   aircraft_count?: number;
   total_flights?: number;
   total_flight_hours?: number;
@@ -179,6 +185,12 @@ export interface Aircraft {
   model_id: number;
   name: string;
   created_at: string;
+  client_uid?: string | null;
+  server_id?: number | null;
+  sync_origin?: string | null;
+  sync_state?: Flight['sync_state'];
+  server_version?: number | null;
+  server_deleted_at?: string | null;
   flight_count?: number;
 }
 
@@ -580,7 +592,10 @@ export const createModelFromScan = (
   });
 export const updateModel = (id: number, name: string) =>
   request('/models/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
-export const deleteModel = (id: number) => request('/models/' + id, { method: 'DELETE' });
+export type DeleteScope = 'auto' | 'local_cache' | 'local_unsynced' | 'server';
+const deleteBody = (scope: DeleteScope = 'auto') => ({ scope });
+export const deleteModel = (id: number, scope: DeleteScope = 'auto') =>
+  request('/models/' + id, { method: 'DELETE', body: JSON.stringify(deleteBody(scope)) });
 
 export const exportModel = (modelId: number) =>
   request<{ ok: boolean; path: string; filename: string }>(`/models/${modelId}/export`);
@@ -623,7 +638,8 @@ export const createAircraft = (modelId: number, name: string) =>
   request<Aircraft>(`/models/${modelId}/aircraft`, { method: 'POST', body: JSON.stringify({ name }) });
 export const updateAircraft = (id: number, name: string) =>
   request('/aircraft/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
-export const deleteAircraft = (id: number) => request('/aircraft/' + id, { method: 'DELETE' });
+export const deleteAircraft = (id: number, scope: DeleteScope = 'auto') =>
+  request('/aircraft/' + id, { method: 'DELETE', body: JSON.stringify(deleteBody(scope)) });
 
 // Flights
 export interface FlightListFilters {
@@ -686,7 +702,8 @@ export const abandonSync = (flightIds: number[]) =>
     method: 'POST',
     body: JSON.stringify({ flight_ids: flightIds }),
   });
-export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
+export const deleteFlight = (id: number, scope: DeleteScope = 'auto') =>
+  request('/flights/' + id, { method: 'DELETE', body: JSON.stringify(deleteBody(scope)) });
 export const updateFlight = (id: number, name: string) =>
   request('/flights/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
 export const updateFlightRecord = (id: number, record: FlightRecordFields) =>

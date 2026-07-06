@@ -292,6 +292,12 @@ export default function App() {
   const [modelsVersion, setModelsVersion] = useState(0);
   const [appContext, setAppContextState] = useState<AppContext | null>(null);
   const [runtimeContext, setRuntimeContext] = useState<RuntimeContext | null>(null);
+  const hasDeleteCapability = (cap: Capability) =>
+    hasCapability(appContext, cap) || (runtimeContext?.server_capabilities ?? []).includes(cap);
+  const mergedCapabilities = Array.from(new Set([
+    ...(appContext?.capabilities ?? []),
+    ...(runtimeContext?.server_capabilities ?? []),
+  ]));
 
   // ── Three-level selection: Model → Aircraft → Flight ──
   const [models, setModels] = useState<AircraftModel[]>([]);
@@ -498,7 +504,7 @@ export default function App() {
               <ErrorBoundary>
                 <ImportPage
                   onImported={onDataChanged}
-                  canDeleteFlights={hasCapability(appContext, 'delete_flights')}
+                  canDeleteFlights={hasDeleteCapability('delete_flights')}
                   isLoggedIn={!!appContext?.user}
                 />
               </ErrorBoundary>
@@ -517,7 +523,7 @@ export default function App() {
                   aircraft={aircraft}
                   selectedAircraftId={selectedAircraftId}
                   onSelectAircraft={setSelectedAircraftId}
-                  canDeleteFlights={hasCapability(appContext, 'delete_flights')}
+                  canDeleteFlights={hasDeleteCapability('delete_flights')}
                 />
               </ErrorBoundary>
             </div>
@@ -541,7 +547,7 @@ export default function App() {
                   onNavigateToFlight={navigateToFlight}
                   flights={flights}
                   modelsVersion={modelsVersion}
-                  capabilities={appContext?.capabilities ?? []}
+                  capabilities={mergedCapabilities}
                 />
               </ErrorBoundary>
             </div>

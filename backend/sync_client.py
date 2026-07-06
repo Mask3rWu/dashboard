@@ -81,6 +81,7 @@ def _request_json(
     *,
     token: str | None,
     timeout: float,
+    method: str = "POST",
 ) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -88,7 +89,7 @@ def _request_json(
         "Accept": "application/json",
         **_auth_headers(token),
     }
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             parsed = _decode_response(resp.read())
@@ -128,6 +129,16 @@ def _request_get_json(
     return parsed
 
 
+def auth_me(
+    base_url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/auth/me"
+    return _request_get_json(url, token=token, timeout=timeout)
+
+
 def preflight(
     base_url: str,
     manifest: dict[str, Any],
@@ -137,6 +148,26 @@ def preflight(
 ) -> dict[str, Any]:
     url = f"{normalize_base_url(base_url)}/sync/preflight"
     return _request_json(url, {"manifest": manifest, "client_cursor": manifest.get("base_server_cursor")}, token=token, timeout=timeout)
+
+
+def delete_entity(
+    base_url: str,
+    entity_type: str,
+    server_id: int,
+    *,
+    reason: str | None = None,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    endpoint = {
+        "model": "models",
+        "aircraft": "aircraft",
+        "flight": "flights",
+    }.get(entity_type)
+    if endpoint is None:
+        raise SyncClientError(f"Unsupported delete entity type: {entity_type}")
+    url = f"{normalize_base_url(base_url)}/{endpoint}/{int(server_id)}"
+    return _request_json(url, {"reason": reason or ""}, token=token, timeout=timeout, method="DELETE")
 
 
 def _multipart_body(field_name: str, file_path: str) -> tuple[bytes, str]:

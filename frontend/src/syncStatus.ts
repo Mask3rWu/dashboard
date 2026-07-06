@@ -42,6 +42,19 @@ export function syncStateClass(state?: string | null) {
   return 'bg-gray-50 text-gray-600 border-gray-200';
 }
 
+export function deleteScopeFor(item?: { sync_state?: string | null; server_id?: number | null }) {
+  if (!item?.server_id) return 'local_unsynced';
+  if (item.sync_state === 'synced' || item.sync_state === 'server_cache' || item.sync_state === 'dirty') return 'server';
+  return 'local_cache';
+}
+
+export function deleteActionLabel(item?: { sync_state?: string | null; server_id?: number | null }) {
+  const scope = deleteScopeFor(item);
+  if (scope === 'server') return '删除服务器数据';
+  if (scope === 'local_cache') return '清理本地缓存';
+  return '删除本地未同步数据';
+}
+
 export function matchesSyncStateFilter(flight: Pick<Flight, 'sync_state'>, filter: SyncStateFilter) {
   const state = flight.sync_state || '';
   if (filter === 'all') return true;

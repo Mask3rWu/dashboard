@@ -1563,48 +1563,109 @@ def soft_delete_entity(
     if not row:
         raise KeyError(entity_type)
     now = db.utcnow()
-    version = int(row._mapping.get("version") or 1) + 1
-    if entity_type == "flight":
+    affected: list[dict[str, Any]] = []
+
+    def mark_deleted(target_type: str, target_table: str, target_id: int, *, with_reason: bool = False) -> int | None:
+        target = conn.execute(
+            db.text(f"SELECT id, version, deleted_at FROM {target_table} WHERE id=:id"),
+            {"id": target_id},
+        ).first()
+        if not target:
+            return None
+        if target._mapping.get("deleted_at") is not None:
+            version_value = int(target._mapping.get("version") or 1)
+            affected.append(
+                {
+                    "entity_type": target_type,
+                    "id": target_id,
+                    "version": version_value,
+                    "already_deleted": True,
+                }
+            )
+            return version_value
+        version_value = int(target._mapping.get("version") or 1) + 1
+        if with_reason:
+            conn.execute(
+                db.text(
+                    """UPDATE flights
+                       SET deleted_at=:deleted_at, deleted_by=:deleted_by, delete_reason=:reason,
+                           version=:version, updated_at=:updated_at
+                       WHERE id=:id"""
+                ),
+                {
+                    "deleted_at": now,
+                    "deleted_by": deleted_by,
+                    "reason": reason or "",
+                    "version": version_value,
+                    "updated_at": now,
+                    "id": target_id,
+                },
+            )
+        else:
+            conn.execute(
+                db.text(
+                    f"""UPDATE {target_table}
+                        SET deleted_at=:deleted_at, version=:version, updated_at=:updated_at
+                        WHERE id=:id"""
+                ),
+                {"deleted_at": now, "version": version_value, "updated_at": now, "id": target_id},
+            )
         conn.execute(
             db.text(
-                """UPDATE flights
-                   SET deleted_at=:deleted_at, deleted_by=:deleted_by, delete_reason=:reason,
-                       version=:version, updated_at=:updated_at
-                   WHERE id=:id"""
+                """INSERT INTO sync_changes
+                     (entity_type, entity_id, change_type, entity_version, changed_at,
+                      changed_by_node_id, package_id)
+                   VALUES (:entity_type, :entity_id, 'delete', :entity_version,
+                           :changed_at, NULL, NULL)"""
             ),
             {
-                "deleted_at": now,
-                "deleted_by": deleted_by,
-                "reason": reason or "",
-                "version": version,
-                "updated_at": now,
-                "id": entity_id,
+                "entity_type": "aircraft_model" if target_type == "model" else target_type,
+                "entity_id": target_id,
+                "entity_version": version_value,
+                "changed_at": now,
             },
         )
-    else:
-        conn.execute(
-            db.text(
-                f"""UPDATE {table}
-                    SET deleted_at=:deleted_at, version=:version, updated_at=:updated_at
-                    WHERE id=:id"""
-            ),
-            {"deleted_at": now, "version": version, "updated_at": now, "id": entity_id},
+        affected.append(
+            {
+                "entity_type": target_type,
+                "id": target_id,
+                "version": version_value,
+                "already_deleted": False,
+            }
         )
-    change_type = "delete"
-    conn.execute(
-        db.text(
-            """INSERT INTO sync_changes
-                 (entity_type, entity_id, change_type, entity_version, changed_at,
-                  changed_by_node_id, package_id)
-               VALUES (:entity_type, :entity_id, :change_type, :entity_version,
-                       :changed_at, NULL, NULL)"""
-        ),
-        {
-            "entity_type": "aircraft_model" if entity_type == "model" else entity_type,
-            "entity_id": entity_id,
-            "change_type": change_type,
-            "entity_version": version,
-            "changed_at": now,
-        },
-    )
-    return {"ok": True, "entity_type": entity_type, "id": entity_id, "version": version, "deleted_at": now}
+        return version_value
+
+    version = mark_deleted(entity_type, table, entity_id, with_reason=entity_type == "flight")
+    if entity_type == "model":
+        aircraft_rows = conn.execute(
+            db.text("SELECT id FROM aircraft WHERE model_id=:model_id"),
+            {"model_id": entity_id},
+        ).fetchall()
+        aircraft_ids = [int(item._mapping["id"]) for item in aircraft_rows]
+        for aircraft_id in aircraft_ids:
+            mark_deleted("aircraft", "aircraft", aircraft_id)
+        if aircraft_ids:
+            placeholders = ", ".join(f":aid{i}" for i, _ in enumerate(aircraft_ids))
+            params = {f"aid{i}": aid for i, aid in enumerate(aircraft_ids)}
+            flight_rows = conn.execute(
+                db.text(f"SELECT id FROM flights WHERE aircraft_id IN ({placeholders})"),
+                params,
+            ).fetchall()
+            for flight_row in flight_rows:
+                mark_deleted("flight", "flights", int(flight_row._mapping["id"]), with_reason=True)
+    elif entity_type == "aircraft":
+        flight_rows = conn.execute(
+            db.text("SELECT id FROM flights WHERE aircraft_id=:aircraft_id"),
+            {"aircraft_id": entity_id},
+        ).fetchall()
+        for flight_row in flight_rows:
+            mark_deleted("flight", "flights", int(flight_row._mapping["id"]), with_reason=True)
+
+    return {
+        "ok": True,
+        "entity_type": entity_type,
+        "id": entity_id,
+        "version": version,
+        "deleted_at": now,
+        "affected": affected,
+    }

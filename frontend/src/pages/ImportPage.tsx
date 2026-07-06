@@ -7,8 +7,17 @@ import {
   type AircraftModel, type Aircraft, type FlightRecordFields,
   type SyncExportModelNode, type SyncExportResult,
   type SyncImportPreview, type SyncImportReport,
+  type DeleteScope,
 } from '../api';
-import { SYNC_STATE_FILTERS, matchesSyncStateFilter, syncStateClass, syncStateLabel, type SyncStateFilter } from '../syncStatus';
+import {
+  SYNC_STATE_FILTERS,
+  deleteActionLabel,
+  deleteScopeFor,
+  matchesSyncStateFilter,
+  syncStateClass,
+  syncStateLabel,
+  type SyncStateFilter,
+} from '../syncStatus';
 
 
 interface Props {
@@ -578,8 +587,8 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
     try { const data = await listFlights(); setFlights(data.flights); } catch {}
   }, []);
 
-  const handleDelete = async (id: number) => {
-    await deleteFlight(id);
+  const handleDelete = async (flight: Flight) => {
+    await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
     setDeletingFlightId(null);
     loadFlights();
     onImported();
@@ -1224,8 +1233,8 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
                 </div>
                 {canDeleteFlights && deletingFlightId === f.id ? (
                   <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500">确认删除?</span>
-                    <button onClick={() => handleDelete(f.id)} className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500">是</button>
+                    <span className="text-xs text-gray-500">{deleteActionLabel(f)}?</span>
+                    <button onClick={() => handleDelete(f)} className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500">是</button>
                     <button onClick={() => setDeletingFlightId(null)} className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">否</button>
                   </div>
                 ) : canDeleteFlights ? (
