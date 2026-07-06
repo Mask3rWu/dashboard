@@ -12,8 +12,9 @@ import shutil
 import tempfile
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend import auth as auth_helpers
@@ -72,6 +73,10 @@ class CreateModelRequest(BaseModel):
     has_uav_send_id: bool = False
     extract_serial_from_path: bool = False
     data_types: dict[str, ServerDataType] = Field(default_factory=dict)
+
+
+class DeleteRequest(BaseModel):
+    reason: str | None = None
 
 
 @app.on_event("startup")
@@ -248,3 +253,92 @@ def sync_push(
             os.remove(tmp_path)
         except OSError:
             pass
+
+
+@app.get("/api/sync/changes")
+def sync_changes(
+    since: str | None = Query(default=None),
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "sync_pull")
+    return server_sync.list_changes(conn, since)
+
+
+@app.get("/api/sync/bundle")
+def sync_bundle(
+    since: str | None = Query(default=None),
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "sync_pull")
+    result = server_sync.build_pull_bundle(conn, since)
+    return FileResponse(
+        result["path"],
+        media_type="application/octet-stream",
+        filename=os.path.basename(result["path"]),
+        headers={
+            "X-Sync-Cursor": str(result.get("current_cursor") or ""),
+            "X-Sync-Package-Id": str(result.get("package_id") or ""),
+        },
+    )
+
+
+@app.delete("/api/models/{model_id}")
+def delete_model(
+    model_id: int,
+    req: DeleteRequest | None = None,
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "delete_models")
+    try:
+        return server_sync.soft_delete_entity(
+            conn,
+            "model",
+            model_id,
+            deleted_by=int(user["id"]),
+            reason=(req.reason if req else None),
+        )
+    except KeyError:
+        raise HTTPException(404, "Model not found")
+
+
+@app.delete("/api/aircraft/{aircraft_id}")
+def delete_aircraft(
+    aircraft_id: int,
+    req: DeleteRequest | None = None,
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "delete_aircraft")
+    try:
+        return server_sync.soft_delete_entity(
+            conn,
+            "aircraft",
+            aircraft_id,
+            deleted_by=int(user["id"]),
+            reason=(req.reason if req else None),
+        )
+    except KeyError:
+        raise HTTPException(404, "Aircraft not found")
+
+
+@app.delete("/api/flights/{flight_id}")
+def delete_flight(
+    flight_id: int,
+    req: DeleteRequest | None = None,
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "delete_flights")
+    try:
+        return server_sync.soft_delete_entity(
+            conn,
+            "flight",
+            flight_id,
+            deleted_by=int(user["id"]),
+            reason=(req.reason if req else None),
+        )
+    except KeyError:
+        raise HTTPException(404, "Flight not found")

@@ -8,6 +8,7 @@ import os
 import uuid
 import zipfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -102,6 +103,31 @@ def _request_json(
     return parsed
 
 
+def _request_get_json(
+    url: str,
+    *,
+    token: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    headers = {
+        "Accept": "application/json",
+        **_auth_headers(token),
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            parsed = _decode_response(resp.read())
+    except urllib.error.HTTPError as exc:
+        parsed = _decode_response(exc.read())
+        message = parsed.get("detail") if isinstance(parsed, dict) else None
+        raise SyncClientError(message or f"Server returned HTTP {exc.code}", status_code=exc.code, response=parsed) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SyncClientError("Server returned a non-object JSON response", response=parsed)
+    return parsed
+
+
 def preflight(
     base_url: str,
     manifest: dict[str, Any],
@@ -157,3 +183,51 @@ def push_bundle(
     if not isinstance(parsed, dict):
         raise SyncClientError("Server returned a non-object JSON response", response=parsed)
     return parsed
+
+
+def changes(
+    base_url: str,
+    since: str | int | None = None,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    query = "" if since in (None, "") else f"?since={urllib.parse.quote(str(since))}"
+    url = f"{normalize_base_url(base_url)}/sync/changes{query}"
+    return _request_get_json(url, token=token, timeout=timeout)
+
+
+def download_bundle(
+    base_url: str,
+    since: str | int | None,
+    destination_path: str,
+    *,
+    token: str | None = None,
+    timeout: float = 300.0,
+) -> dict[str, Any]:
+    query = "" if since in (None, "") else f"?since={urllib.parse.quote(str(since))}"
+    url = f"{normalize_base_url(base_url)}/sync/bundle{query}"
+    headers = {
+        "Accept": "application/octet-stream",
+        **_auth_headers(token),
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            os.makedirs(os.path.dirname(os.path.abspath(destination_path)), exist_ok=True)
+            with open(destination_path, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except urllib.error.HTTPError as exc:
+        parsed = _decode_response(exc.read())
+        message = parsed.get("detail") if isinstance(parsed, dict) else None
+        raise SyncClientError(message or f"Server returned HTTP {exc.code}", status_code=exc.code, response=parsed) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    manifest = read_bundle_manifest(destination_path)
+    if manifest.get("bundle_kind") != "pull_bundle":
+        raise SyncClientError("Server returned a non-pull bundle", response=manifest)
+    return manifest

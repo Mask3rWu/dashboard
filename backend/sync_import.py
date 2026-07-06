@@ -761,3 +761,572 @@ def get_import_report(conn, import_id: int) -> dict | None:
     except Exception:
         data["report"] = {}
     return data
+
+
+def _server_row_by_id(rows: list[dict], server_id: int) -> dict | None:
+    for row in rows:
+        if int(row.get("id") or 0) == int(server_id):
+            return row
+    return None
+
+
+def _find_local_by_server_id(conn, table: str, server_id: int):
+    return conn.execute(
+        f"SELECT * FROM {_q(table)} WHERE server_id=?",
+        (int(server_id),),
+    ).fetchone()
+
+
+def _build_config_from_pull_rows(manifest: dict, source_model_id: int, parsed: sqlite3.Connection) -> dict:
+    config = _read_model_config_from_zip(manifest["_package_path"], source_model_id)
+    if config:
+        return config
+    model = _server_row_by_id(manifest.get("models") or [], source_model_id) or {}
+    config = {
+        "has_header": bool(model.get("has_header", 1)),
+        "has_uav_send_id": bool(model.get("has_uav_send_id", 0)),
+        "extract_serial_from_path": bool(model.get("extract_serial_from_path", 0)),
+        "data_types": {},
+    }
+    dtr_rows = _sqlite_table_rows(parsed, "data_table_registry")
+    col_rows = _sqlite_table_rows(parsed, "column_registry")
+    for dtr in [row for row in dtr_rows if int(row.get("source_model_id") or 0) == int(source_model_id)]:
+        data_type_key = dtr.get("data_type_key")
+        try:
+            patterns = json.loads(dtr.get("file_patterns") or "[]")
+        except Exception:
+            patterns = []
+        config["data_types"][data_type_key] = {
+            "display_label": dtr.get("display_label") or data_type_key,
+            "file_patterns": patterns if isinstance(patterns, list) else [],
+            "is_alert": bool(dtr.get("is_alert")),
+            "columns": [
+                {
+                    "name": col.get("column_name"),
+                    "label": col.get("display_label"),
+                    "unit": col.get("unit") or "",
+                    "type": col.get("data_type") or "REAL",
+                    "ordinal": col.get("ordinal"),
+                    "scale_factor": col.get("scale_factor") or 1.0,
+                }
+                for col in col_rows
+                if int(col.get("source_model_id") or 0) == int(source_model_id)
+                and col.get("data_type_key") == data_type_key
+            ],
+        }
+    return config
+
+
+def _sqlite_table_rows(conn: sqlite3.Connection, table: str) -> list[dict]:
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if not exists:
+        return []
+    return [dict(row) for row in conn.execute(f"SELECT * FROM {_q(table)}").fetchall()]
+
+
+def _upsert_pull_models(
+    conn,
+    manifest: dict,
+    parsed: sqlite3.Connection,
+    report: dict,
+) -> dict[int, int]:
+    model_map: dict[int, int] = {}
+    source_node_id = manifest.get("source_node_id") or "server"
+    for row in manifest.get("models") or []:
+        server_id = int(row["id"])
+        existing = _find_local_by_server_id(conn, "aircraft_models", server_id)
+        config = _build_config_from_pull_rows(manifest, server_id, parsed)
+        target_name = row.get("name") or f"server_model_{server_id}"
+        if existing:
+            local_id = int(existing["id"])
+            if existing["sync_state"] == "dirty":
+                conn.execute(
+                    """UPDATE aircraft_models
+                       SET sync_state='conflict', sync_error_json=?
+                       WHERE id=?""",
+                    (json.dumps({"phase": "pull", "reason": "dirty_model"}, ensure_ascii=False), local_id),
+                )
+                report["conflicts"].append({"entity_type": "model", "server_id": server_id, "local_id": local_id})
+            else:
+                conn.execute(
+                    """UPDATE aircraft_models
+                       SET name=?, client_uid=COALESCE(client_uid, ?),
+                           source_node_id=?, sync_origin='server',
+                           sync_state='server_cache', server_version=?,
+                           last_sync_at=datetime('now','localtime'), sync_error_json=NULL,
+                           updated_at=COALESCE(?, updated_at),
+                           server_deleted_at=?
+                       WHERE id=?""",
+                    (
+                        target_name,
+                        row.get("client_uid"),
+                        row.get("source_node_id") or source_node_id,
+                        row.get("version") or 1,
+                        row.get("updated_at"),
+                        row.get("deleted_at"),
+                        local_id,
+                    ),
+                )
+            register_model_tables(conn, local_id, config=config, commit=False)
+            model_map[server_id] = local_id
+            report["updated"]["models"] += 1
+            continue
+
+        create_name = _unique_name(conn, "aircraft_models", target_name)
+        conn.execute(
+            """INSERT INTO aircraft_models
+               (client_uid, server_id, source_node_id, sync_origin, sync_state,
+                server_version, last_sync_at, name, has_header, has_uav_send_id,
+                extract_serial_from_path, created_at, updated_at, server_deleted_at)
+               VALUES (?, ?, ?, 'server', 'server_cache', ?, datetime('now','localtime'),
+                       ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')),
+                       COALESCE(?, datetime('now','localtime')), ?)""",
+            (
+                row.get("client_uid"),
+                server_id,
+                row.get("source_node_id") or source_node_id,
+                row.get("version") or 1,
+                create_name,
+                1 if row.get("has_header", 1) else 0,
+                1 if row.get("has_uav_send_id", 0) else 0,
+                1 if row.get("extract_serial_from_path", 0) else 0,
+                row.get("created_at"),
+                row.get("updated_at"),
+                row.get("deleted_at"),
+            ),
+        )
+        local_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        register_model_tables(conn, local_id, config=config, commit=False)
+        model_map[server_id] = local_id
+        report["created"]["models"] += 1
+    return model_map
+
+
+def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], report: dict) -> dict[int, int]:
+    aircraft_map: dict[int, int] = {}
+    source_node_id = manifest.get("source_node_id") or "server"
+    for row in manifest.get("aircraft") or []:
+        server_id = int(row["id"])
+        local_model_id = model_map.get(int(row.get("model_id") or 0))
+        if not local_model_id:
+            report["warnings"].append({"scope": "aircraft", "server_id": server_id, "message": "model not available"})
+            continue
+        existing = _find_local_by_server_id(conn, "aircraft", server_id)
+        target_name = row.get("name") or f"server_aircraft_{server_id}"
+        if existing:
+            local_id = int(existing["id"])
+            if existing["sync_state"] == "dirty":
+                conn.execute(
+                    "UPDATE aircraft SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                    (json.dumps({"phase": "pull", "reason": "dirty_aircraft"}, ensure_ascii=False), local_id),
+                )
+                report["conflicts"].append({"entity_type": "aircraft", "server_id": server_id, "local_id": local_id})
+            else:
+                conn.execute(
+                    """UPDATE aircraft
+                       SET model_id=?, name=?, client_uid=COALESCE(client_uid, ?),
+                           source_node_id=?, sync_origin='server',
+                           sync_state='server_cache', server_version=?,
+                           last_sync_at=datetime('now','localtime'), sync_error_json=NULL,
+                           updated_at=COALESCE(?, updated_at),
+                           server_deleted_at=?
+                       WHERE id=?""",
+                    (
+                        local_model_id,
+                        target_name,
+                        row.get("client_uid"),
+                        row.get("source_node_id") or source_node_id,
+                        row.get("version") or 1,
+                        row.get("updated_at"),
+                        row.get("deleted_at"),
+                        local_id,
+                    ),
+                )
+            aircraft_map[server_id] = local_id
+            report["updated"]["aircraft"] += 1
+            continue
+        create_name = _unique_name(conn, "aircraft", target_name, "AND model_id=?", (local_model_id,))
+        conn.execute(
+            """INSERT INTO aircraft
+               (client_uid, server_id, source_node_id, sync_origin, sync_state,
+                server_version, last_sync_at, model_id, name, created_at, updated_at,
+                server_deleted_at)
+               VALUES (?, ?, ?, 'server', 'server_cache', ?, datetime('now','localtime'),
+                       ?, ?, COALESCE(?, datetime('now','localtime')),
+                       COALESCE(?, datetime('now','localtime')), ?)""",
+            (
+                row.get("client_uid"),
+                server_id,
+                row.get("source_node_id") or source_node_id,
+                row.get("version") or 1,
+                local_model_id,
+                create_name,
+                row.get("created_at"),
+                row.get("updated_at"),
+                row.get("deleted_at"),
+            ),
+        )
+        local_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        aircraft_map[server_id] = local_id
+        report["created"]["aircraft"] += 1
+    return aircraft_map
+
+
+def _upsert_pull_flights(conn, manifest: dict, aircraft_map: dict[int, int], report: dict) -> tuple[dict[int, int], set[int]]:
+    flight_map: dict[int, int] = {}
+    importable_source_ids: set[int] = set()
+    source_node_id = manifest.get("source_node_id") or "server"
+    for row in manifest.get("flights") or []:
+        server_id = int(row["id"])
+        deleted_at = row.get("deleted_at")
+        existing = _find_local_by_server_id(conn, "flights", server_id)
+        if deleted_at:
+            if existing:
+                local_id = int(existing["id"])
+                if existing["sync_state"] == "dirty":
+                    conn.execute(
+                        "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                        (json.dumps({"phase": "pull", "reason": "server_deleted_dirty_local"}, ensure_ascii=False), local_id),
+                    )
+                    report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
+                else:
+                    conn.execute(
+                        """UPDATE flights
+                           SET sync_state='server_deleted', server_deleted_at=?,
+                               server_version=?, last_sync_at=datetime('now','localtime')
+                           WHERE id=?""",
+                        (deleted_at, row.get("version") or 1, local_id),
+                    )
+                    report["tombstones"]["flights"] += 1
+            continue
+        local_aircraft_id = aircraft_map.get(int(row.get("aircraft_id") or 0))
+        if not local_aircraft_id:
+            report["warnings"].append({"scope": "flight", "server_id": server_id, "message": "aircraft not available"})
+            continue
+
+        if not existing:
+            existing = conn.execute(
+                """SELECT * FROM flights
+                   WHERE aircraft_id=? AND flight_date IS ? AND session_key=?""",
+                (local_aircraft_id, row.get("flight_date"), row.get("session_key") or ""),
+            ).fetchone()
+            if existing and existing["server_id"] not in (None, server_id):
+                conn.execute(
+                    "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                    (
+                        json.dumps({"phase": "pull", "reason": "business_key_conflict", "server_id": server_id}, ensure_ascii=False),
+                        int(existing["id"]),
+                    ),
+                )
+                report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": int(existing["id"])})
+                continue
+
+        columns = [
+            "name", "source_path", "session_key", "flight_date", "start_time",
+            "end_time", "duration_sec", "total_rows", *_RECORD_COLUMNS,
+        ]
+        values = [
+            row.get("name") or row.get("session_key") or f"server_flight_{server_id}",
+            row.get("source_path") or f"sync://server/{server_id}",
+            row.get("session_key") or "",
+            row.get("flight_date"),
+            row.get("start_time"),
+            row.get("end_time"),
+            row.get("duration_sec"),
+            row.get("total_rows") or 0,
+            *_record_values(row),
+        ]
+        if existing:
+            local_id = int(existing["id"])
+            if existing["server_id"] is None and existing["sync_state"] in {
+                "pending_upload",
+                "upload_failed",
+                "conflict",
+                "local_only",
+            }:
+                conn.execute(
+                    "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                    (
+                        json.dumps(
+                            {"phase": "pull", "reason": "local_unsynced_business_key_conflict", "server_id": server_id},
+                            ensure_ascii=False,
+                        ),
+                        local_id,
+                    ),
+                )
+                report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
+                continue
+            if existing["sync_state"] == "dirty":
+                conn.execute(
+                    "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                    (json.dumps({"phase": "pull", "reason": "dirty_flight", "server_id": server_id}, ensure_ascii=False), local_id),
+                )
+                report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
+                continue
+            conn.execute(
+                f"""UPDATE flights
+                    SET client_uid=COALESCE(client_uid, ?),
+                        server_id=?, source_node_id=?, sync_origin='server',
+                        sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
+                        server_version=?, last_sync_at=datetime('now','localtime'),
+                        sync_error_json=NULL, aircraft_id=?,
+                        {', '.join(f'{column}=?' for column in columns)},
+                        updated_at=COALESCE(?, updated_at),
+                        server_deleted_at=NULL
+                    WHERE id=?""",
+                [
+                    row.get("client_uid"),
+                    server_id,
+                    row.get("source_node_id") or source_node_id,
+                    row.get("version") or 1,
+                    local_aircraft_id,
+                    *values,
+                    row.get("updated_at"),
+                    local_id,
+                ],
+            )
+            report["updated"]["flights"] += 1
+        else:
+            conn.execute(
+                f"""INSERT INTO flights
+                    (client_uid, server_id, source_node_id, sync_origin, sync_state,
+                     server_version, last_sync_at, aircraft_id, {', '.join(columns)},
+                     import_time, updated_at)
+                    VALUES (?, ?, ?, 'server', 'server_cache', ?, datetime('now','localtime'),
+                            ?, {', '.join('?' for _ in columns)}, COALESCE(?, datetime('now','localtime')),
+                            COALESCE(?, datetime('now','localtime')))""",
+                [
+                    row.get("client_uid"),
+                    server_id,
+                    row.get("source_node_id") or source_node_id,
+                    row.get("version") or 1,
+                    local_aircraft_id,
+                    *values,
+                    row.get("created_at"),
+                    row.get("updated_at"),
+                ],
+            )
+            local_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            report["created"]["flights"] += 1
+        flight_map[server_id] = local_id
+        importable_source_ids.add(server_id)
+    return flight_map, importable_source_ids
+
+
+def _import_pull_raw_files(
+    conn,
+    tmp_dir: str,
+    manifest: dict,
+    flight_map: dict[int, int],
+    report: dict,
+) -> None:
+    for raw in manifest.get("raw_files") or []:
+        server_flight_id = int(raw.get("flight_id") or 0)
+        local_flight_id = flight_map.get(server_flight_id)
+        if not local_flight_id:
+            continue
+        try:
+            expected_sha = raw.get("sha256") or ""
+            expected_size = int(raw.get("size_bytes") or -1)
+            package_rel = _safe_zip_path(raw.get("package_path") or f"objects/{raw.get('storage_rel_path')}")
+            src = os.path.abspath(os.path.join(tmp_dir, package_rel))
+            root = os.path.abspath(tmp_dir)
+            if os.path.commonpath([src, root]) != root:
+                raise ValueError("raw object path escapes package temp dir")
+            if not os.path.exists(src):
+                raise ValueError("raw object missing from pull bundle")
+            if os.path.getsize(src) != expected_size or _sha256_file(src) != expected_sha:
+                raise ValueError("raw object hash/size mismatch")
+
+            existing = _find_local_by_server_id(conn, "file_objects", int(raw.get("file_object_id") or 0))
+            if not existing:
+                existing = conn.execute("SELECT * FROM file_objects WHERE sha256=?", (expected_sha,)).fetchone()
+            if existing:
+                file_object_id = int(existing["id"])
+                conn.execute(
+                    """UPDATE file_objects
+                       SET server_id=COALESCE(server_id, ?), sync_origin='server',
+                           sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
+                           server_version=1, last_sync_at=datetime('now','localtime')
+                       WHERE id=?""",
+                    (raw.get("file_object_id"), file_object_id),
+                )
+            else:
+                storage_rel = _safe_zip_path(raw.get("storage_rel_path") or f"sha256/{expected_sha[:2]}/{expected_sha}")
+                dst = os.path.abspath(os.path.join(OBJECT_ROOT, storage_rel))
+                object_root = os.path.abspath(OBJECT_ROOT)
+                if os.path.commonpath([dst, object_root]) != object_root:
+                    raise ValueError("raw object path escapes object root")
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                conn.execute(
+                    """INSERT INTO file_objects
+                       (server_id, source_node_id, sync_origin, sync_state, server_version,
+                        last_sync_at, sha256, size_bytes, storage_rel_path)
+                       VALUES (?, ?, 'server', 'server_cache', 1, datetime('now','localtime'),
+                               ?, ?, ?)""",
+                    (
+                        raw.get("file_object_id"),
+                        manifest.get("source_node_id") or "server",
+                        expected_sha,
+                        expected_size,
+                        storage_rel,
+                    ),
+                )
+                file_object_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+            existing_link = _find_local_by_server_id(conn, "flight_raw_files", int(raw.get("id") or 0))
+            if existing_link:
+                conn.execute(
+                    """UPDATE flight_raw_files
+                       SET flight_id=?, file_object_id=?, sync_origin='server',
+                           sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
+                           last_sync_at=datetime('now','localtime')
+                       WHERE id=?""",
+                    (local_flight_id, file_object_id, int(existing_link["id"])),
+                )
+            else:
+                conn.execute(
+                    """INSERT OR IGNORE INTO flight_raw_files
+                       (server_id, source_node_id, sync_origin, sync_state, server_version,
+                        last_sync_at, flight_id, file_object_id, original_name,
+                        original_rel_path, data_type_key, source_mtime)
+                       VALUES (?, ?, 'server', 'server_cache', 1, datetime('now','localtime'),
+                               ?, ?, ?, ?, ?, ?)""",
+                    (
+                        raw.get("id"),
+                        manifest.get("source_node_id") or "server",
+                        local_flight_id,
+                        file_object_id,
+                        raw.get("original_name") or os.path.basename(raw.get("original_rel_path") or expected_sha),
+                        raw.get("original_rel_path") or raw.get("original_name") or expected_sha,
+                        raw.get("data_type_key"),
+                        raw.get("source_mtime"),
+                    ),
+                )
+            report["raw_files"]["attached"] += 1
+        except Exception as exc:
+            report["raw_files"]["warnings"] += 1
+            report["warnings"].append(
+                {
+                    "scope": "raw_file",
+                    "server_flight_id": server_flight_id,
+                    "file": raw.get("original_rel_path") or raw.get("package_path"),
+                    "error": str(exc),
+                }
+            )
+
+
+def _import_pull_parsed_rows(
+    conn,
+    parsed_path: str,
+    model_map: dict[int, int],
+    flight_map: dict[int, int],
+    importable_source_ids: set[int],
+    report: dict,
+) -> int:
+    if not importable_source_ids:
+        return 0
+    parsed = sqlite3.connect(parsed_path)
+    parsed.row_factory = sqlite3.Row
+    total = 0
+    try:
+        registry_rows = _sqlite_table_rows(parsed, "data_table_registry")
+        for reg in registry_rows:
+            source_model_id = int(reg.get("source_model_id") or 0)
+            target_model_id = model_map.get(source_model_id)
+            if not target_model_id:
+                continue
+            source_table = reg.get("table_name")
+            if not source_table or not _SAFE_IDENTIFIER.match(source_table):
+                continue
+            target_table = data_table_name(target_model_id, reg.get("data_type_key"))
+            target_cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({_q(target_table)})").fetchall()}
+            source_cols = [r["name"] for r in parsed.execute(f"PRAGMA table_info({_q(source_table)})").fetchall()]
+            insert_cols = [c for c in source_cols if c not in ("source_id", "source_flight_id") and c in target_cols]
+            if "flight_id" not in target_cols or not insert_cols:
+                continue
+            local_flight_ids = [flight_map[sid] for sid in importable_source_ids if sid in flight_map]
+            if local_flight_ids:
+                conn.execute(
+                    f"DELETE FROM {_q(target_table)} WHERE flight_id IN ({','.join('?' for _ in local_flight_ids)})",
+                    local_flight_ids,
+                )
+            source_placeholders = ",".join("?" for _ in importable_source_ids)
+            rows = parsed.execute(
+                f"SELECT * FROM {_q(source_table)} WHERE source_flight_id IN ({source_placeholders}) ORDER BY source_flight_id, source_id",
+                sorted(importable_source_ids),
+            ).fetchall()
+            batch = []
+            for row in rows:
+                local_flight_id = flight_map.get(int(row["source_flight_id"]))
+                if local_flight_id:
+                    batch.append([local_flight_id, *[row[col] for col in insert_cols]])
+            if batch:
+                conn.executemany(
+                    f"INSERT INTO {_q(target_table)} ({', '.join(_q(c) for c in ['flight_id', *insert_cols])}) "
+                    f"VALUES ({','.join('?' for _ in ['flight_id', *insert_cols])})",
+                    batch,
+                )
+                total += len(batch)
+    finally:
+        parsed.close()
+    return total
+
+
+def import_pull_bundle(conn, package_path: str) -> dict:
+    manifest, package_warnings = _load_manifest(package_path)
+    _validate_manifest(manifest, require_compatible=True)
+    if manifest.get("bundle_kind") != "pull_bundle":
+        raise ValueError("同步包不是服务器 pull_bundle")
+    manifest["_package_path"] = package_path
+    tmp_dir = _extract_package(package_path)
+    report = {
+        "package_path": package_path,
+        "source_node_id": manifest.get("source_node_id"),
+        "server_cursor": manifest.get("server_cursor"),
+        "status": "running",
+        "created": {"models": 0, "aircraft": 0, "flights": 0},
+        "updated": {"models": 0, "aircraft": 0, "flights": 0},
+        "tombstones": {"flights": 0},
+        "conflicts": [],
+        "warnings": [{"scope": "package", "message": w} for w in package_warnings],
+        "raw_files": {"attached": 0, "warnings": 0},
+        "parsed_rows": 0,
+    }
+    try:
+        parsed_path = _validated_parsed_sqlite(tmp_dir, manifest)
+        parsed = sqlite3.connect(parsed_path)
+        parsed.row_factory = sqlite3.Row
+        try:
+            model_map = _upsert_pull_models(conn, manifest, parsed, report)
+        finally:
+            parsed.close()
+        aircraft_map = _upsert_pull_aircraft(conn, manifest, model_map, report)
+        flight_map, importable_source_ids = _upsert_pull_flights(conn, manifest, aircraft_map, report)
+        _import_pull_raw_files(conn, tmp_dir, manifest, flight_map, report)
+        report["parsed_rows"] = _import_pull_parsed_rows(
+            conn,
+            parsed_path,
+            model_map,
+            flight_map,
+            importable_source_ids,
+            report,
+        )
+        status = "conflict" if report["conflicts"] else ("partial" if report["warnings"] else "success")
+        report["status"] = status
+        import_id = _save_report(conn, package_path, manifest, status, report)
+        report["id"] = import_id
+        if status in {"success", "partial"} and manifest.get("server_cursor") is not None:
+            sync_repository.set_setting(conn, "last_pull_cursor", str(manifest.get("server_cursor")))
+            sync_repository.set_setting(conn, "last_successful_pull_at", sync_repository.now_text())
+        conn.commit()
+        return report
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

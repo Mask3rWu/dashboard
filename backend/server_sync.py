@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import uuid
 import zipfile
 from collections import defaultdict
 from datetime import date, datetime
@@ -1154,3 +1155,456 @@ def _copy_bundle_archive(bundle_path: str, package_id: str, source_node_id: str)
     destination = os.path.join(bundles_dir, f"{safe_node}_{safe_package}.fapkg")
     if not os.path.exists(destination):
         shutil.copy2(bundle_path, destination)
+
+
+def list_changes(conn, since: int | str | None = None) -> dict[str, Any]:
+    """Return lightweight server change rows after a global cursor."""
+    since_cursor = _as_int(since) or 0
+    rows = conn.execute(
+        db.text(
+            """SELECT `cursor`, entity_type, entity_id, change_type, entity_version,
+                      changed_at, changed_by_node_id, package_id
+               FROM sync_changes
+               WHERE `cursor` > :since
+               ORDER BY `cursor` ASC"""
+        ),
+        {"since": since_cursor},
+    ).fetchall()
+    changes = [_row_dict(row) or {} for row in rows]
+    return {
+        "ok": True,
+        "since": since_cursor,
+        "current_cursor": _max_cursor(conn),
+        "count": len(changes),
+        "changes": changes,
+    }
+
+
+def _changed_entity_ids(conn, since: int | str | None) -> dict[str, set[int]]:
+    since_cursor = _as_int(since) or 0
+    ids = {"models": set(), "aircraft": set(), "flights": set()}
+    if since_cursor <= 0:
+        for table, key in (
+            ("aircraft_models", "models"),
+            ("aircraft", "aircraft"),
+            ("flights", "flights"),
+        ):
+            rows = conn.execute(db.text(f"SELECT id FROM {table}")).fetchall()
+            ids[key].update(int(row._mapping["id"]) for row in rows)
+        return ids
+
+    rows = conn.execute(
+        db.text(
+            """SELECT entity_type, entity_id
+               FROM sync_changes
+               WHERE `cursor` > :since"""
+        ),
+        {"since": since_cursor},
+    ).fetchall()
+    for row in rows:
+        entity_type = str(row._mapping["entity_type"])
+        entity_id = int(row._mapping["entity_id"])
+        if entity_type in {"aircraft_model", "model"}:
+            ids["models"].add(entity_id)
+        elif entity_type == "aircraft":
+            ids["aircraft"].add(entity_id)
+        elif entity_type == "flight":
+            ids["flights"].add(entity_id)
+
+    if ids["aircraft"]:
+        rows = conn.execute(
+            db.text(
+                f"SELECT id FROM flights WHERE aircraft_id IN ({', '.join(str(i) for i in sorted(ids['aircraft']))})"
+            )
+        ).fetchall()
+        ids["flights"].update(int(row._mapping["id"]) for row in rows)
+    if ids["models"]:
+        rows = conn.execute(
+            db.text(
+                f"SELECT id FROM aircraft WHERE model_id IN ({', '.join(str(i) for i in sorted(ids['models']))})"
+            )
+        ).fetchall()
+        aircraft_ids = {int(row._mapping["id"]) for row in rows}
+        ids["aircraft"].update(aircraft_ids)
+        if aircraft_ids:
+            rows = conn.execute(
+                db.text(
+                    f"SELECT id FROM flights WHERE aircraft_id IN ({', '.join(str(i) for i in sorted(aircraft_ids))})"
+                )
+            ).fetchall()
+            ids["flights"].update(int(row._mapping["id"]) for row in rows)
+
+    if ids["flights"]:
+        rows = conn.execute(
+            db.text(
+                f"""SELECT f.aircraft_id, a.model_id
+                    FROM flights f
+                    JOIN aircraft a ON a.id=f.aircraft_id
+                    WHERE f.id IN ({', '.join(str(i) for i in sorted(ids['flights']))})"""
+            )
+        ).fetchall()
+        ids["aircraft"].update(int(row._mapping["aircraft_id"]) for row in rows)
+        ids["models"].update(int(row._mapping["model_id"]) for row in rows)
+    if ids["aircraft"]:
+        rows = conn.execute(
+            db.text(
+                f"SELECT model_id FROM aircraft WHERE id IN ({', '.join(str(i) for i in sorted(ids['aircraft']))})"
+            )
+        ).fetchall()
+        ids["models"].update(int(row._mapping["model_id"]) for row in rows)
+    return ids
+
+
+def _select_rows_by_ids(conn, table: str, ids: set[int]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    placeholders = ", ".join(f":id{i}" for i, _ in enumerate(ids))
+    params = {f"id{i}": value for i, value in enumerate(sorted(ids))}
+    rows = conn.execute(
+        db.text(f"SELECT * FROM {table} WHERE id IN ({placeholders}) ORDER BY id"),
+        params,
+    ).fetchall()
+    return [_row_dict(row) or {} for row in rows]
+
+
+def _sqlite_value(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def _write_source_table(
+    sqlite_conn: sqlite3.Connection,
+    table: str,
+    rows: list[dict[str, Any]],
+    source_fk_map: dict[str, str] | None = None,
+) -> None:
+    source_fk_map = source_fk_map or {}
+    if not rows:
+        return
+    keys = list(rows[0].keys())
+    cols = ["source_id INTEGER"]
+    for key in keys:
+        if key == "id":
+            continue
+        out_key = source_fk_map.get(key, key)
+        sample = next((row.get(key) for row in rows if row.get(key) is not None), None)
+        if isinstance(sample, int):
+            col_type = "INTEGER"
+        elif isinstance(sample, float):
+            col_type = "REAL"
+        else:
+            col_type = "TEXT"
+        cols.append(f"{_q_sqlite(out_key)} {col_type}")
+    sqlite_conn.execute(f"CREATE TABLE {_q_sqlite(table)} ({', '.join(cols)})")
+    insert_cols = ["source_id"] + [source_fk_map.get(key, key) for key in keys if key != "id"]
+    placeholders = ",".join("?" for _ in insert_cols)
+    sqlite_conn.executemany(
+        f"INSERT INTO {_q_sqlite(table)} ({', '.join(_q_sqlite(c) for c in insert_cols)}) VALUES ({placeholders})",
+        [
+            [_sqlite_value(row.get("id"))] + [_sqlite_value(row.get(key)) for key in keys if key != "id"]
+            for row in rows
+        ],
+    )
+
+
+def _server_model_config(conn, server_model_id: int) -> dict[str, Any]:
+    model = _row_dict(
+        conn.execute(
+            db.text(
+                """SELECT has_header, has_uav_send_id, extract_serial_from_path
+                   FROM aircraft_models WHERE id=:id"""
+            ),
+            {"id": server_model_id},
+        ).first()
+    ) or {}
+    config = {
+        "has_header": bool(model.get("has_header", 1)),
+        "has_uav_send_id": bool(model.get("has_uav_send_id", 0)),
+        "extract_serial_from_path": bool(model.get("extract_serial_from_path", 0)),
+        "data_types": {},
+    }
+    dtr_rows = conn.execute(
+        db.text(
+            """SELECT data_type_key, display_label, file_patterns, is_alert
+               FROM data_table_registry
+               WHERE model_id=:model_id
+               ORDER BY data_type_key"""
+        ),
+        {"model_id": server_model_id},
+    ).fetchall()
+    for dtr_row in dtr_rows:
+        dtr = _row_dict(dtr_row) or {}
+        data_type_key = str(dtr["data_type_key"])
+        try:
+            patterns = json.loads(dtr.get("file_patterns") or "[]")
+        except Exception:
+            patterns = []
+        col_rows = conn.execute(
+            db.text(
+                """SELECT column_name, display_label, unit, data_type, ordinal, scale_factor
+                   FROM column_registry
+                   WHERE model_id=:model_id AND data_type_key=:data_type_key
+                   ORDER BY ordinal"""
+            ),
+            {"model_id": server_model_id, "data_type_key": data_type_key},
+        ).fetchall()
+        config["data_types"][data_type_key] = {
+            "display_label": dtr.get("display_label") or data_type_key,
+            "file_patterns": patterns if isinstance(patterns, list) else [],
+            "is_alert": bool(dtr.get("is_alert")),
+            "columns": [
+                {
+                    "name": (_row_dict(col) or {}).get("column_name"),
+                    "label": (_row_dict(col) or {}).get("display_label"),
+                    "unit": (_row_dict(col) or {}).get("unit") or "",
+                    "type": (_row_dict(col) or {}).get("data_type") or "REAL",
+                    "ordinal": (_row_dict(col) or {}).get("ordinal"),
+                    "scale_factor": (_row_dict(col) or {}).get("scale_factor") or 1.0,
+                }
+                for col in col_rows
+            ],
+        }
+    return config
+
+
+def _write_server_parsed_sqlite(conn, ids: dict[str, set[int]], out_path: str) -> int:
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    sqlite_conn = sqlite3.connect(out_path)
+    try:
+        model_rows = _select_rows_by_ids(conn, "aircraft_models", ids["models"])
+        aircraft_rows = _select_rows_by_ids(conn, "aircraft", ids["aircraft"])
+        flight_rows = _select_rows_by_ids(conn, "flights", ids["flights"])
+        _write_source_table(sqlite_conn, "aircraft_models", model_rows)
+        _write_source_table(sqlite_conn, "aircraft", aircraft_rows, {"model_id": "source_model_id"})
+        _write_source_table(sqlite_conn, "flights", flight_rows, {"aircraft_id": "source_aircraft_id"})
+
+        dtr_rows: list[dict[str, Any]] = []
+        col_rows: list[dict[str, Any]] = []
+        for model_id in sorted(ids["models"]):
+            dtr_rows.extend(_select_rows_by_ids_for_model(conn, "data_table_registry", model_id))
+            col_rows.extend(_select_rows_by_ids_for_model(conn, "column_registry", model_id))
+        _write_source_table(sqlite_conn, "data_table_registry", dtr_rows, {"model_id": "source_model_id"})
+        _write_source_table(sqlite_conn, "column_registry", col_rows, {"model_id": "source_model_id"})
+
+        parsed_rows = 0
+        for dtr in dtr_rows:
+            server_table = str(dtr.get("table_name") or "")
+            server_table_q = db.quote_identifier(server_table)
+            source_table_q = _q_sqlite(server_table)
+            pragma_rows = conn.execute(db.text(f"SHOW COLUMNS FROM {server_table_q}")).fetchall()
+            source_cols = [row._mapping["Field"] for row in pragma_rows]
+            out_cols = ["source_id INTEGER"]
+            for col in source_cols:
+                if col == "id":
+                    continue
+                out_name = "source_flight_id" if col == "flight_id" else col
+                out_cols.append(f"{_q_sqlite(out_name)} TEXT")
+            sqlite_conn.execute(f"CREATE TABLE {source_table_q} ({', '.join(out_cols)})")
+            model_flight_ids = sorted(ids["flights"])
+            if not model_flight_ids:
+                continue
+            placeholders = ", ".join(f":fid{i}" for i, _ in enumerate(model_flight_ids))
+            params = {f"fid{i}": fid for i, fid in enumerate(model_flight_ids)}
+            rows = conn.execute(
+                db.text(
+                    f"SELECT * FROM {server_table_q} WHERE flight_id IN ({placeholders}) ORDER BY flight_id, id"
+                ),
+                params,
+            ).fetchall()
+            if not rows:
+                continue
+            insert_cols = ["source_id"] + [
+                ("source_flight_id" if col == "flight_id" else col)
+                for col in source_cols
+                if col != "id"
+            ]
+            sqlite_conn.executemany(
+                f"INSERT INTO {source_table_q} ({', '.join(_q_sqlite(c) for c in insert_cols)}) VALUES ({','.join('?' for _ in insert_cols)})",
+                [
+                    [_sqlite_value(row._mapping.get("id"))]
+                    + [_sqlite_value(row._mapping.get(col)) for col in source_cols if col != "id"]
+                    for row in rows
+                ],
+            )
+            parsed_rows += len(rows)
+        sqlite_conn.commit()
+        return parsed_rows
+    finally:
+        sqlite_conn.close()
+
+
+def _select_rows_by_ids_for_model(conn, table: str, model_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        db.text(f"SELECT * FROM {table} WHERE model_id=:model_id ORDER BY id"),
+        {"model_id": model_id},
+    ).fetchall()
+    return [_row_dict(row) or {} for row in rows]
+
+
+def build_pull_bundle(conn, since: int | str | None = None) -> dict[str, Any]:
+    """Create a pull_bundle zip from server state and return its path."""
+    ids = _changed_entity_ids(conn, since)
+    current_cursor = _max_cursor(conn)
+    package_id = f"pkg-{uuid.uuid4().hex}"
+    source_node_id = "server"
+    tmp_dir = tempfile.mkdtemp(prefix="flightanalyzer_server_pull_")
+    try:
+        parsed_path = os.path.join(tmp_dir, "parsed.sqlite")
+        parsed_rows = _write_server_parsed_sqlite(conn, ids, parsed_path)
+        parsed_sha = _sha256_file(parsed_path)
+
+        model_rows = _select_rows_by_ids(conn, "aircraft_models", ids["models"])
+        aircraft_rows = _select_rows_by_ids(conn, "aircraft", ids["aircraft"])
+        flight_rows = _select_rows_by_ids(conn, "flights", ids["flights"])
+        raw_rows = _server_raw_manifest_rows(conn, ids["flights"])
+        manifest = {
+            "package_version": 2,
+            "sync_protocol_version": 1,
+            "package_id": package_id,
+            "bundle_kind": "pull_bundle",
+            "app_version": "2.0.0",
+            "schema_version": 2,
+            "source_node_id": source_node_id,
+            "source_environment": "server",
+            "exported_at": db.utcnow().isoformat(timespec="seconds"),
+            "base_server_cursor": str(since or ""),
+            "server_cursor": current_cursor,
+            "models": model_rows,
+            "aircraft": aircraft_rows,
+            "flights": flight_rows,
+            "raw_files": raw_rows,
+            "parsed_data": {
+                "format": "sqlite",
+                "path": "data/parsed.sqlite",
+                "sha256": parsed_sha,
+                "size_bytes": os.path.getsize(parsed_path),
+            },
+        }
+
+        bundles_dir = os.path.join(db.SERVER_DATA_DIR, "bundles")
+        os.makedirs(bundles_dir, exist_ok=True)
+        bundle_path = os.path.join(bundles_dir, f"server_pull_{current_cursor}_{package_id}.fapkg")
+        manifest_path = os.path.join(tmp_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2, default=_json_default)
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(manifest_path, "manifest.json")
+            zf.write(parsed_path, "data/parsed.sqlite")
+            for model_id in sorted(ids["models"]):
+                zf.writestr(
+                    f"models/model_{model_id}.json",
+                    json.dumps(_server_model_config(conn, model_id), ensure_ascii=False, indent=2, default=_json_default),
+                )
+            for raw in raw_rows:
+                src = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "objects", raw["storage_rel_path"]))
+                root = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "objects"))
+                if os.path.commonpath([src, root]) != root or not os.path.exists(src):
+                    continue
+                zf.write(src, _safe_zip_path(raw["package_path"]))
+        return {
+            "ok": True,
+            "path": bundle_path,
+            "package_id": package_id,
+            "current_cursor": current_cursor,
+            "since": _as_int(since) or 0,
+            "summary": {
+                "models": len(model_rows),
+                "aircraft": len(aircraft_rows),
+                "flights": len(flight_rows),
+                "raw_files": len(raw_rows),
+                "parsed_rows": parsed_rows,
+            },
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _server_raw_manifest_rows(conn, flight_ids: set[int]) -> list[dict[str, Any]]:
+    if not flight_ids:
+        return []
+    placeholders = ", ".join(f":fid{i}" for i, _ in enumerate(flight_ids))
+    params = {f"fid{i}": fid for i, fid in enumerate(sorted(flight_ids))}
+    rows = conn.execute(
+        db.text(
+            f"""SELECT frf.id, frf.flight_id, frf.original_name, frf.original_rel_path,
+                      frf.data_type_key, frf.source_mtime, frf.created_at,
+                      fo.id AS file_object_id, fo.sha256, fo.size_bytes, fo.storage_rel_path
+               FROM flight_raw_files frf
+               JOIN file_objects fo ON fo.id=frf.file_object_id
+               WHERE frf.flight_id IN ({placeholders})
+               ORDER BY frf.flight_id, frf.original_rel_path, frf.id"""
+        ),
+        params,
+    ).fetchall()
+    raw_files = []
+    for row in rows:
+        item = _row_dict(row) or {}
+        storage_rel_path = _safe_zip_path(item["storage_rel_path"])
+        item["storage_rel_path"] = storage_rel_path
+        item["package_path"] = _safe_zip_path(f"objects/{storage_rel_path}")
+        raw_files.append(item)
+    return raw_files
+
+
+def soft_delete_entity(
+    conn,
+    entity_type: str,
+    entity_id: int,
+    *,
+    deleted_by: int | None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    if entity_type not in {"model", "aircraft", "flight"}:
+        raise ValueError(f"Unsupported delete entity type: {entity_type}")
+    table = {"model": "aircraft_models", "aircraft": "aircraft", "flight": "flights"}[entity_type]
+    row = conn.execute(db.text(f"SELECT id, version, deleted_at FROM {table} WHERE id=:id"), {"id": entity_id}).first()
+    if not row:
+        raise KeyError(entity_type)
+    now = db.utcnow()
+    version = int(row._mapping.get("version") or 1) + 1
+    if entity_type == "flight":
+        conn.execute(
+            db.text(
+                """UPDATE flights
+                   SET deleted_at=:deleted_at, deleted_by=:deleted_by, delete_reason=:reason,
+                       version=:version, updated_at=:updated_at
+                   WHERE id=:id"""
+            ),
+            {
+                "deleted_at": now,
+                "deleted_by": deleted_by,
+                "reason": reason or "",
+                "version": version,
+                "updated_at": now,
+                "id": entity_id,
+            },
+        )
+    else:
+        conn.execute(
+            db.text(
+                f"""UPDATE {table}
+                    SET deleted_at=:deleted_at, version=:version, updated_at=:updated_at
+                    WHERE id=:id"""
+            ),
+            {"deleted_at": now, "version": version, "updated_at": now, "id": entity_id},
+        )
+    change_type = "delete"
+    conn.execute(
+        db.text(
+            """INSERT INTO sync_changes
+                 (entity_type, entity_id, change_type, entity_version, changed_at,
+                  changed_by_node_id, package_id)
+               VALUES (:entity_type, :entity_id, :change_type, :entity_version,
+                       :changed_at, NULL, NULL)"""
+        ),
+        {
+            "entity_type": "aircraft_model" if entity_type == "model" else entity_type,
+            "entity_id": entity_id,
+            "change_type": change_type,
+            "entity_version": version,
+            "changed_at": now,
+        },
+    )
+    return {"ok": True, "entity_type": entity_type, "id": entity_id, "version": version, "deleted_at": now}

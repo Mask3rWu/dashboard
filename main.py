@@ -42,7 +42,7 @@ from backend.format_configs import (
 from backend.scanner import scan_folder_sessions
 from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend.sync_package import export_package
-from backend.sync_import import preview_import, import_package, get_import_report
+from backend.sync_import import preview_import, import_package, import_pull_bundle, get_import_report
 from backend import flight_repository, user_repository, sync_repository, sync_client
 from backend import runtime_context
 from backend import analysis
@@ -314,6 +314,11 @@ class SyncExportRequest(BaseModel):
 
 class SyncPushBatchRequest(BaseModel):
     flight_ids: list[int] | None = None
+    server_token: str | None = None
+
+
+class SyncPullRequest(BaseModel):
+    since: str | None = None
     server_token: str | None = None
 
 
@@ -1304,9 +1309,10 @@ def _json_or_none(value: str | None):
         return {"raw": value}
 
 
-def _server_token(req: SyncPushBatchRequest, request: Request) -> str | None:
-    if req.server_token:
-        return req.server_token
+def _server_token(req, request: Request) -> str | None:
+    body_token = getattr(req, "server_token", None)
+    if body_token:
+        return body_token
     token = request.headers.get("x-server-token")
     if token:
         return token.strip()
@@ -1314,6 +1320,12 @@ def _server_token(req: SyncPushBatchRequest, request: Request) -> str | None:
     if auth:
         return auth.strip()
     return None
+
+
+def _server_token_from_query(server_token: str | None, request: Request) -> str | None:
+    if server_token:
+        return server_token
+    return _server_token(None, request)
 
 
 @app.get("/api/sync/queue")
@@ -1484,6 +1496,99 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
         if run_id is not None:
             sync_repository.finish_sync_run(conn, run_id, "failed", error=error)
         conn.commit()
+        raise HTTPException(502, error)
+    except ValueError as e:
+        if run_id is not None:
+            sync_repository.finish_sync_run(conn, run_id, "failed", error={"phase": "local", "message": str(e)})
+            conn.commit()
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/api/sync/changes")
+def get_sync_changes(request: Request, since: str | None = Query(default=None), server_token: str | None = None):
+    """Proxy server change summaries through the local backend."""
+    conn = get_db()
+    try:
+        if not runtime_context.get_sync_enabled(conn):
+            raise sync_client.SyncClientError("SYNC_ENABLED is false")
+        server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+        cursor = since
+        if cursor is None:
+            cursor = sync_repository.get_setting(conn, "last_pull_cursor", "")
+        return sync_client.changes(server_base_url, cursor, token=_server_token_from_query(server_token, request))
+    except sync_client.SyncClientError as e:
+        raise HTTPException(502, e.to_error_json("changes"))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/pull")
+def post_sync_pull(req: SyncPullRequest, request: Request):
+    """Download a server pull_bundle and import it into the local cache."""
+    conn = get_db()
+    run_id = None
+    bundle_path = None
+    try:
+        if not runtime_context.get_sync_enabled(conn):
+            raise sync_client.SyncClientError("SYNC_ENABLED is false")
+        server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+        since = req.since
+        if since is None:
+            since = sync_repository.get_setting(conn, "last_pull_cursor", "")
+        run_id = sync_repository.create_sync_run(conn, "pull")
+        conn.commit()
+
+        cache_dir = os.path.join(DATA_DIR, "sync_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bundle_path = os.path.join(cache_dir, f"server_pull_{stamp}.fapkg")
+        manifest = sync_client.download_bundle(
+            server_base_url,
+            since,
+            bundle_path,
+            token=_server_token(req, request),
+        )
+        report = import_pull_bundle(conn, bundle_path)
+        ok = report.get("status") in {"success", "partial"}
+        summary = {
+            "since": since,
+            "server_cursor": manifest.get("server_cursor"),
+            "bundle_path": bundle_path,
+            "manifest_counts": {
+                "models": len(manifest.get("models") or []),
+                "aircraft": len(manifest.get("aircraft") or []),
+                "flights": len(manifest.get("flights") or []),
+                "raw_files": len(manifest.get("raw_files") or []),
+            },
+            "report": report,
+        }
+        sync_repository.finish_sync_run(
+            conn,
+            run_id,
+            "success" if ok else "failed",
+            summary=summary,
+            error=None if ok else {"phase": "import", "report": report},
+        )
+        conn.commit()
+        return {
+            "ok": ok,
+            "status": report.get("status"),
+            "run_id": run_id,
+            "bundle": {
+                "path": bundle_path,
+                "package_id": manifest.get("package_id"),
+                "server_cursor": manifest.get("server_cursor"),
+            },
+            "report": report,
+            "summary": sync_repository.upload_queue_summary(conn),
+        }
+    except sync_client.SyncClientError as e:
+        error = e.to_error_json("pull")
+        if run_id is not None:
+            sync_repository.finish_sync_run(conn, run_id, "failed", error=error)
+            conn.commit()
         raise HTTPException(502, error)
     except ValueError as e:
         if run_id is not None:

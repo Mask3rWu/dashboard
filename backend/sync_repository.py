@@ -18,6 +18,15 @@ def get_setting(conn, key: str, default: str) -> str:
     return row["value"] if row else default
 
 
+def set_setting(conn, key: str, value: str) -> None:
+    conn.execute(
+        """INSERT INTO app_settings (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+        (key, str(value), now_text()),
+    )
+
+
 def selected_ids(conn, flight_ids: list[int]) -> dict[str, set[int]]:
     if not flight_ids:
         raise ValueError("至少选择一个架次")
