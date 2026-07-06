@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Download, Eye, RefreshCw, RotateCcw, Server, Upload, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Download, Eye, LogIn, LogOut, RefreshCw, RotateCcw, Server, Upload, XCircle } from 'lucide-react';
 import {
   abandonSync,
   getSyncQueue,
@@ -7,6 +7,9 @@ import {
   pushSync,
   retrySync,
   runSync,
+  serverLogin,
+  serverLogout,
+  setServerToken,
   type RuntimeContext,
   type SyncOperationResult,
   type SyncQueueResponse,
@@ -67,6 +70,9 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [serverUsername, setServerUsername] = useState('admin');
+  const [serverPassword, setServerPassword] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
 
   const loadQueue = useCallback(async () => {
     setLoading(true);
@@ -153,6 +159,41 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
   const selectedIdsArray = [...selectedIds];
   const summary = queue?.summary;
 
+  const loginServer = async () => {
+    if (!serverUsername.trim() || !serverPassword) return;
+    setAuthBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await serverLogin(serverUsername.trim(), serverPassword);
+      if (!result.token) throw new Error('服务器未返回登录 token');
+      setServerToken(result.token);
+      setServerPassword('');
+      setMessage(`已登录服务器：${result.user?.username || serverUsername.trim()}`);
+      await onRefreshContext();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const logoutServer = async () => {
+    setAuthBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      await serverLogout();
+    } catch {
+      // Clearing the local token is sufficient if the server session has expired.
+    } finally {
+      setServerToken(null);
+      setMessage('已退出服务器登录');
+      await onRefreshContext();
+      setAuthBusy(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-auto p-6 space-y-5 bg-white">
       <section className="border border-gray-200 rounded-lg bg-gray-50 px-4 py-3">
@@ -179,10 +220,49 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             </div>
           </div>
           <div className="flex flex-wrap justify-end gap-2 shrink-0">
+            {runtime?.server_user ? (
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={logoutServer}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                退出服务器
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  value={serverUsername}
+                  onChange={(e) => setServerUsername(e.target.value)}
+                  disabled={!runtime?.server_reachable || authBusy}
+                  className="w-24 border border-gray-300 rounded px-2 py-1.5 text-xs"
+                  placeholder="服务器用户"
+                />
+                <input
+                  type="password"
+                  value={serverPassword}
+                  onChange={(e) => setServerPassword(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') loginServer(); }}
+                  disabled={!runtime?.server_reachable || authBusy}
+                  className="w-28 border border-gray-300 rounded px-2 py-1.5 text-xs"
+                  placeholder="服务器密码"
+                />
+                <button
+                  type="button"
+                  disabled={!runtime?.server_reachable || authBusy || !serverUsername.trim() || !serverPassword}
+                  onClick={loginServer}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-blue-200 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  登录服务器
+                </button>
+              </div>
+            )}
             <button
               type="button"
-              disabled={!ready || !!busy}
-              title={serverDisabledReason || '执行 push 后 pull'}
+              disabled={!ready || !runtime?.server_user || !!busy}
+              title={!runtime?.server_user ? '请先登录服务器' : serverDisabledReason || '执行 push 后 pull'}
               onClick={() => execute('run', () => runSync())}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
             >
@@ -191,8 +271,8 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             </button>
             <button
               type="button"
-              disabled={!ready || !!busy}
-              title={serverDisabledReason || '仅上传本地待同步数据'}
+              disabled={!ready || !runtime?.server_user || !!busy}
+              title={!runtime?.server_user ? '请先登录服务器' : serverDisabledReason || '仅上传本地待同步数据'}
               onClick={() => execute('push', () => pushSync())}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50"
             >
@@ -201,8 +281,8 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             </button>
             <button
               type="button"
-              disabled={!ready || !!busy}
-              title={serverDisabledReason || '把服务器数据导入当前本地缓存'}
+              disabled={!ready || !runtime?.server_user || !!busy}
+              title={!runtime?.server_user ? '请先登录服务器' : serverDisabledReason || '把服务器数据导入当前本地缓存'}
               onClick={() => execute('pull', () => pullSync())}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-slate-700 text-white hover:bg-slate-600 disabled:opacity-50"
             >
@@ -255,7 +335,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             </button>
             <button
               type="button"
-              disabled={!ready || !!busy || selectedUploadableIds.length === 0}
+              disabled={!ready || !runtime?.server_user || !!busy || selectedUploadableIds.length === 0}
               onClick={() => execute('retry', () => retrySync({ flight_ids: selectedUploadableIds }))}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-50"
             >
@@ -330,7 +410,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
                       {item.sync_state === 'upload_failed' && (
                         <button
                           type="button"
-                          disabled={!ready || !!busy}
+                          disabled={!ready || !runtime?.server_user || !!busy}
                           onClick={() => execute('retry', () => retrySync({ flight_ids: [item.id] }))}
                           className="text-xs text-amber-700 hover:text-amber-600 disabled:opacity-50"
                         >
