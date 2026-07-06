@@ -186,6 +186,12 @@ def _create_fresh_schema(conn):
     _seed_runtime_settings(conn)
 
 
+def _apply_builtin_model_seeds(conn):
+    from .model_seeds import apply_builtin_model_seeds
+
+    return apply_builtin_model_seeds(conn)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -620,22 +626,31 @@ def init_db():
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA foreign_keys=OFF")
                 _create_fresh_schema(conn)
+                seed_result = _apply_builtin_model_seeds(conn)
                 conn.execute("PRAGMA foreign_keys=ON")
                 conn.commit()
                 logger.warning("Old database backed up to: %s", backup_path)
-                return {"created": True, "rebuilt": True, "backup_path": backup_path, "reason": reason}
+                return {
+                    "created": True,
+                    "rebuilt": True,
+                    "backup_path": backup_path,
+                    "reason": reason,
+                    "seeds": seed_result,
+                }
 
             logger.info("Current database schema verified at %s", DB_PATH)
             _seed_runtime_settings(conn)
+            seed_result = _apply_builtin_model_seeds(conn)
             conn.execute("PRAGMA foreign_keys=ON")
             conn.commit()
-            return {"created": False, "rebuilt": False, "backup_path": None, "reason": None}
+            return {"created": False, "rebuilt": False, "backup_path": None, "reason": None, "seeds": seed_result}
 
         _create_fresh_schema(conn)
+        seed_result = _apply_builtin_model_seeds(conn)
         logger.info("Fresh database created at %s", DB_PATH)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.commit()
-        return {"created": True, "rebuilt": False, "backup_path": None, "reason": None}
+        return {"created": True, "rebuilt": False, "backup_path": None, "reason": None, "seeds": seed_result}
     except sqlite3.Error as e:
         raise RuntimeError(
             f"Database initialization failed at {DB_PATH}. Error: {e}"

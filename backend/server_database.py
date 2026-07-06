@@ -23,7 +23,7 @@ SERVER_DATA_DIR = os.path.abspath(
 SESSION_DAYS = 7
 
 _ENGINE: Engine | None = None
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_IDENTIFIER_RE = re.compile(r"^[^\W\d]\w*$", re.UNICODE)
 _DATA_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _MAX_IDENTIFIER_LEN = 64
 
@@ -451,7 +451,7 @@ def validate_data_type_key(data_type_key: str) -> str:
 
 def validate_identifier(identifier: str, label: str = "identifier") -> str:
     value = (identifier or "").strip()
-    if not _IDENTIFIER_RE.match(value):
+    if "`" in value or "\x00" in value or not _IDENTIFIER_RE.match(value):
         raise ValueError(f"Invalid SQL {label}: {identifier!r}")
     if len(value) > _MAX_IDENTIFIER_LEN:
         raise ValueError(f"SQL {label} exceeds {_MAX_IDENTIFIER_LEN} characters: {identifier!r}")
