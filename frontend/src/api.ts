@@ -98,6 +98,73 @@ export interface RuntimeContext {
   };
 }
 
+export interface SyncQueueSummary {
+  pending_upload: number;
+  dirty: number;
+  upload_failed: number;
+  conflict: number;
+  uploadable: number;
+}
+
+export interface SyncQueueItem {
+  id: number;
+  client_uid?: string | null;
+  server_id?: number | null;
+  source_node_id?: string | null;
+  sync_origin?: string | null;
+  sync_state: string;
+  server_version?: number | null;
+  last_sync_at?: string | null;
+  sync_error_json?: string | null;
+  sync_error?: unknown;
+  name: string;
+  session_key?: string | null;
+  flight_date?: string | null;
+  start_time?: string | null;
+  duration_sec?: number | null;
+  total_rows?: number | null;
+  import_time?: string | null;
+  updated_at?: string | null;
+  record_batch_name?: string | null;
+  record_location?: string | null;
+  record_weather?: string | null;
+  record_payload?: string | null;
+  aircraft_id: number;
+  aircraft_name: string;
+  model_id: number;
+  model_name: string;
+  raw_file_count: number;
+}
+
+export interface SyncQueueResponse {
+  summary: SyncQueueSummary;
+  items: SyncQueueItem[];
+}
+
+export interface SyncOperationRequest {
+  flight_ids?: number[] | null;
+  since?: string | null;
+  server_token?: string | null;
+}
+
+export interface SyncOperationResult {
+  ok: boolean;
+  status: string;
+  run_id?: number;
+  push?: SyncOperationResult;
+  pull?: SyncOperationResult;
+  steps?: { name: string; status: string; detail?: string }[];
+  selected_flights?: { id: number; name: string; sync_state: string }[];
+  skipped_dirty?: { id: number; name: string; sync_state: string }[];
+  summary?: SyncQueueSummary;
+  bundle?: unknown;
+  preflight?: unknown;
+  server_report?: unknown;
+  writeback?: unknown;
+  report?: unknown;
+  abandoned?: number;
+}
+
 export interface AircraftModel {
   id: number;
   name: string;
@@ -604,6 +671,20 @@ export const importSyncPackage = (payload: SyncImportRequest) =>
   request<SyncImportReport>('/sync/import', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+export const getSyncQueue = () => request<SyncQueueResponse>('/sync/queue');
+export const runSync = (payload: SyncOperationRequest = {}) =>
+  request<SyncOperationResult>('/sync/run', { method: 'POST', body: JSON.stringify(payload) });
+export const pushSync = (payload: SyncOperationRequest = {}) =>
+  request<SyncOperationResult>('/sync/push', { method: 'POST', body: JSON.stringify(payload) });
+export const pullSync = (payload: SyncOperationRequest = {}) =>
+  request<SyncOperationResult>('/sync/pull', { method: 'POST', body: JSON.stringify(payload) });
+export const retrySync = (payload: SyncOperationRequest = {}) =>
+  request<SyncOperationResult>('/sync/retry', { method: 'POST', body: JSON.stringify(payload) });
+export const abandonSync = (flightIds: number[]) =>
+  request<SyncOperationResult>('/sync/abandon', {
+    method: 'POST',
+    body: JSON.stringify({ flight_ids: flightIds }),
   });
 export const deleteFlight = (id: number) => request('/flights/' + id, { method: 'DELETE' });
 export const updateFlight = (id: number, name: string) =>

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import * as echarts from 'echarts';
 import { getColumns, getCompare, listAircraft, type Flight, type ColumnGroup, type AircraftModel, type Aircraft } from '../api';
+import { syncStateClass, syncStateLabel } from '../syncStatus';
 
 interface Props {
   flights: Flight[];
@@ -343,13 +344,16 @@ export default function ComparePage({
           <button
             key={f.id}
             onClick={() => toggleFlight(f.id)}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+            className={`inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
               selectedFlights.includes(f.id)
                 ? 'bg-blue-600 text-white'
                 : 'bg-white border border-gray-300 text-gray-500 hover:bg-gray-100'
             }`}
           >
-            {f.aircraft_name || f.drone_id} - {f.name}
+            <span>{f.aircraft_name || f.drone_id} - {f.name}</span>
+            <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded border ${selectedFlights.includes(f.id) ? 'border-white/40 text-white' : syncStateClass(f.sync_state)}`}>
+              {syncStateLabel(f.sync_state)}
+            </span>
           </button>
         )))}
       </div>

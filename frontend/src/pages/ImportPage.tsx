@@ -8,34 +8,13 @@ import {
   type SyncExportModelNode, type SyncExportResult,
   type SyncImportPreview, type SyncImportReport,
 } from '../api';
+import { SYNC_STATE_FILTERS, matchesSyncStateFilter, syncStateClass, syncStateLabel, type SyncStateFilter } from '../syncStatus';
 
 
 interface Props {
   onImported: () => void;
   canDeleteFlights: boolean;
   isLoggedIn?: boolean;
-}
-
-function syncStateLabel(state?: string | null) {
-  const labels: Record<string, string> = {
-    local_only: '本地',
-    pending_upload: 'pending_upload',
-    syncing: '同步中',
-    synced: '已同步',
-    dirty: '待更新',
-    upload_failed: '上传失败',
-    conflict: '冲突',
-    server_cache: '服务器缓存',
-    server_deleted: '服务器已删',
-  };
-  return labels[state || ''] || state || '未标记';
-}
-
-function syncStateClass(state?: string | null) {
-  if (state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
-  if (state === 'upload_failed' || state === 'conflict') return 'bg-red-50 text-red-700 border-red-200';
-  if (state === 'synced' || state === 'server_cache') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
-  return 'bg-gray-50 text-gray-600 border-gray-200';
 }
 
 // ── Directory structure validation ─────────────────────────
@@ -298,6 +277,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
   // Flight management
   const [flights, setFlights] = useState<Flight[]>([]);
   const [flightSearch, setFlightSearch] = useState('');
+  const [syncFilter, setSyncFilter] = useState<SyncStateFilter>('all');
   const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
   const [editName, setEditName] = useState('');
   const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
@@ -788,6 +768,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
   };
 
   const filteredFlights = flights.filter((f) => {
+    if (!matchesSyncStateFilter(f, syncFilter)) return false;
     if (!flightSearch.trim()) return true;
     const s = flightSearch.toLowerCase();
     return f.name.toLowerCase().includes(s)
@@ -1175,6 +1156,15 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
             <input type="text" value={flightSearch} onChange={(e) => setFlightSearch(e.target.value)}
               placeholder="搜索架次..."
               className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-44" />
+            <select
+              value={syncFilter}
+              onChange={(e) => setSyncFilter(e.target.value as SyncStateFilter)}
+              className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
+            >
+              {SYNC_STATE_FILTERS.map((item) => (
+                <option key={item.key} value={item.key}>{item.label}</option>
+              ))}
+            </select>
             <button
               onClick={openExportDialog}
               className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-500"

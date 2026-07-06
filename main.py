@@ -322,6 +322,16 @@ class SyncPullRequest(BaseModel):
     server_token: str | None = None
 
 
+class SyncRunRequest(BaseModel):
+    flight_ids: list[int] | None = None
+    since: str | None = None
+    server_token: str | None = None
+
+
+class SyncAbandonRequest(BaseModel):
+    flight_ids: list[int]
+
+
 class SyncImportPreviewRequest(BaseModel):
     package_path: str
 
@@ -1365,7 +1375,10 @@ def post_sync_push_batch(req: SyncPushBatchRequest):
     conn = get_db()
     try:
         if req.flight_ids is None:
-            flight_ids = [int(item["id"]) for item in sync_repository.list_upload_queue(conn)]
+            flight_ids = [
+                int(item["id"])
+                for item in sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+            ]
         else:
             flight_ids = req.flight_ids
         selected = sync_repository.validate_uploadable_flights(conn, flight_ids)
@@ -1391,7 +1404,10 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
     selected_ids: list[int] = []
     try:
         if req.flight_ids is None:
-            flight_ids = [int(item["id"]) for item in sync_repository.list_upload_queue(conn)]
+            flight_ids = [
+                int(item["id"])
+                for item in sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+            ]
         else:
             flight_ids = req.flight_ids
         selected = sync_repository.validate_uploadable_flights(conn, flight_ids)
@@ -1501,6 +1517,91 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
         if run_id is not None:
             sync_repository.finish_sync_run(conn, run_id, "failed", error={"phase": "local", "message": str(e)})
             conn.commit()
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/run")
+def post_sync_run(req: SyncRunRequest, request: Request):
+    """Run one manual sync cycle: push queued local flights, then pull server data into local cache."""
+    steps = []
+    push_result = None
+    pull_result = None
+
+    conn = get_db()
+    try:
+        if req.flight_ids is None:
+            queue_rows = sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+            push_ids = [
+                int(item["id"])
+                for item in queue_rows
+                if item.get("sync_state") in {"pending_upload", "upload_failed"}
+            ]
+            dirty_count = sum(1 for item in queue_rows if item.get("sync_state") == "dirty")
+        else:
+            clean_ids = sorted({int(fid) for fid in req.flight_ids})
+            if clean_ids:
+                placeholders = ",".join("?" for _ in clean_ids)
+                rows = conn.execute(
+                    f"SELECT id, sync_state FROM flights WHERE id IN ({placeholders})",
+                    clean_ids,
+                ).fetchall()
+                push_ids = [
+                    int(row["id"])
+                    for row in rows
+                    if row["sync_state"] in {"pending_upload", "upload_failed"}
+                ]
+                dirty_count = sum(1 for row in rows if row["sync_state"] == "dirty")
+            else:
+                push_ids = []
+                dirty_count = 0
+    finally:
+        conn.close()
+
+    if push_ids:
+        push_result = post_sync_push(
+            SyncPushBatchRequest(flight_ids=push_ids, server_token=req.server_token),
+            request,
+        )
+        steps.append({"name": "push", "status": push_result.get("status", "unknown")})
+        if not push_result.get("ok"):
+            return {
+                "ok": False,
+                "status": push_result.get("status") or "push_failed",
+                "steps": steps,
+                "push": push_result,
+                "pull": None,
+                "summary": push_result.get("summary"),
+            }
+    else:
+        detail = "无可上传项"
+        if dirty_count:
+            detail = f"跳过 {dirty_count} 个 dirty 项，当前阶段需人工处理后上传"
+        steps.append({"name": "push", "status": "skipped", "detail": detail})
+
+    pull_result = post_sync_pull(SyncPullRequest(since=req.since, server_token=req.server_token), request)
+    steps.append({"name": "pull", "status": pull_result.get("status", "unknown")})
+    return {
+        "ok": bool(pull_result.get("ok")),
+        "status": "success" if pull_result.get("ok") else (pull_result.get("status") or "pull_failed"),
+        "steps": steps,
+        "push": push_result,
+        "pull": pull_result,
+        "summary": pull_result.get("summary"),
+    }
+
+
+@app.post("/api/sync/abandon")
+def post_sync_abandon(req: SyncAbandonRequest):
+    """Keep selected queued flights local-only so they no longer upload automatically."""
+    conn = get_db()
+    try:
+        changed = sync_repository.abandon_uploads(conn, req.flight_ids)
+        summary = sync_repository.upload_queue_summary(conn)
+        conn.commit()
+        return {"ok": True, "status": "abandoned", "abandoned": changed, "summary": summary}
+    except ValueError as e:
         raise HTTPException(400, str(e))
     finally:
         conn.close()

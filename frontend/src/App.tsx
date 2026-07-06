@@ -3,13 +3,15 @@ import ImportPage from './pages/ImportPage';
 import FlightView from './pages/FlightView';
 import ComparePage from './pages/ComparePage';
 import ModelManager from './pages/ModelManager';
+import SyncPage from './pages/SyncPage';
 import {
   checkHealth, listFlights, listModels, listAircraft,
-  getAppContext, login, logout, changePassword, createUser, setSessionToken,
-  type Flight, type AircraftModel, type Aircraft, type AppContext,
+  getAppContext, getRuntimeContext, login, logout, changePassword, createUser, setSessionToken,
+  type Flight, type AircraftModel, type Aircraft, type AppContext, type RuntimeContext,
 } from './api';
+import { Server, Wifi, WifiOff } from 'lucide-react';
 
-type Tab = 'import' | 'models' | 'flight' | 'compare';
+type Tab = 'import' | 'models' | 'flight' | 'compare' | 'sync';
 type Capability = AppContext['capabilities'][number];
 
 // ═══════════════════════════════════════════════════════════════
@@ -46,6 +48,38 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNod
 
 function hasCapability(context: AppContext | null, cap: Capability): boolean {
   return context?.capabilities.includes(cap) ?? false;
+}
+
+function formatTime(value?: string | null) {
+  if (!value) return '-';
+  return value.replace('T', ' ').slice(0, 16);
+}
+
+function RuntimeStatus({ runtime, onOpenSync }: { runtime: RuntimeContext | null; onOpenSync: () => void }) {
+  const online = !!runtime?.server_reachable;
+  const pending = runtime?.sync_summary.pending_upload ?? 0;
+  const failed = runtime?.sync_summary.upload_failed ?? 0;
+  const conflict = runtime?.sync_summary.conflict ?? 0;
+  return (
+    <button
+      type="button"
+      onClick={onOpenSync}
+      className="hidden xl:flex items-center gap-2 max-w-[560px] px-2.5 py-1 rounded border border-gray-200 bg-white text-left hover:border-blue-300 hover:bg-blue-50"
+      title={runtime?.server_base_url || '未配置服务器'}
+    >
+      <Server className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+      {online ? <Wifi className="w-3.5 h-3.5 text-emerald-600 shrink-0" /> : <WifiOff className="w-3.5 h-3.5 text-red-500 shrink-0" />}
+      <span className="text-xs text-gray-600 truncate">{runtime?.server_base_url || '未配置服务器'}</span>
+      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${online ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+        {runtime?.server_status || 'unknown'}
+      </span>
+      <span className="text-xs text-gray-500">用户 {runtime?.server_user?.username || '未登录'}</span>
+      <span className="text-xs text-amber-700">待 {pending}</span>
+      <span className="text-xs text-red-700">失败 {failed}</span>
+      <span className="text-xs text-red-700">冲突 {conflict}</span>
+      <span className="text-[10px] text-gray-400">pull {formatTime(runtime?.sync_summary.last_pull_at)}</span>
+    </button>
+  );
 }
 
 function AccountPanel({
@@ -257,6 +291,7 @@ export default function App() {
   const [initError, setInitError] = useState<string | null>(null);
   const [modelsVersion, setModelsVersion] = useState(0);
   const [appContext, setAppContextState] = useState<AppContext | null>(null);
+  const [runtimeContext, setRuntimeContext] = useState<RuntimeContext | null>(null);
 
   // ── Three-level selection: Model → Aircraft → Flight ──
   const [models, setModels] = useState<AircraftModel[]>([]);
@@ -270,6 +305,14 @@ export default function App() {
       setFlights(data.flights);
     } catch (e) {
       console.error('Failed to load flights:', e);
+    }
+  };
+
+  const loadRuntimeContext = async () => {
+    try {
+      setRuntimeContext(await getRuntimeContext());
+    } catch (e) {
+      console.error('Failed to load runtime context:', e);
     }
   };
 
@@ -309,6 +352,7 @@ export default function App() {
   const onDataChanged = () => {
     loadFlights();
     loadModels();
+    loadRuntimeContext();
     setModelsVersion(v => v + 1);
   };
 
@@ -317,8 +361,9 @@ export default function App() {
     setInitError(null);
     try {
       await checkHealth();
-      const [contextData, modelsData, flightsData] = await Promise.all([getAppContext(), listModels(), listFlights()]);
+      const [contextData, runtimeData, modelsData, flightsData] = await Promise.all([getAppContext(), getRuntimeContext(), listModels(), listFlights()]);
       setAppContextState(contextData);
+      setRuntimeContext(runtimeData);
       setModels(modelsData.models);
       setFlights(flightsData.flights);
       // Auto-select first model → first aircraft → first flight
@@ -331,7 +376,7 @@ export default function App() {
           if (acData.aircraft.length > 0) {
             const firstAcId = acData.aircraft[0].id;
             setSelectedAircraftId(firstAcId);
-            const acFlights = flightsData.flights.filter(f => f.aircraft_id === firstAcId);
+            const acFlights = flightsData.flights.filter(f => f.aircraft_id === firstAcId && f.sync_state !== 'server_deleted');
             if (acFlights.length > 0) {
               setSelectedFlightId(acFlights[0].id);
             }
@@ -363,11 +408,12 @@ export default function App() {
 
   // When aircraft changes, auto-select first flight under that aircraft
   useEffect(() => {
+    const availableFlights = flights.filter((f) => f.sync_state !== 'server_deleted');
     const acFlights = selectedAircraftId
-      ? flights.filter(f => f.aircraft_id === selectedAircraftId)
+      ? availableFlights.filter(f => f.aircraft_id === selectedAircraftId)
       : selectedModelId
-        ? flights.filter(f => f.model_id === selectedModelId)
-        : flights;
+        ? availableFlights.filter(f => f.model_id === selectedModelId)
+        : availableFlights;
     if (acFlights.length > 0) {
       const currentInList = acFlights.some(f => f.id === selectedFlightId);
       if (!currentInList) {
@@ -383,11 +429,14 @@ export default function App() {
     setTab('flight');
   };
 
+  const visibleAnalysisFlights = flights.filter((f) => f.sync_state !== 'server_deleted');
+
   const tabs: { key: Tab; label: string }[] = [
     { key: 'import', label: '导入数据' },
     { key: 'models', label: '数据管理' },
     { key: 'flight', label: '飞行分析' },
     { key: 'compare', label: '飞行对比' },
+    { key: 'sync', label: '同步队列' },
   ];
 
   return (
@@ -412,6 +461,7 @@ export default function App() {
           </nav>
         </div>
         <div className="flex items-center gap-3">
+          <RuntimeStatus runtime={runtimeContext} onOpenSync={() => setTab('sync')} />
           {appContext && (
             <AccountPanel context={appContext} onContextChanged={setAppContextState} />
           )}
@@ -457,7 +507,7 @@ export default function App() {
               <ErrorBoundary>
                 <FlightView
                   active={tab === 'flight'}
-                  flights={flights}
+                  flights={visibleAnalysisFlights}
                   selectedFlightId={selectedFlightId}
                   onSelectFlight={setSelectedFlightId}
                   onFlightsChanged={onDataChanged}
@@ -474,7 +524,7 @@ export default function App() {
             <div className={tab === 'compare' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
               <ErrorBoundary>
                 <ComparePage
-                  flights={flights}
+                  flights={visibleAnalysisFlights}
                   models={models}
                   selectedModelId={selectedModelId}
                   onSelectModel={setSelectedModelId}
@@ -492,6 +542,16 @@ export default function App() {
                   flights={flights}
                   modelsVersion={modelsVersion}
                   capabilities={appContext?.capabilities ?? []}
+                />
+              </ErrorBoundary>
+            </div>
+            <div className={tab === 'sync' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
+              <ErrorBoundary>
+                <SyncPage
+                  runtime={runtimeContext}
+                  onRefreshContext={loadRuntimeContext}
+                  onDataChanged={onDataChanged}
+                  onNavigateToFlight={navigateToFlight}
                 />
               </ErrorBoundary>
             </div>

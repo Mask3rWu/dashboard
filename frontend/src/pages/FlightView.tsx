@@ -12,6 +12,7 @@ import {
   type FilterSpec, type FilterPreset,
 } from '../api';
 import FilterBar from '../components/FilterBar';
+import { syncStateClass, syncStateLabel } from '../syncStatus';
 
 interface Props {
   active: boolean;
@@ -923,7 +924,12 @@ export default function FlightView({
                             : 'text-gray-700 hover:bg-gray-50'
                         }`}
                       >
-                        <span className="truncate block">{f.name}</span>
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span className="truncate">{f.name}</span>
+                          <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${syncStateClass(f.sync_state)}`}>
+                            {syncStateLabel(f.sync_state)}
+                          </span>
+                        </span>
                       </button>
                     ))
                   )}

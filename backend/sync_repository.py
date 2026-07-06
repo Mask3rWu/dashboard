@@ -7,6 +7,7 @@ from datetime import datetime
 
 
 UPLOAD_QUEUE_STATES = ("pending_upload", "dirty", "upload_failed")
+VISIBLE_QUEUE_STATES = ("pending_upload", "dirty", "upload_failed", "conflict")
 
 
 def now_text() -> str:
@@ -61,8 +62,8 @@ def rows_by_ids(conn, quote_identifier, table: str, ids: set[int]) -> list[dict]
     return [dict(r) for r in rows]
 
 
-def list_upload_queue(conn, states: tuple[str, ...] = UPLOAD_QUEUE_STATES) -> list[dict]:
-    """Return local flights that can be packed into a push bundle."""
+def list_upload_queue(conn, states: tuple[str, ...] = VISIBLE_QUEUE_STATES) -> list[dict]:
+    """Return local flights that need sync attention."""
     if not states:
         return []
     placeholders = ",".join("?" for _ in states)
@@ -146,6 +147,23 @@ def validate_uploadable_flights(conn, flight_ids: list[int]) -> list[dict]:
     if invalid:
         raise ValueError(f"架次不在上传队列中: {invalid}")
     return [found[fid] for fid in clean_ids]
+
+
+def abandon_uploads(conn, flight_ids: list[int]) -> int:
+    """Keep selected queued flights local-only and remove upload errors."""
+    clean_ids = sorted({int(fid) for fid in flight_ids})
+    if not clean_ids:
+        raise ValueError("至少选择一个待放弃上传的架次")
+    placeholders = ",".join("?" for _ in clean_ids)
+    conn.execute(
+        f"""UPDATE flights
+            SET sync_state='local_only',
+                sync_error_json=NULL
+            WHERE id IN ({placeholders})
+              AND sync_state IN ('pending_upload', 'dirty', 'upload_failed', 'conflict')""",
+        clean_ids,
+    )
+    return int(conn.execute("SELECT changes()").fetchone()[0] or 0)
 
 
 def create_sync_run(conn, run_type: str) -> int:
