@@ -43,7 +43,7 @@ from backend.scanner import scan_folder_sessions
 from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
 from backend.sync_package import export_package
 from backend.sync_import import preview_import, import_package, get_import_report
-from backend import flight_repository, user_repository
+from backend import flight_repository, user_repository, sync_repository
 from backend import runtime_context
 from backend import analysis
 
@@ -310,6 +310,10 @@ class CreateUserRequest(BaseModel):
 
 class SyncExportRequest(BaseModel):
     flight_ids: list[int]
+
+
+class SyncPushBatchRequest(BaseModel):
+    flight_ids: list[int] | None = None
 
 
 class SyncImportPreviewRequest(BaseModel):
@@ -1290,6 +1294,33 @@ def get_sync_export_tree(q: str | None = None):
         conn.close()
 
 
+def _json_or_none(value: str | None):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return {"raw": value}
+
+
+@app.get("/api/sync/queue")
+def get_sync_queue():
+    """Return local flights waiting for upload-oriented synchronization."""
+    conn = get_db()
+    try:
+        items = []
+        for row in sync_repository.list_upload_queue(conn):
+            item = dict(row)
+            item["sync_error"] = _json_or_none(item.get("sync_error_json"))
+            items.append(item)
+        return {
+            "summary": sync_repository.upload_queue_summary(conn),
+            "items": items,
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/api/sync/export")
 def post_sync_export(req: SyncExportRequest):
     """Export selected flights to the fixed sync_exports directory."""
@@ -1297,6 +1328,35 @@ def post_sync_export(req: SyncExportRequest):
     try:
         result = export_package(conn, req.flight_ids)
         return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sync/push")
+@app.post("/api/sync/push-batch")
+def post_sync_push_batch(req: SyncPushBatchRequest):
+    """Generate the internal push_batch bundle for selected queued flights.
+
+    Stage 3 stops at local bundle generation. Server preflight/upload and local
+    state writeback are added in later stages, so this endpoint does not mutate
+    sync_state.
+    """
+    conn = get_db()
+    try:
+        if req.flight_ids is None:
+            flight_ids = [int(item["id"]) for item in sync_repository.list_upload_queue(conn)]
+        else:
+            flight_ids = req.flight_ids
+        selected = sync_repository.validate_uploadable_flights(conn, flight_ids)
+        result = export_package(conn, [int(item["id"]) for item in selected], bundle_kind="push_batch")
+        return {
+            **result,
+            "status": "bundle_generated",
+            "selected_flights": selected,
+            "summary": sync_repository.upload_queue_summary(conn),
+        }
     except ValueError as e:
         raise HTTPException(400, str(e))
     finally:

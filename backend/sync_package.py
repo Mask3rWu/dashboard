@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -19,7 +20,8 @@ from backend.format_configs import build_model_config_from_db
 from backend.raw_storage import OBJECT_ROOT
 
 
-PACKAGE_VERSION = 1
+PACKAGE_VERSION = 2
+SYNC_PROTOCOL_VERSION = 1
 APP_VERSION = "2.0.0"
 EXPORT_DIR = os.path.join(DATA_DIR, "sync_exports")
 
@@ -58,11 +60,12 @@ def _safe_zip_path(path: str) -> str:
     return "/".join(parts)
 
 
-def _unique_package_path(source_node_id: str) -> str:
+def _unique_package_path(source_node_id: str, bundle_kind: str) -> str:
     os.makedirs(EXPORT_DIR, exist_ok=True)
     safe_node = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_node_id or "unknown")
+    safe_kind = re.sub(r"[^A-Za-z0-9_.-]+", "_", bundle_kind or "bundle")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"FlightAnalyzer_{safe_node}_{stamp}"
+    base = f"FlightAnalyzer_{safe_kind}_{safe_node}_{stamp}"
     candidate = os.path.join(EXPORT_DIR, f"{base}.fapkg")
     counter = 1
     while os.path.exists(candidate):
@@ -75,16 +78,40 @@ def _rows_by_ids(conn, table: str, ids: set[int]) -> list[dict]:
     return sync_repository.rows_by_ids(conn, _q, table, ids)
 
 
-def _manifest(conn, ids: dict[str, set[int]], source_node_id: str, source_environment: str) -> dict:
+def _manifest(
+    conn,
+    ids: dict[str, set[int]],
+    source_node_id: str,
+    source_environment: str,
+    bundle_kind: str,
+    package_id: str,
+    base_server_cursor: str | None,
+) -> dict:
     models = _rows_by_ids(conn, "aircraft_models", ids["models"])
     aircraft = _rows_by_ids(conn, "aircraft", ids["aircraft"])
     flights = _rows_by_ids(conn, "flights", ids["flights"])
 
     placeholders = ",".join("?" for _ in ids["flights"])
     raw_rows = conn.execute(
-        f"""SELECT frf.id, frf.flight_id, frf.original_name, frf.original_rel_path,
-                  frf.data_type_key, frf.source_mtime,
-                  fo.id as file_object_id, fo.sha256, fo.size_bytes, fo.storage_rel_path
+        f"""SELECT frf.id, frf.client_uid, frf.server_id, frf.source_node_id,
+                  frf.sync_origin, frf.sync_state, frf.server_version,
+                  frf.last_sync_at, frf.sync_error_json,
+                  frf.flight_id, frf.original_name, frf.original_rel_path,
+                  frf.data_type_key, frf.source_mtime, frf.created_at,
+                  frf.updated_at, frf.deleted_at, frf.server_deleted_at,
+                  fo.id as file_object_id, fo.client_uid as file_object_client_uid,
+                  fo.server_id as file_object_server_id,
+                  fo.source_node_id as file_object_source_node_id,
+                  fo.sync_origin as file_object_sync_origin,
+                  fo.sync_state as file_object_sync_state,
+                  fo.server_version as file_object_server_version,
+                  fo.last_sync_at as file_object_last_sync_at,
+                  fo.sync_error_json as file_object_sync_error_json,
+                  fo.sha256, fo.size_bytes, fo.storage_rel_path,
+                  fo.created_at as file_object_created_at,
+                  fo.updated_at as file_object_updated_at,
+                  fo.deleted_at as file_object_deleted_at,
+                  fo.server_deleted_at as file_object_server_deleted_at
             FROM flight_raw_files frf
             JOIN file_objects fo ON fo.id = frf.file_object_id
             WHERE frf.flight_id IN ({placeholders})
@@ -101,11 +128,15 @@ def _manifest(conn, ids: dict[str, set[int]], source_node_id: str, source_enviro
 
     return {
         "package_version": PACKAGE_VERSION,
+        "sync_protocol_version": SYNC_PROTOCOL_VERSION,
+        "package_id": package_id,
+        "bundle_kind": bundle_kind,
         "app_version": APP_VERSION,
         "schema_version": CURRENT_SCHEMA_VERSION,
         "source_node_id": source_node_id,
         "source_environment": source_environment,
         "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "base_server_cursor": base_server_cursor,
         "models": models,
         "aircraft": aircraft,
         "flights": flights,
@@ -216,16 +247,36 @@ def write_parsed_sqlite(conn, flight_ids: set[int], out_path: str) -> None:
         dst.close()
 
 
-def export_package(conn, flight_ids: list[int]) -> dict:
+def export_package(
+    conn,
+    flight_ids: list[int],
+    *,
+    bundle_kind: str = "manual_export",
+    package_id: str | None = None,
+    base_server_cursor: str | None = None,
+) -> dict:
     """Export selected flights into a .fapkg zip under the fixed export dir."""
+    if bundle_kind not in {"manual_export", "push_batch", "pull_bundle"}:
+        raise ValueError(f"Unsupported bundle_kind: {bundle_kind}")
     clean_flight_ids = sorted({int(fid) for fid in flight_ids})
     ids = sync_repository.selected_ids(conn, clean_flight_ids)
     source_node_id = sync_repository.get_setting(
         conn, "local_node_id", sync_repository.get_setting(conn, "node_id", "field-unknown")
     )
     source_environment = sync_repository.get_setting(conn, "environment", "field")
-    manifest = _manifest(conn, ids, source_node_id, source_environment)
-    out_path = _unique_package_path(source_node_id)
+    if base_server_cursor is None:
+        base_server_cursor = sync_repository.get_setting(conn, "last_pull_cursor", "") or None
+    package_id = package_id or f"pkg-{uuid.uuid4().hex}"
+    manifest = _manifest(
+        conn,
+        ids,
+        source_node_id,
+        source_environment,
+        bundle_kind,
+        package_id,
+        base_server_cursor,
+    )
+    out_path = _unique_package_path(source_node_id, bundle_kind)
 
     tmp_dir = tempfile.mkdtemp(prefix="flightanalyzer_export_")
     parsed_path = os.path.join(tmp_dir, "parsed.sqlite")
@@ -263,9 +314,12 @@ def export_package(conn, flight_ids: list[int]) -> dict:
             "ok": True,
             "path": out_path,
             "filename": os.path.basename(out_path),
+            "package_id": package_id,
+            "bundle_kind": bundle_kind,
             "flight_count": len(ids["flights"]),
             "raw_file_count": len(manifest["raw_files"]),
             "parsed_sha256": parsed_sha,
+            "parsed_size_bytes": manifest["parsed_data"]["size_bytes"],
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
