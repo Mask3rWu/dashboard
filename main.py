@@ -24,6 +24,10 @@ else:
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from backend.config import load_app_config
+
+CONFIG_PATH = load_app_config()
+
 from backend.database import init_db, get_db, DATA_DIR, DB_PATH, DB_BACKEND
 from backend.parser import import_session
 from backend import auth as auth_helpers
@@ -290,6 +294,11 @@ class RuntimeConfigUpdate(BaseModel):
     data_dir: str | None = None
     server_base_url: str | None = None
     sync_enabled: bool | None = None
+
+
+class ServerLoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class LoginRequest(BaseModel):
@@ -1236,6 +1245,36 @@ def patch_runtime_config(req: RuntimeConfigUpdate, request: Request):
         conn.close()
 
 
+@app.post("/api/server-auth/login")
+def server_login(req: ServerLoginRequest):
+    conn = get_db()
+    try:
+        if not runtime_context.get_sync_enabled(conn):
+            raise HTTPException(400, "SYNC_ENABLED is false")
+        server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+        return sync_client.login(server_base_url, req.username.strip(), req.password)
+    except sync_client.SyncClientError as e:
+        raise HTTPException(e.status_code or 502, e.to_error_json("server_login"))
+    finally:
+        conn.close()
+
+
+@app.post("/api/server-auth/logout")
+def server_logout(request: Request):
+    token = _server_token(None, request)
+    conn = get_db()
+    try:
+        server_base_url = runtime_context.get_server_base_url(conn)
+        if server_base_url and token:
+            try:
+                sync_client.logout(server_base_url, token=token)
+            except sync_client.SyncClientError:
+                pass
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @app.get("/api/flights/{flight_id}/raw-files")
 def get_flight_raw_files(flight_id: int):
     """List archived raw files attached to a flight."""
@@ -1359,6 +1398,11 @@ def _server_token(req, request: Request) -> str | None:
     return None
 
 
+def _server_header_token(request: Request) -> str | None:
+    token = request.headers.get("x-server-token")
+    return token.strip() if token else None
+
+
 def _server_token_from_query(server_token: str | None, request: Request) -> str | None:
     if server_token:
         return server_token
@@ -1390,7 +1434,26 @@ def _require_local_delete_capability(conn, request: Request, entity_type: str) -
         "aircraft": "delete_aircraft",
         "flight": "delete_flights",
     }[entity_type]
-    require_capability(conn, request, capability)
+    try:
+        require_capability(conn, request, capability)
+        return
+    except HTTPException as exc:
+        if exc.status_code != 403:
+            raise
+        local_denied = exc
+
+    token = _server_header_token(request)
+    if token and runtime_context.get_sync_enabled(conn):
+        server_base_url = runtime_context.get_server_base_url(conn)
+        if server_base_url:
+            try:
+                auth_payload = sync_client.auth_me(server_base_url, token=token, timeout=2)
+                capabilities = auth_payload.get("capabilities")
+                if isinstance(capabilities, list) and capability in capabilities:
+                    return
+            except sync_client.SyncClientError:
+                pass
+    raise local_denied
 
 
 def _server_delete(
