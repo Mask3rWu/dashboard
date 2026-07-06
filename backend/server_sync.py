@@ -20,9 +20,6 @@ from . import server_database as db
 
 
 WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
-SQLITE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 def _safe_zip_path(path: str) -> str:
     raw = str(path or "").replace("\\", "/")
     if raw.startswith("/") or WINDOWS_DRIVE_RE.match(raw):
@@ -34,9 +31,10 @@ def _safe_zip_path(path: str) -> str:
 
 
 def _q_sqlite(identifier: str) -> str:
-    if not SQLITE_IDENTIFIER_RE.match(identifier or ""):
+    value = str(identifier or "")
+    if not value or "\x00" in value:
         raise ValueError(f"Unsafe SQLite identifier: {identifier!r}")
-    return f'"{identifier}"'
+    return f'"{value.replace(chr(34), chr(34) + chr(34))}"'
 
 
 def _sha256_file(path: str) -> str:
@@ -154,8 +152,8 @@ def existing_import_report(conn, package_id: str, source_node_id: str) -> dict[s
 
 
 def _max_cursor(conn) -> int:
-    row = conn.execute(db.text("SELECT MAX(`cursor`) AS cursor FROM sync_changes")).first()
-    return int((row._mapping.get("cursor") if row else 0) or 0)
+    row = conn.execute(db.text("SELECT MAX(`cursor`) AS max_cursor FROM sync_changes")).first()
+    return int((row._mapping.get("max_cursor") if row else 0) or 0)
 
 
 def _model_signature_from_manifest(model: dict[str, Any]) -> str | None:
