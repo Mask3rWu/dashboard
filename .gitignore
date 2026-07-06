@@ -1,6 +1,7 @@
 # Data
 20250323153351_535/
 *.rar
+flight_analyzer.ini
 
 # Python
 __pycache__/
