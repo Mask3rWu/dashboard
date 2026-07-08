@@ -2526,8 +2526,9 @@ def main():
                 width=1400, height=900,
                 min_size=(1024, 680),
             )
-            # Enable DevTools (right-click → Inspect, or press F12).
-            # TODO: set to False before shipping a release build.
+            # Keep DevTools available on demand (F12/right-click -> Inspect)
+            # without opening the developer console on every launch.
+            webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False
             webview.start(debug=True)
         except ImportError as e:
             _startup_log(f"pywebview unavailable, falling back to browser: {e}")

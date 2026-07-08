@@ -485,7 +485,6 @@ export interface AlignedData {
     values: (number | null)[];
     text_values?: (string | null)[];
   }>;
-  alerts: AlertItem[];
   mask?: boolean[];
   segments?: { start: number; end: number }[];
 }
@@ -508,13 +507,6 @@ export interface FilterPreset {
   model_id: number;
   name: string;
   config: FilterSpec;
-}
-
-export interface AlertItem {
-  time_str: string;
-  time_sec: number;
-  desc: string;
-  extra: string;
 }
 
 export interface FlightStats {
@@ -751,7 +743,6 @@ export const getAlignedData = (flightId: number, columnKeys: string[], filter?: 
     method: 'POST',
     body: JSON.stringify({ column_keys: columnKeys, filter: filter || undefined }),
   });
-export const getAlerts = (flightId: number) => request<{ alerts: AlertItem[] }>(`/flights/${flightId}/alerts`);
 export const getStats = (flightId: number) => request<FlightStats>(`/flights/${flightId}/stats`);
 
 // Analysis

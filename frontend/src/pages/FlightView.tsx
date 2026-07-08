@@ -2,13 +2,13 @@ import { useState, useEffect, useRef } from 'react';
 import { Pencil, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 import * as echarts from 'echarts';
 import {
-  getFlight, getAlignedData, getAlerts, getStats, getCorrelation, getAnomaly,
+  getFlight, getAlignedData, getStats, getCorrelation, getAnomaly,
   listPresets, createPreset, deletePreset,
   listFilterPresets, createFilterPreset, deleteFilterPreset,
   updateFlight, deleteFlight, updateModelColumn,
   listAircraft,
   type Flight, type ColumnGroup, type AircraftModel, type Aircraft,
-  type AlignedData, type AlertItem, type FlightStats, type Preset,
+  type AlignedData, type FlightStats, type Preset,
   type FilterSpec, type FilterPreset, type DeleteScope,
 } from '../api';
 import FilterBar from '../components/FilterBar';
@@ -30,33 +30,7 @@ interface Props {
   canDeleteFlights: boolean;
 }
 
-type ViewMode = 'chart' | 'map' | 'alerts' | 'correlation' | 'anomaly';
-
-const ALERT_EXPLANATIONS: Record<string, string> = {
-  '当前数据链传输距离': '数据链（遥控/图传）传输距离过远，可能导致信号丢失',
-  '链路遥控中断': '遥控器与飞机之间的控制链路断开，飞机可能进入失控保护',
-  '舵机过小': '舵机输出值低于正常范围，可能影响飞行控制精度',
-  '舵机过大': '舵机输出值超出正常范围，舵机可能过载',
-  '电池低电压': '机载电池电压过低，需要尽快降落',
-  '电压过高': '某路电压超出安全阈值，可能损坏电子设备',
-  '转速过高': '发动机转速超过安全上限，可能损坏发动机',
-  '转速过低': '发动机转速异常偏低，可能导致动力不足',
-  '温度过高': '某部件温度超过安全阈值',
-  'GPS信号差': 'GPS定位精度下降，影响导航精度',
-  '链路通信中断': '通信链路完全断开',
-  '高度异常': '飞行高度数据异常波动',
-  '姿态角过大': '飞机俯仰/横滚角超过安全范围',
-  '电池电量低': '电池剩余电量不足，需尽快返航',
-  '28V电压异常': '28V供电系统电压异常',
-  '12V电压异常': '12V供电系统电压异常',
-};
-
-function explainAlert(desc: string): string {
-  for (const [key, explanation] of Object.entries(ALERT_EXPLANATIONS)) {
-    if (desc.includes(key)) return explanation;
-  }
-  return '飞行状态告警，需结合前后数据综合判断';
-}
+type ViewMode = 'chart' | 'correlation' | 'anomaly';
 
 // ═══════════════════════════════════════════════════════════════
 // Chart option builder — pure function, hoisted out of the
@@ -75,6 +49,7 @@ function buildChartOption(
   const numericSeries = allSeries.filter(([, s]) => s.is_numeric !== false);
   const textSeries = allSeries.filter(([, s]) => s.is_numeric === false);
   const seriesList = numericSeries; // chart uses only numeric
+  const needsTextAnchor = seriesList.length === 0 && textSeries.length > 0;
 
   const getValues = (vals: (number | null)[], key: string) => {
     const sf = scaleFactors[key] ?? 1.0;
@@ -139,6 +114,18 @@ function buildChartOption(
         splitLine: { show: gi === 0, lineStyle: { color: '#f3f4f6' } },
       });
       g.items.forEach(([key]) => keyToGroup.set(key, gi));
+    });
+  }
+
+  if (needsTextAnchor) {
+    yAxes.push({
+      type: 'value',
+      min: 0,
+      max: 1,
+      axisLabel: { show: false },
+      axisTick: { show: false },
+      axisLine: { show: false },
+      splitLine: { show: false },
     });
   }
   const seriesYIndex = seriesList.map(([key]) => keyToGroup.get(key)!);
@@ -215,10 +202,11 @@ function buildChartOption(
       formatter: (params: any) => {
         if (!Array.isArray(params)) return '';
         const mainParams = params.filter((p: any) =>
-          p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__');
+          p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__' && p.seriesName !== '__text_anchor__');
         if (mainParams.length === 0 && textSeries.length === 0) return '';
-        const timeIdx = mainParams[0]?.dataIndex ?? -1;
-        const time = mainParams[0]?.name || (timeIdx >= 0 ? (times[timeIdx] || '') : '');
+        const anchorParam = params.find((p: any) => p.seriesName === '__text_anchor__');
+        const timeIdx = mainParams[0]?.dataIndex ?? anchorParam?.dataIndex ?? -1;
+        const time = mainParams[0]?.name || anchorParam?.name || (timeIdx >= 0 ? (times[timeIdx] || '') : '');
         let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
         // Deduplicate by seriesName (ECharts may return the same series twice
         // when multiple yAxes share data — filter keeps only the first occurrence)
@@ -271,10 +259,6 @@ function buildChartOption(
     series: [
       ...seriesList.map(([key, s], i) => {
         const values = getValues(s.values, key);
-        // Attach the alert markLine to the first line series only.
-        // (Top-level markLine causes "undefined.group" crashes; it
-        // must be owned by a series.)
-        const alertMarkLine = {};
         return {
           name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
           type: 'line' as const,
@@ -285,9 +269,20 @@ function buildChartOption(
           showSymbol: false,
           z: 1,
           lineStyle: { width: 1.5, color: seriesColor(i) },
-          ...alertMarkLine,
         };
       }),
+      ...(needsTextAnchor ? [{
+        name: '__text_anchor__',
+        type: 'line' as const,
+        yAxisIndex: 0,
+        xAxisIndex: 0,
+        data: times.map((t) => [t, 0]),
+        showSymbol: false,
+        lineStyle: { opacity: 0 },
+        itemStyle: { opacity: 0 },
+        emphasis: { disabled: true },
+        z: -2,
+      }] : []),
       ...(hasFilter ? [{
         name: '__filter_bg__',
         type: 'bar' as const,
@@ -328,7 +323,6 @@ export default function FlightView({
   const [columnGroups, setColumnGroups] = useState<ColumnGroup[]>([]);
   const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
   const [aligned, setAligned] = useState<AlignedData | null>(null);
-  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [stats, setStats] = useState<FlightStats | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [normalize, setNormalize] = useState(false);
@@ -339,7 +333,6 @@ export default function FlightView({
   const [corrData, setCorrData] = useState<any>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const [showMapLegend, setShowMapLegend] = useState(true);
   const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
   const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -469,11 +462,10 @@ export default function FlightView({
     setAligned(null);  // clear chart immediately when flight changes
     Promise.all([
       getFlight(selectedFlightId),
-      getAlerts(selectedFlightId),
       getStats(selectedFlightId),
       currentModelId != null ? listPresets(currentModelId) : Promise.resolve({ presets: [] }),
       currentModelId != null ? listFilterPresets(currentModelId) : Promise.resolve({ presets: [] }),
-    ]).then(([flightData, alertData, statsData, presetData, fpData]) => {
+    ]).then(([flightData, statsData, presetData, fpData]) => {
       // Abort if flight changed during fetch
       if (latestFlightRef.current !== selectedFlightId) return;
       setColumnGroups(flightData.columns);
@@ -486,7 +478,6 @@ export default function FlightView({
         });
       });
       setScaleFactors(sf);
-      setAlerts(alertData.alerts);
       setStats(statsData);
       setPresets(presetData.presets);
       setFilterPresets(fpData.presets);
@@ -780,14 +771,6 @@ export default function FlightView({
     }
   };
 
-  // ─── Alert grouping ────────────────────────────────────
-  const alertGroups = alerts.reduce((acc, a) => {
-    const key = a.desc || '(无描述)';
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(a);
-    return acc;
-  }, {} as Record<string, AlertItem[]>);
-
   // ─── Flight management helpers ─────────────────────────
   const handleRename = async (id: number) => {
     if (!editName.trim()) { setEditingFlightId(null); return; }
@@ -824,8 +807,6 @@ export default function FlightView({
   // ─── Render ────────────────────────────────────────────
   const TAB_DEFS: { key: ViewMode; label: string }[] = [
     { key: 'chart', label: '时序图' },
-    { key: 'map', label: '轨迹地图' },
-    { key: 'alerts', label: `告警 (${alerts.length})` },
     { key: 'correlation', label: '相关性' },
     { key: 'anomaly', label: '异常检测' },
   ];
@@ -1359,86 +1340,6 @@ export default function FlightView({
             </>
           )}
 
-          {/* Map Tab */}
-          {viewMode === 'map' && aligned && (
-            <div className="flex-1 flex flex-col min-h-0 relative">
-              <TrajectoryMap aligned={aligned} alerts={alerts} />
-              {showMapLegend && (
-                <div className="absolute bottom-4 left-4 bg-white/95 border border-gray-200 rounded-lg px-3 py-2 text-xs z-10 shadow-sm">
-                  <div className="text-gray-500 mb-1 font-medium">高度 (m)</div>
-                  <div className="flex items-center gap-2">
-                    <span className="w-16 h-2 rounded" style={{ background: 'linear-gradient(90deg, #22c55e, #eab308, #ef4444)' }} />
-                  </div>
-                  <div className="flex justify-between text-gray-400 text-[10px] mt-0.5">
-                    <span>低</span><span>高</span>
-                  </div>
-                  <div className="flex items-center gap-2 mt-2">
-                    <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
-                    <span className="text-gray-400">起点</span>
-                    <span className="w-2 h-2 rounded-full bg-red-500 inline-block ml-2" />
-                    <span className="text-gray-400">终点</span>
-                    <span className="w-2 h-2 rounded-full bg-amber-500 inline-block ml-2" />
-                    <span className="text-gray-400">告警</span>
-                  </div>
-                  <button onClick={() => setShowMapLegend(false)} className="text-gray-400 hover:text-gray-600 mt-1 text-[10px]">
-                    隐藏图例
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Alerts Tab */}
-          {viewMode === 'alerts' && (
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              <div className="flex gap-6 text-sm mb-4">
-                <div className="bg-gray-50 rounded-lg px-4 py-2 border border-gray-200">
-                  <span className="text-gray-500">告警总数：</span>
-                  <strong className="text-amber-500">{alerts.length}</strong>
-                </div>
-                <div className="bg-gray-50 rounded-lg px-4 py-2 border border-gray-200">
-                  <span className="text-gray-500">告警类型：</span>
-                  <strong className="text-gray-800">{Object.keys(alertGroups).length}</strong>
-                </div>
-              </div>
-              {Object.entries(alertGroups)
-                .sort(([, a], [, b]) => b.length - a.length)
-                .map(([desc, items]) => (
-                  <div key={desc} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                    <div className="px-4 py-2 bg-gray-50 flex items-center justify-between">
-                      <div>
-                        <span className="text-amber-600 text-sm font-medium">{desc}</span>
-                        <span className="text-gray-400 text-xs ml-2">({items.length} 次)</span>
-                      </div>
-                      <span className="text-gray-400 text-xs">
-                        {items[0]?.time_str} → {items[items.length - 1]?.time_str}
-                      </span>
-                    </div>
-                    <div className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
-                      💡 {explainAlert(desc)}
-                    </div>
-                    <div className="px-4 py-1 text-xs text-gray-400 border-t border-gray-100 grid grid-cols-5 gap-2">
-                      {items.length <= 10 ? (
-                        items.map((a, i) => (
-                          <span key={i} className="font-mono">{a.time_str}</span>
-                        ))
-                      ) : (
-                        <>
-                          {items.slice(0, 5).map((a, i) => (
-                            <span key={i} className="font-mono">{a.time_str}</span>
-                          ))}
-                          <span className="text-gray-400 col-span-5 text-center">... 省略 {items.length - 10} 次 ...</span>
-                          {items.slice(-5).map((a, i) => (
-                            <span key={i} className="font-mono">{a.time_str}</span>
-                          ))}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ))}
-            </div>
-          )}
-
           {/* Correlation Tab */}
           {viewMode === 'correlation' && (
             <div className="flex-1 flex flex-col p-4">
@@ -1619,186 +1520,3 @@ function AnomalyChart({ data }: { data: any }) {
   return <div ref={ref} className="w-full h-full" />;
 }
 
-// ═══════════════════════════════════════════════════════════
-// Trajectory Map
-// ═══════════════════════════════════════════════════════════
-
-function TrajectoryMap({ aligned, alerts }: { aligned: AlignedData; alerts: AlertItem[] }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapInst = useRef<any>(null);
-
-  useEffect(() => {
-    if (!containerRef.current || !aligned) return;
-
-    const latSeries = aligned.series['pos.lat'] || aligned.series['gps.nava_lat'];
-    const lngSeries = aligned.series['pos.lng'] || aligned.series['gps.nava_lng'];
-    const altSeries = aligned.series['gps.nava_alt'] || aligned.series['pos.rel_alt'];
-
-    if (!latSeries || !lngSeries) return;
-
-    const points: [number, number][] = [];
-    const alts: number[] = [];
-    for (let i = 0; i < latSeries.values.length; i++) {
-      if (latSeries.values[i] != null && lngSeries.values[i] != null) {
-        points.push([latSeries.values[i]!, lngSeries.values[i]!]);
-        alts.push(altSeries?.values[i] ?? 0);
-      }
-    }
-    if (points.length < 2) return;
-
-    if (mapInst.current) { mapInst.current.remove(); mapInst.current = null; }
-
-    const L = (window as any).L;
-    if (!L) {
-      renderCanvasMapFull(containerRef.current, points, alts, aligned, alerts);
-      return;
-    }
-
-    const map = L.map(containerRef.current).setView([points[0][0], points[0][1]], 14);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap',
-    }).addTo(map);
-
-    const maxAlt = Math.max(...alts.filter((a) => a != null));
-    const minAlt = Math.min(...alts.filter((a) => a != null));
-    const altRange = maxAlt - minAlt || 1;
-
-    const getColor = (alt: number) => {
-      const ratio = (alt - minAlt) / altRange;
-      if (ratio < 0.5) {
-        const r = Math.round(510 * ratio);
-        return `rgb(${r},255,50)`;
-      } else {
-        const g = Math.round(255 * (2 - 2 * ratio));
-        return `rgb(255,${g},50)`;
-      }
-    };
-
-    for (let i = 0; i < points.length - 1; i++) {
-      L.polyline([points[i], points[i + 1]], {
-        color: getColor(alts[i]),
-        weight: 3,
-        opacity: 0.8,
-      }).addTo(map);
-    }
-
-    L.circleMarker(points[0], { radius: 6, color: '#22c55e', fillColor: '#22c55e', fillOpacity: 1 })
-      .addTo(map).bindPopup('起点');
-    L.circleMarker(points[points.length - 1], { radius: 6, color: '#ef4444', fillColor: '#ef4444', fillOpacity: 1 })
-      .addTo(map).bindPopup('终点');
-
-    alerts.forEach((a) => {
-      const sec = Math.floor(a.time_sec ?? 0);
-      const idx = aligned.ref_secs.indexOf(sec);
-      if (idx >= 0 && idx < points.length) {
-        L.circleMarker(points[idx], { radius: 4, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.8 })
-          .addTo(map).bindPopup(a.desc || '告警');
-      }
-    });
-
-    mapInst.current = map;
-    return () => {
-      if (mapInst.current) { mapInst.current.remove(); mapInst.current = null; }
-    };
-  }, [aligned, alerts]);
-
-  return <div ref={containerRef} className="w-full h-full bg-gray-100" />;
-}
-
-function renderCanvasMapFull(
-  container: HTMLElement,
-  points: [number, number][],
-  alts: number[],
-  aligned: AlignedData,
-  alerts: AlertItem[],
-) {
-  const canvas = document.createElement('canvas');
-  const W = container.clientWidth;
-  const H = container.clientHeight;
-  canvas.width = W;
-  canvas.height = H;
-  canvas.style.width = '100%';
-  canvas.style.height = '100%';
-  container.innerHTML = '';
-  container.appendChild(canvas);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-
-  const lats = points.map((p) => p[0]);
-  const lngs = points.map((p) => p[1]);
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-  const latR = maxLat - minLat || 0.001;
-  const lngR = maxLng - minLng || 0.001;
-
-  const margin = 40;
-  const sx = (lng: number) => margin + ((lng - minLng) / lngR) * (W - margin * 2);
-  const sy = (lat: number) => H - margin - ((lat - minLat) / latR) * (H - margin * 2);
-
-  const maxAlt = Math.max(...alts.filter((a) => a != null), 1);
-  const minAlt = Math.min(...alts.filter((a) => a != null), 0);
-  const altR = maxAlt - minAlt || 1;
-
-  ctx.fillStyle = '#f3f4f6';
-  ctx.fillRect(0, 0, W, H);
-
-  // Grid
-  ctx.strokeStyle = '#e5e7eb';
-  ctx.lineWidth = 0.5;
-  for (let i = 0; i < 10; i++) {
-    const x = margin + (i / 9) * (W - margin * 2);
-    const y = margin + (i / 9) * (H - margin * 2);
-    ctx.beginPath(); ctx.moveTo(x, margin); ctx.lineTo(x, H - margin); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(margin, y); ctx.lineTo(W - margin, y); ctx.stroke();
-  }
-
-  // Trajectory
-  for (let i = 0; i < points.length - 1; i++) {
-    const ratio = (alts[i] - minAlt) / altR;
-    const r = ratio < 0.5 ? Math.round(510 * ratio) : 255;
-    const g = ratio < 0.5 ? 255 : Math.round(255 * (2 - 2 * ratio));
-    ctx.strokeStyle = `rgb(${r},${g},50)`;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(sx(points[i][1]), sy(points[i][0]));
-    ctx.lineTo(sx(points[i + 1][1]), sy(points[i + 1][0]));
-    ctx.stroke();
-  }
-
-  // Start / End
-  ctx.fillStyle = '#22c55e';
-  ctx.beginPath(); ctx.arc(sx(points[0][1]), sy(points[0][0]), 5, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.fillStyle = '#ef4444';
-  ctx.beginPath(); ctx.arc(sx(points[points.length - 1][1]), sy(points[points.length - 1][0]), 5, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#fff'; ctx.stroke();
-
-  // Alerts
-  alerts.forEach((a) => {
-    const sec = Math.floor(a.time_sec ?? 0);
-    const idx = aligned.ref_secs.indexOf(sec);
-    if (idx >= 0 && idx < points.length) {
-      ctx.fillStyle = '#f59e0b';
-      ctx.beginPath(); ctx.arc(sx(points[idx][1]), sy(points[idx][0]), 3, 0, Math.PI * 2); ctx.fill();
-    }
-  });
-
-  // Legend
-  const lx = W - 120, ly = margin;
-  ctx.fillStyle = '#ffffffcc';
-  ctx.fillRect(lx - 5, ly - 5, 100, 65);
-  ctx.strokeStyle = '#e5e7eb';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(lx - 5, ly - 5, 100, 65);
-  const grad = ctx.createLinearGradient(lx, 0, lx + 60, 0);
-  grad.addColorStop(0, '#22c55e');
-  grad.addColorStop(0.5, '#eab308');
-  grad.addColorStop(1, '#ef4444');
-  ctx.fillStyle = grad;
-  ctx.fillRect(lx, ly, 60, 8);
-  ctx.fillStyle = '#6b7280';
-  ctx.font = '10px sans-serif';
-  ctx.fillText('高', lx + 64, ly + 8);
-  ctx.fillText('低', lx - 12, ly + 8);
-}

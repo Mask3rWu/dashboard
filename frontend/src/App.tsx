@@ -64,7 +64,6 @@ function RuntimeStatus({ runtime, onOpenSync }: { runtime: RuntimeContext | null
     >
       <Server className="w-3.5 h-3.5 text-gray-400 shrink-0" />
       {online ? <Wifi className="w-3.5 h-3.5 text-emerald-600 shrink-0" /> : <WifiOff className="w-3.5 h-3.5 text-red-500 shrink-0" />}
-      <span className="text-xs text-gray-600 truncate">{runtime?.server_base_url || '未配置服务器'}</span>
       <span className={`text-[10px] px-1.5 py-0.5 rounded border ${online ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
         {runtime?.server_status || 'unknown'}
       </span>
@@ -262,9 +261,6 @@ export default function App() {
         </div>
         <div className="flex items-center gap-3">
           <RuntimeStatus runtime={runtimeContext} onOpenSync={() => setTab('sync')} />
-          {flights.length > 0 && (
-            <span className="text-xs text-gray-400">{flights.length} 架次已导入</span>
-          )}
         </div>
       </header>
       <main className="flex-1 overflow-hidden relative">
