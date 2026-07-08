@@ -441,6 +441,19 @@ export default function FlightView({
 
   // Track latest flight ID to abort stale async operations
   const latestFlightRef = useRef<number | null>(null);
+  const alignedRequestRef = useRef(0);
+
+  useEffect(() => {
+    setSelectedColumns([]);
+    setFilterSpec(null);
+    setColumnGroups([]);
+    setAligned(null);
+    setPresets([]);
+    setFilterPresets([]);
+    setCorrData(null);
+    setAnomalyData(null);
+    setAnomalyCol('');
+  }, [currentModelId]);
 
   // ─── Load flight data ──────────────────────────────────
   useEffect(() => {
@@ -478,8 +491,6 @@ export default function FlightView({
       setPresets(presetData.presets);
       setFilterPresets(fpData.presets);
 
-      // Preserve previously selected columns that still exist in the new flight.
-      // Only fall back to defaults on first load (no prior selection).
       setSelectedColumns((prev) => {
         const newKeys = new Set(
           flightData.columns.flatMap((g) => g.columns.map((c) => c.key))
@@ -506,18 +517,22 @@ export default function FlightView({
 
   // ─── Fetch aligned data ────────────────────────────────
   useEffect(() => {
-    if (!selectedFlightId || selectedColumns.length === 0) return;
+    const requestId = ++alignedRequestRef.current;
+    if (!selectedFlightId || selectedColumns.length === 0) {
+      setAligned(null);
+      return;
+    }
     const flightId = selectedFlightId;
     getAlignedData(flightId, selectedColumns, filterSpec ?? undefined)
       .then((data) => {
         // Abort if flight changed during fetch
-        if (latestFlightRef.current === flightId) {
+        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
           setAligned(data);
         }
       })
       .catch((err) => {
         console.error('Failed to fetch aligned data:', err);
-        if (latestFlightRef.current === flightId) {
+        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
           setAligned(null);
         }
       });

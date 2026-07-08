@@ -39,18 +39,28 @@ export default function FilterBar({
   onChangeRef.current = onChange;
   const suppressEmitRef = useRef(false);
 
-  // Sync from parent when filterSpec changes externally (e.g. preset loaded)
-  useEffect(() => {
-    if (filterSpec) {
-      suppressEmitRef.current = true;
-      setLogic(filterSpec.logic);
-      setConditions(filterSpec.conditions.length ? filterSpec.conditions : []);
-    }
-  }, [filterSpec?.logic, filterSpec?.conditions]); // fix: use array ref, not .length
-
-  // Build flat lookup: key → {label, unit}
+  // Build flat lookup: key -> {label, unit}
   const colMap = new Map<string, { label: string; unit: string }>();
   columnGroups.forEach((g) => g.columns.forEach((c) => colMap.set(c.key, { label: c.label, unit: c.unit })));
+  const availableColumnKey = columnGroups
+    .flatMap((g) => g.columns.map((c) => c.key))
+    .join('\u0001');
+
+  // Sync from parent when filterSpec changes externally (e.g. preset loaded)
+  useEffect(() => {
+    suppressEmitRef.current = true;
+    if (filterSpec) {
+      const validConditions = filterSpec.conditions.filter((c) => colMap.has(c.column));
+      setLogic(filterSpec.logic);
+      setConditions(validConditions);
+      if (validConditions.length !== filterSpec.conditions.length) {
+        onChangeRef.current(validConditions.length > 0 ? { logic: filterSpec.logic, conditions: validConditions } : null);
+      }
+    } else {
+      setLogic('and');
+      setConditions([]);
+    }
+  }, [filterSpec, availableColumnKey]);
 
   // Emit valid conditions when state changes (replaces side effects in state updaters)
   useEffect(() => {
@@ -62,6 +72,7 @@ export default function FilterBar({
     debounceRef.current = setTimeout(() => {
       const valid = conditions.filter((c) => {
         if (!c.column) return false;
+        if (!colMap.has(c.column)) return false;
         if (c.op === 'between') return c.min_val != null && c.max_val != null;
         return c.value != null;
       });
@@ -106,7 +117,8 @@ export default function FilterBar({
     if (presetNameRef.current) presetNameRef.current.value = '';
   };
 
-  const activeCount = filterSpec?.conditions?.length || 0;
+  const visibleFilterConditions = filterSpec?.conditions?.filter((c) => colMap.has(c.column)) || [];
+  const activeCount = visibleFilterConditions.length;
 
   // Only show groups that have selected columns
   const visibleGroups = columnGroups.filter((g) => g.columns.length > 0);
@@ -130,7 +142,7 @@ export default function FilterBar({
           )}
           {activeCount > 0 && (
             <span className="text-gray-400 ml-1">
-              — {filterSpec?.conditions?.map((c) => {
+              - {visibleFilterConditions.map((c) => {
                 const info = colMap.get(c.column);
                 const opLabel = OPS.find((o) => o.value === c.op)?.label || c.op;
                 const val = c.op === 'between' ? `${c.min_val}~${c.max_val}` : c.value;
