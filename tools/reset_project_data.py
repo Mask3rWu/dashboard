@@ -188,10 +188,11 @@ def reset_local(*, apply: bool) -> None:
 
 def _server_dynamic_tables(conn, db) -> list[str]:
     names: set[str] = set()
-    rows = conn.execute(
-        db.text("SELECT table_name FROM data_table_registry WHERE table_name IS NOT NULL")
-    ).fetchall()
-    names.update(str(row._mapping["table_name"]) for row in rows if row._mapping["table_name"])
+    if _server_table_exists(conn, db, "data_table_registry"):
+        rows = conn.execute(
+            db.text("SELECT table_name FROM data_table_registry WHERE table_name IS NOT NULL")
+        ).fetchall()
+        names.update(str(row._mapping["table_name"]) for row in rows if row._mapping["table_name"])
     rows = conn.execute(db.text("SHOW TABLES LIKE 'server\\_data\\_m%'")).fetchall()
     for row in rows:
         values = list(row._mapping.values())
@@ -201,10 +202,25 @@ def _server_dynamic_tables(conn, db) -> list[str]:
 
 
 def _server_table_count(conn, db, table: str) -> int:
+    if not _server_table_exists(conn, db, table):
+        return 0
     row = conn.execute(
         db.text(f"SELECT COUNT(*) AS count FROM {db.quote_identifier(table)}")
     ).first()
     return int((row._mapping["count"] if row else 0) or 0)
+
+
+def _server_table_exists(conn, db, table: str) -> bool:
+    row = conn.execute(
+        db.text(
+            """SELECT 1
+               FROM information_schema.tables
+               WHERE table_schema=DATABASE() AND table_name=:table
+               LIMIT 1"""
+        ),
+        {"table": table},
+    ).first()
+    return row is not None
 
 
 def reset_server(*, apply: bool) -> None:
@@ -216,7 +232,8 @@ def reset_server(*, apply: bool) -> None:
 
     engine = db.get_engine()
     with engine.begin() as conn:
-        db.init_server_schema(engine)
+        if apply:
+            db.init_server_schema(engine)
         dynamic_tables = _server_dynamic_tables(conn, db)
         print(f"[server] dynamic tables: {len(dynamic_tables)}")
         for table in dynamic_tables:
@@ -235,6 +252,8 @@ def reset_server(*, apply: bool) -> None:
         for table in dynamic_tables:
             conn.execute(db.text(f"DROP TABLE IF EXISTS {db.quote_identifier(table)}"))
         for table in SERVER_STATIC_TABLES:
+            if not _server_table_exists(conn, db, table):
+                continue
             conn.execute(db.text(f"DELETE FROM {db.quote_identifier(table)}"))
             try:
                 conn.execute(db.text(f"ALTER TABLE {db.quote_identifier(table)} AUTO_INCREMENT=1"))
