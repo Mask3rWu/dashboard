@@ -51,6 +51,12 @@ def _find_existing_model(conn, *, server_id: int | None, client_uid: str | None,
 def apply_builtin_model_seeds(conn) -> dict[str, Any]:
     """Create missing built-in model definitions in the local SQLite database."""
 
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key='builtin_model_seeds_enabled'"
+    ).fetchone()
+    if row and str(row[0]).strip().lower() in {"0", "false", "no", "off"}:
+        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "disabled": True}
+
     loaded = _load_seed_file()
     if loaded is None:
         return {"seed_file": None, "created": 0, "skipped": 0, "models": 0}
