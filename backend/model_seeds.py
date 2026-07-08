@@ -51,6 +51,10 @@ def _find_existing_model(conn, *, server_id: int | None, client_uid: str | None,
 def apply_builtin_model_seeds(conn) -> dict[str, Any]:
     """Create missing built-in model definitions in the local SQLite database."""
 
+    env_enabled = os.environ.get("BUILTIN_MODEL_SEEDS_ENABLED")
+    if env_enabled is not None and env_enabled.strip().lower() in {"0", "false", "no", "off"}:
+        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "disabled": True}
+
     row = conn.execute(
         "SELECT value FROM app_settings WHERE key='builtin_model_seeds_enabled'"
     ).fetchone()
@@ -129,4 +133,69 @@ def apply_builtin_model_seeds(conn) -> dict[str, Any]:
         (seed_hash,),
     )
     logger.info("Applied builtin model seeds from %s: created=%s skipped=%s", path, created, skipped)
+    return {"seed_file": path, "created": created, "skipped": skipped, "models": len(models)}
+
+
+def apply_builtin_model_seeds_to_server(conn) -> dict[str, Any]:
+    """Create missing built-in model definitions in the server MySQL database."""
+
+    if os.environ.get("SERVER_BUILTIN_MODEL_SEEDS_ENABLED", "true").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "disabled": True}
+
+    loaded = _load_seed_file()
+    if loaded is None:
+        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0}
+
+    from . import server_database as db
+
+    path, data = loaded
+    models = data.get("models") or []
+    if not isinstance(models, list):
+        raise ValueError(f"{SEED_FILENAME}.models must be a list")
+
+    created = 0
+    skipped = 0
+    for item in models:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        name = str(item.get("name") or "").strip()
+        config = item.get("config") or {}
+        if not name or not isinstance(config, dict):
+            skipped += 1
+            continue
+
+        client_uid = str(item.get("client_uid") or "").strip() or _stable_client_uid(name, config)
+        existing = conn.execute(
+            db.text(
+                """SELECT id FROM aircraft_models
+                   WHERE client_uid=:client_uid OR name=:name
+                   LIMIT 1"""
+            ),
+            {"client_uid": client_uid, "name": name},
+        ).first()
+        if existing:
+            skipped += 1
+            continue
+
+        db.create_model(
+            conn,
+            {
+                "name": name,
+                "client_uid": client_uid,
+                "source_node_id": item.get("source_node_id") or data.get("source_node_id") or "builtin_seed",
+                "has_header": bool(config.get("has_header", True)),
+                "has_uav_send_id": bool(config.get("has_uav_send_id", False)),
+                "extract_serial_from_path": bool(config.get("extract_serial_from_path", False)),
+                "data_types": config.get("data_types") or {},
+            },
+        )
+        created += 1
+
+    logger.info("Applied server builtin model seeds from %s: created=%s skipped=%s", path, created, skipped)
     return {"seed_file": path, "created": created, "skipped": skipped, "models": len(models)}

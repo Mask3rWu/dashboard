@@ -20,6 +20,14 @@ from . import server_database as db
 
 
 WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+WINDOWS_INVALID_CHARS = set('<>:"\\|?*')
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
+
+
 def _safe_zip_path(path: str) -> str:
     raw = str(path or "").replace("\\", "/")
     if raw.startswith("/") or WINDOWS_DRIVE_RE.match(raw):
@@ -28,6 +36,34 @@ def _safe_zip_path(path: str) -> str:
     if not parts or any(part in ("", ".", "..") for part in parts):
         raise ValueError(f"Unsafe zip path: {path}")
     return "/".join(parts)
+
+
+def _safe_part(value: Any, fallback: str = "_") -> str:
+    cleaned = []
+    for char in str(value or "").strip():
+        if ord(char) < 32 or char in WINDOWS_INVALID_CHARS:
+            cleaned.append("_")
+        else:
+            cleaned.append(char)
+    text = "".join(cleaned).strip(" .")
+    if not text or text in {".", ".."}:
+        text = fallback
+    if text.upper() in WINDOWS_RESERVED_NAMES:
+        text = f"{text}_"
+    return text
+
+
+def _date_prefix(value: Any) -> str:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    return digits[:8] if len(digits) >= 8 else "undated"
+
+
+def _server_raw_abs_path(storage_rel_path: str) -> str:
+    root = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "raw_files"))
+    abs_path = os.path.abspath(os.path.join(root, storage_rel_path))
+    if os.path.commonpath([root, abs_path]) != root:
+        raise ValueError("raw file path escapes raw storage root")
+    return abs_path
 
 
 def _q_sqlite(identifier: str) -> str:
@@ -240,10 +276,7 @@ def _find_flight_by_business(
 def _server_flight_raw_hashes(conn, flight_id: int) -> set[str]:
     rows = conn.execute(
         db.text(
-            """SELECT fo.sha256
-               FROM flight_raw_files frf
-               JOIN file_objects fo ON fo.id = frf.file_object_id
-               WHERE frf.flight_id=:flight_id"""
+            "SELECT sha256 FROM flight_raw_files WHERE flight_id=:flight_id"
         ),
         {"flight_id": flight_id},
     ).fetchall()
@@ -361,7 +394,7 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
                 action = "conflict"
                 reason = "business_key_raw_hash_mismatch"
             elif existing.get("deleted_at") is not None:
-                action = "conflict"
+                action = "restore"
                 reason = "server_deleted"
             else:
                 action = "existing"
@@ -619,6 +652,36 @@ def _insert_change(conn, entity_type: str, entity_id: int, package_id: str, sour
     )
 
 
+def _insert_change_with_type(
+    conn,
+    entity_type: str,
+    entity_id: int,
+    change_type: str,
+    version: int,
+    package_id: str,
+    source_node_id: str,
+) -> None:
+    conn.execute(
+        db.text(
+            """INSERT INTO sync_changes
+                 (entity_type, entity_id, change_type, entity_version, changed_at,
+                  changed_by_node_id, package_id)
+               VALUES
+                 (:entity_type, :entity_id, :change_type, :entity_version, :changed_at,
+                  :changed_by_node_id, :package_id)"""
+        ),
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "change_type": change_type,
+            "entity_version": version,
+            "changed_at": db.utcnow(),
+            "changed_by_node_id": source_node_id,
+            "package_id": package_id,
+        },
+    )
+
+
 def _ensure_aircraft(
     conn,
     aircraft: dict[str, Any],
@@ -685,7 +748,7 @@ def _ensure_flight(
     server_aircraft_id: int,
     package_id: str,
     source_node_id: str,
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, bool]:
     existing = _find_flight_by_client_uid(conn, flight.get("client_uid"))
     if not existing:
         existing = _find_flight_by_business(
@@ -695,7 +758,73 @@ def _ensure_flight(
             flight.get("session_key"),
         )
     if existing:
-        return existing, False
+        if existing.get("deleted_at") is not None:
+            now = db.utcnow()
+            version = int(existing.get("version") or 1) + 1
+            values = {
+                "id": int(existing["id"]),
+                "client_uid": existing.get("client_uid") or flight.get("client_uid"),
+                "source_node_id": flight.get("source_node_id") or source_node_id,
+                "aircraft_id": server_aircraft_id,
+                "name": _clean_text(flight.get("name")),
+                "source_path": flight.get("source_path"),
+                "session_key": _clean_text(flight.get("session_key")),
+                "flight_date": flight.get("flight_date") or None,
+                "start_time": flight.get("start_time") or None,
+                "end_time": flight.get("end_time") or None,
+                "duration_sec": flight.get("duration_sec"),
+                "total_rows": _as_int(flight.get("total_rows")) or 0,
+                "record_daily_duration_min": flight.get("record_daily_duration_min"),
+                "record_batch_name": _clean_text(flight.get("record_batch_name")),
+                "record_location": _clean_text(flight.get("record_location")),
+                "record_payload": _clean_text(flight.get("record_payload")),
+                "record_weather": _clean_text(flight.get("record_weather")),
+                "record_fuel_amount": flight.get("record_fuel_amount"),
+                "record_takeoff_weight": flight.get("record_takeoff_weight"),
+                "record_altitude": flight.get("record_altitude"),
+                "record_wind_speed": flight.get("record_wind_speed"),
+                "record_note": _clean_text(flight.get("record_note")),
+                "version": version,
+                "updated_at": flight.get("updated_at") or now,
+            }
+            conn.execute(
+                db.text(
+                    """UPDATE flights
+                       SET client_uid=:client_uid,
+                           source_node_id=:source_node_id,
+                           aircraft_id=:aircraft_id,
+                           name=:name,
+                           source_path=:source_path,
+                           session_key=:session_key,
+                           flight_date=:flight_date,
+                           start_time=:start_time,
+                           end_time=:end_time,
+                           duration_sec=:duration_sec,
+                           total_rows=:total_rows,
+                           record_daily_duration_min=:record_daily_duration_min,
+                           record_batch_name=:record_batch_name,
+                           record_location=:record_location,
+                           record_payload=:record_payload,
+                           record_weather=:record_weather,
+                           record_fuel_amount=:record_fuel_amount,
+                           record_takeoff_weight=:record_takeoff_weight,
+                           record_altitude=:record_altitude,
+                           record_wind_speed=:record_wind_speed,
+                           record_note=:record_note,
+                           version=:version,
+                           updated_at=:updated_at,
+                           deleted_at=NULL,
+                           deleted_by=NULL,
+                           delete_reason=NULL
+                       WHERE id=:id"""
+                ),
+                values,
+            )
+            row = conn.execute(db.text("SELECT * FROM flights WHERE id=:id"), {"id": int(existing["id"])}).first()
+            restored = _row_dict(row) or {}
+            _insert_change_with_type(conn, "flight", int(restored["id"]), "restore", version, package_id, source_node_id)
+            return restored, False, True
+        return existing, False, False
     now = db.utcnow()
     values = {
         "client_uid": flight.get("client_uid"),
@@ -731,10 +860,63 @@ def _ensure_flight(
     row = conn.execute(db.text("SELECT * FROM flights WHERE id=LAST_INSERT_ID()")).first()
     created = _row_dict(row) or {}
     _insert_change(conn, "flight", int(created["id"]), package_id, source_node_id)
-    return created, True
+    return created, True, False
 
 
-def _copy_raw_object_from_zip(
+def _server_flight_context(conn, flight_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        db.text(
+            """SELECT f.id, f.name, f.session_key, f.flight_date,
+                      a.id AS aircraft_id, a.name AS aircraft_name,
+                      am.id AS model_id, am.name AS model_name
+               FROM flights f
+               JOIN aircraft a ON a.id=f.aircraft_id
+               JOIN aircraft_models am ON am.id=a.model_id
+               WHERE f.id=:flight_id"""
+        ),
+        {"flight_id": flight_id},
+    ).first()
+    data = _row_dict(row)
+    if not data:
+        raise ValueError(f"server flight not found: {flight_id}")
+    return data
+
+
+def _server_storage_rel_path(conn, flight_id: int, raw: dict[str, Any]) -> str:
+    flight = _server_flight_context(conn, flight_id)
+    date = _date_prefix(flight.get("flight_date"))
+    model = f"{_safe_part(flight.get('model_name'), 'model')}__model_{flight['model_id']}"
+    aircraft = f"{_safe_part(flight.get('aircraft_name'), 'aircraft')}__aircraft_{flight['aircraft_id']}"
+    flight_name = _safe_part(flight.get("name") or flight.get("session_key"), "flight")
+    flight_dir = f"{date}_{flight_name}__flight_{flight['id']}"
+    original = str(raw.get("original_rel_path") or raw.get("original_name") or raw.get("sha256") or "raw_file").replace("\\", "/")
+    parts = [_safe_part(part) for part in original.split("/") if part and part != "."]
+    if not parts:
+        parts = [_safe_part(raw.get("original_name") or "raw_file")]
+    if not parts[-1].startswith(f"{date}_"):
+        parts[-1] = f"{date}_{parts[-1]}"
+    return PurePosixPath(model, aircraft, flight_dir, *parts).as_posix()
+
+
+def _unique_server_storage_rel_path(conn, desired_rel: str, flight_id: int) -> str:
+    path = PurePosixPath(desired_rel)
+    suffix = path.suffix
+    stem = path.name[:-len(suffix)] if suffix else path.name
+    parent = path.parent
+    index = 0
+    while True:
+        name = path.name if index == 0 else f"{stem}__{index}{suffix}"
+        candidate = name if str(parent) == "." else (parent / name).as_posix()
+        row = conn.execute(
+            db.text("SELECT id FROM flight_raw_files WHERE flight_id=:flight_id AND storage_rel_path=:path"),
+            {"flight_id": flight_id, "path": candidate},
+        ).first()
+        if not row and not os.path.exists(_server_raw_abs_path(candidate)):
+            return candidate
+        index += 1
+
+
+def _copy_raw_file_from_zip(
     bundle_path: str,
     package_path: str,
     storage_rel_path: str,
@@ -742,14 +924,11 @@ def _copy_raw_object_from_zip(
     expected_size: int,
 ) -> str:
     storage_rel_path = _safe_zip_path(storage_rel_path)
-    destination = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "objects", storage_rel_path))
-    root = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "objects"))
-    if os.path.commonpath([destination, root]) != root:
-        raise ValueError("raw object path escapes object root")
+    destination = _server_raw_abs_path(storage_rel_path)
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     if os.path.exists(destination):
         if os.path.getsize(destination) != expected_size or _sha256_file(destination) != expected_sha:
-            raise ValueError(f"stored raw object hash/size mismatch: {storage_rel_path}")
+            raise ValueError(f"stored raw file hash/size mismatch: {storage_rel_path}")
         return storage_rel_path
 
     fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".object", dir=os.path.dirname(destination))
@@ -759,9 +938,9 @@ def _copy_raw_object_from_zip(
             with zf.open(package_path) as src, open(tmp_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
         if os.path.getsize(tmp_path) != expected_size:
-            raise ValueError("raw object size does not match manifest")
+            raise ValueError("raw file size does not match manifest")
         if _sha256_file(tmp_path) != expected_sha:
-            raise ValueError("raw object sha256 does not match manifest")
+            raise ValueError("raw file sha256 does not match manifest")
         os.replace(tmp_path, destination)
     finally:
         if os.path.exists(tmp_path):
@@ -772,24 +951,18 @@ def _copy_raw_object_from_zip(
     return storage_rel_path
 
 
-def _ensure_file_object(conn, raw: dict[str, Any], bundle_path: str) -> tuple[dict[str, Any] | None, str | None, bool]:
+def _attach_raw_file(conn, raw: dict[str, Any], server_flight_id: int, bundle_path: str) -> tuple[int | None, bool, str | None]:
     expected_sha = str(raw.get("sha256") or "").lower()
     expected_size = _as_int(raw.get("size_bytes"))
     if not re.match(r"^[0-9a-fA-F]{64}$", expected_sha) or expected_size is None:
-        return None, "raw object has invalid sha256 or size", False
-    row = conn.execute(
-        db.text("SELECT * FROM file_objects WHERE sha256=:sha256"),
-        {"sha256": expected_sha},
-    ).first()
-    if row:
-        return _row_dict(row), None, False
+        return None, False, "raw file has invalid sha256 or size"
 
-    package_path = raw.get("package_path") or f"objects/{raw.get('storage_rel_path') or ''}"
+    package_path = raw.get("package_path") or f"raw_files/{raw.get('storage_rel_path') or ''}"
     package_path = _safe_zip_path(package_path)
-    storage_rel_path = raw.get("storage_rel_path") or f"sha256/{expected_sha[:2]}/{expected_sha}"
-    storage_rel_path = _safe_zip_path(storage_rel_path)
+    desired_rel = _server_storage_rel_path(conn, server_flight_id, raw)
+    storage_rel_path = _unique_server_storage_rel_path(conn, desired_rel, server_flight_id)
     try:
-        stored_rel = _copy_raw_object_from_zip(
+        stored_rel = _copy_raw_file_from_zip(
             bundle_path,
             package_path,
             storage_rel_path,
@@ -797,61 +970,43 @@ def _ensure_file_object(conn, raw: dict[str, Any], bundle_path: str) -> tuple[di
             expected_size,
         )
     except Exception as exc:
-        return None, str(exc), False
-
-    conn.execute(
-        db.text(
-            """INSERT INTO file_objects (sha256, size_bytes, storage_rel_path, created_at)
-               VALUES (:sha256, :size_bytes, :storage_rel_path, :created_at)"""
-        ),
-        {
-            "sha256": expected_sha.lower(),
-            "size_bytes": expected_size,
-            "storage_rel_path": stored_rel,
-            "created_at": db.utcnow(),
-        },
-    )
-    row = conn.execute(db.text("SELECT * FROM file_objects WHERE id=LAST_INSERT_ID()")).first()
-    return _row_dict(row), None, True
-
-
-def _attach_raw_file(conn, raw: dict[str, Any], server_flight_id: int, file_object_id: int) -> tuple[int | None, bool]:
+        return None, False, str(exc)
     existing = conn.execute(
         db.text(
             """SELECT id FROM flight_raw_files
                WHERE flight_id=:flight_id
-                 AND file_object_id=:file_object_id
-                 AND original_rel_path=:original_rel_path"""
+                 AND storage_rel_path=:storage_rel_path"""
         ),
         {
             "flight_id": server_flight_id,
-            "file_object_id": file_object_id,
-            "original_rel_path": _clean_text(raw.get("original_rel_path")),
+            "storage_rel_path": stored_rel,
         },
     ).first()
     if existing:
-        return int(existing._mapping["id"]), False
+        return int(existing._mapping["id"]), False, None
     conn.execute(
         db.text(
             """INSERT INTO flight_raw_files
-                 (flight_id, file_object_id, original_name, original_rel_path,
-                  data_type_key, source_mtime, created_at)
+                 (flight_id, original_name, original_rel_path, storage_rel_path,
+                  sha256, size_bytes, data_type_key, source_mtime, created_at)
                VALUES
-                 (:flight_id, :file_object_id, :original_name, :original_rel_path,
-                  :data_type_key, :source_mtime, :created_at)"""
+                 (:flight_id, :original_name, :original_rel_path, :storage_rel_path,
+                  :sha256, :size_bytes, :data_type_key, :source_mtime, :created_at)"""
         ),
         {
             "flight_id": server_flight_id,
-            "file_object_id": file_object_id,
             "original_name": _clean_text(raw.get("original_name")),
             "original_rel_path": _clean_text(raw.get("original_rel_path")),
+            "storage_rel_path": stored_rel,
+            "sha256": expected_sha,
+            "size_bytes": expected_size,
             "data_type_key": raw.get("data_type_key"),
             "source_mtime": raw.get("source_mtime"),
             "created_at": raw.get("created_at") or db.utcnow(),
         },
     )
     row = conn.execute(db.text("SELECT LAST_INSERT_ID() AS id")).first()
-    return int(row._mapping["id"]), True
+    return int(row._mapping["id"]), True, None
 
 
 def _insert_dynamic_rows(
@@ -861,6 +1016,8 @@ def _insert_dynamic_rows(
     server_model_id: int,
     flight_map: dict[int, int],
 ) -> int:
+    if not flight_map:
+        return 0
     inserted = 0
     dtr_rows = [
         row for row in _sqlite_rows(parsed, "data_table_registry")
@@ -872,6 +1029,11 @@ def _insert_dynamic_rows(
         data_type_key = db.validate_data_type_key(str(dtr.get("data_type_key") or ""))
         server_table = db.server_data_table_name(server_model_id, data_type_key)
         server_table_q = db.quote_identifier(server_table)
+        for server_flight_id in sorted(set(flight_map.values())):
+            conn.execute(
+                db.text(f"DELETE FROM {server_table_q} WHERE flight_id=:flight_id"),
+                {"flight_id": server_flight_id},
+            )
         col_rows = sorted(
             [
                 row for row in _sqlite_rows(parsed, "column_registry")
@@ -928,7 +1090,7 @@ def import_push_bundle(conn, bundle_path: str, imported_by: int | None = None) -
                 "preflight": preflight,
                 "conflicts": preflight.get("conflicts") or [],
                 "warnings": [],
-                "mappings": {"models": [], "aircraft": [], "flights": [], "file_objects": [], "raw_files": []},
+                "mappings": {"models": [], "aircraft": [], "flights": [], "raw_files": []},
             }
             _record_import(conn, package_id, source_node_id, imported_by, "conflict", report)
             return report
@@ -963,21 +1125,19 @@ def _import_parsed_bundle(
     model_map: dict[int, dict[str, Any]] = {}
     aircraft_map: dict[int, dict[str, Any]] = {}
     flight_map: dict[int, dict[str, Any]] = {}
-    created_source_flights: set[int] = set()
+    refreshed_source_flights: set[int] = set()
 
     imported_counts = {
         "models": 0,
         "aircraft": 0,
         "flights": 0,
-        "raw_objects": 0,
         "raw_links": 0,
         "dynamic_rows": 0,
+        "restored_flights": 0,
     }
-    existing_counts = {"models": 0, "aircraft": 0, "flights": 0, "raw_objects": 0, "raw_links": 0}
+    existing_counts = {"models": 0, "aircraft": 0, "flights": 0, "raw_links": 0}
     warnings: list[dict[str, Any]] = []
-    mappings = {"models": [], "aircraft": [], "flights": [], "file_objects": [], "raw_files": []}
-    imported_raw_object_ids: set[int] = set()
-    existing_raw_object_ids: set[int] = set()
+    mappings = {"models": [], "aircraft": [], "flights": [], "raw_files": []}
 
     for source_model in model_rows:
         source_id = int(source_model["source_id"])
@@ -1011,7 +1171,7 @@ def _import_parsed_bundle(
         source_id = int(source_flight["source_id"])
         source_aircraft_id = int(source_flight["source_aircraft_id"])
         server_aircraft = aircraft_map[source_aircraft_id]
-        server_flight, created = _ensure_flight(
+        server_flight, created, restored = _ensure_flight(
             conn,
             source_flight,
             int(server_aircraft["id"]),
@@ -1021,7 +1181,10 @@ def _import_parsed_bundle(
         flight_map[source_id] = server_flight
         if created:
             imported_counts["flights"] += 1
-            created_source_flights.add(source_id)
+            refreshed_source_flights.add(source_id)
+        elif restored:
+            imported_counts["restored_flights"] += 1
+            refreshed_source_flights.add(source_id)
         else:
             existing_counts["flights"] += 1
         mappings["flights"].append(_mapping_item(source_id, server_flight))
@@ -1032,7 +1195,7 @@ def _import_parsed_bundle(
             parsed,
             source_model_id,
             int(server_model["id"]),
-            {source_id: int(row["id"]) for source_id, row in flight_map.items() if source_id in created_source_flights},
+            {source_id: int(row["id"]) for source_id, row in flight_map.items() if source_id in refreshed_source_flights},
         )
         imported_counts["dynamic_rows"] += rows
 
@@ -1040,42 +1203,28 @@ def _import_parsed_bundle(
         source_flight_id = _first_manifest_id(raw, "flight_id", "source_flight_id")
         if source_flight_id is None or source_flight_id not in flight_map:
             continue
-        file_object, warning, object_created = _ensure_file_object(conn, raw, bundle_path)
+        raw_link_id, created, warning = _attach_raw_file(
+            conn,
+            raw,
+            int(flight_map[source_flight_id]["id"]),
+            bundle_path,
+        )
         if warning:
             warnings.append(
                 {
-                    "type": "raw_object",
+                    "type": "raw_file",
                     "source_flight_id": source_flight_id,
                     "sha256": raw.get("sha256"),
                     "message": warning,
                 }
             )
             continue
-        if not file_object:
+        if not raw_link_id:
             continue
-        file_object_id = int(file_object["id"])
-        if object_created:
-            imported_raw_object_ids.add(file_object_id)
-        else:
-            existing_raw_object_ids.add(file_object_id)
-        raw_link_id, created = _attach_raw_file(
-            conn,
-            raw,
-            int(flight_map[source_flight_id]["id"]),
-            file_object_id,
-        )
         if created:
             imported_counts["raw_links"] += 1
         else:
             existing_counts["raw_links"] += 1
-        mappings["file_objects"].append(
-            {
-                "source_id": raw.get("file_object_id"),
-                "client_uid": raw.get("file_object_client_uid"),
-                "server_id": file_object_id,
-                "sha256": file_object["sha256"],
-            }
-        )
         mappings["raw_files"].append(
             {
                 "source_id": raw.get("id"),
@@ -1085,9 +1234,6 @@ def _import_parsed_bundle(
                 "server_flight_id": int(flight_map[source_flight_id]["id"]),
             }
         )
-
-    imported_counts["raw_objects"] = len(imported_raw_object_ids)
-    existing_counts["raw_objects"] = len(existing_raw_object_ids - imported_raw_object_ids)
 
     conn.execute(
         db.text(
@@ -1496,8 +1642,8 @@ def build_pull_bundle(conn, since: int | str | None = None) -> dict[str, Any]:
                     json.dumps(_server_model_config(conn, model_id), ensure_ascii=False, indent=2, default=_json_default),
                 )
             for raw in raw_rows:
-                src = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "objects", raw["storage_rel_path"]))
-                root = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "objects"))
+                src = _server_raw_abs_path(raw["storage_rel_path"])
+                root = os.path.abspath(os.path.join(db.SERVER_DATA_DIR, "raw_files"))
                 if os.path.commonpath([src, root]) != root or not os.path.exists(src):
                     continue
                 zf.write(src, _safe_zip_path(raw["package_path"]))
@@ -1527,10 +1673,9 @@ def _server_raw_manifest_rows(conn, flight_ids: set[int]) -> list[dict[str, Any]
     rows = conn.execute(
         db.text(
             f"""SELECT frf.id, frf.flight_id, frf.original_name, frf.original_rel_path,
-                      frf.data_type_key, frf.source_mtime, frf.created_at,
-                      fo.id AS file_object_id, fo.sha256, fo.size_bytes, fo.storage_rel_path
+                      frf.storage_rel_path, frf.sha256, frf.size_bytes,
+                      frf.data_type_key, frf.source_mtime, frf.created_at
                FROM flight_raw_files frf
-               JOIN file_objects fo ON fo.id=frf.file_object_id
                WHERE frf.flight_id IN ({placeholders})
                ORDER BY frf.flight_id, frf.original_rel_path, frf.id"""
         ),
@@ -1541,7 +1686,7 @@ def _server_raw_manifest_rows(conn, flight_ids: set[int]) -> list[dict[str, Any]
         item = _row_dict(row) or {}
         storage_rel_path = _safe_zip_path(item["storage_rel_path"])
         item["storage_rel_path"] = storage_rel_path
-        item["package_path"] = _safe_zip_path(f"objects/{storage_rel_path}")
+        item["package_path"] = _safe_zip_path(f"raw_files/{storage_rel_path}")
         raw_files.append(item)
     return raw_files
 

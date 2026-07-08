@@ -6,8 +6,8 @@ import json
 from datetime import datetime
 
 
-UPLOAD_QUEUE_STATES = ("pending_upload", "dirty", "upload_failed")
-VISIBLE_QUEUE_STATES = ("pending_upload", "dirty", "upload_failed", "conflict")
+UPLOAD_QUEUE_STATES = ("local_only", "pending_upload", "dirty", "upload_failed")
+VISIBLE_QUEUE_STATES = ("local_only", "pending_upload", "dirty", "upload_failed", "conflict")
 
 
 def now_text() -> str:
@@ -94,6 +94,7 @@ def list_upload_queue(conn, states: tuple[str, ...] = VISIBLE_QUEUE_STATES) -> l
                WHEN 'upload_failed' THEN 1
                WHEN 'dirty' THEN 2
                WHEN 'pending_upload' THEN 3
+               WHEN 'local_only' THEN 3
                ELSE 9
              END,
              f.updated_at DESC,
@@ -107,14 +108,14 @@ def upload_queue_summary(conn) -> dict:
     rows = conn.execute(
         """SELECT sync_state, COUNT(*) as count
            FROM flights
-           WHERE sync_state IN ('pending_upload', 'dirty', 'upload_failed', 'conflict')
+           WHERE sync_state IN ('local_only', 'pending_upload', 'dirty', 'upload_failed', 'conflict')
              AND deleted_at IS NULL
              AND server_deleted_at IS NULL
            GROUP BY sync_state"""
     ).fetchall()
     counts = {row["sync_state"]: int(row["count"] or 0) for row in rows}
     return {
-        "pending_upload": counts.get("pending_upload", 0),
+        "pending_upload": counts.get("local_only", 0) + counts.get("pending_upload", 0),
         "dirty": counts.get("dirty", 0),
         "upload_failed": counts.get("upload_failed", 0),
         "conflict": counts.get("conflict", 0),
@@ -150,20 +151,8 @@ def validate_uploadable_flights(conn, flight_ids: list[int]) -> list[dict]:
 
 
 def abandon_uploads(conn, flight_ids: list[int]) -> int:
-    """Keep selected queued flights local-only and remove upload errors."""
-    clean_ids = sorted({int(fid) for fid in flight_ids})
-    if not clean_ids:
-        raise ValueError("至少选择一个待放弃上传的架次")
-    placeholders = ",".join("?" for _ in clean_ids)
-    conn.execute(
-        f"""UPDATE flights
-            SET sync_state='local_only',
-                sync_error_json=NULL
-            WHERE id IN ({placeholders})
-              AND sync_state IN ('pending_upload', 'dirty', 'upload_failed', 'conflict')""",
-        clean_ids,
-    )
-    return int(conn.execute("SELECT changes()").fetchone()[0] or 0)
+    """Deprecated: local-only flights are now upload queue items too."""
+    raise ValueError("当前本地架次均视为待上传，不再支持放弃上传")
 
 
 def create_sync_run(conn, run_type: str) -> int:
@@ -215,7 +204,7 @@ def mark_upload_failed(conn, flight_ids: list[int], error: dict) -> None:
                 sync_error_json=?,
                 updated_at=updated_at
             WHERE id IN ({placeholders})
-              AND sync_state IN ('pending_upload', 'dirty', 'upload_failed', 'syncing')""",
+              AND sync_state IN ('local_only', 'pending_upload', 'dirty', 'upload_failed', 'syncing')""",
         [_json_error(error), *clean_ids],
     )
 
@@ -274,7 +263,6 @@ def apply_push_report(conn, report: dict, selected_flight_ids: list[int]) -> dic
         "models": _apply_table_mappings(conn, "aircraft_models", mappings.get("models") or [], synced_at),
         "aircraft": _apply_table_mappings(conn, "aircraft", mappings.get("aircraft") or [], synced_at),
         "flights": _apply_table_mappings(conn, "flights", mappings.get("flights") or [], synced_at),
-        "file_objects": _apply_table_mappings(conn, "file_objects", mappings.get("file_objects") or [], synced_at),
         "raw_files": _apply_table_mappings(conn, "flight_raw_files", mappings.get("raw_files") or [], synced_at),
     }
     mapped_flight_ids = {

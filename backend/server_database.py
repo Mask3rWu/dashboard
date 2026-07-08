@@ -178,31 +178,22 @@ SCHEMA_DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
-    CREATE TABLE IF NOT EXISTS file_objects (
-        id BIGINT PRIMARY KEY AUTO_INCREMENT,
-        sha256 CHAR(64) NOT NULL UNIQUE,
-        size_bytes BIGINT NOT NULL,
-        storage_rel_path VARCHAR(512) NOT NULL,
-        created_at DATETIME(6) NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    """,
-    """
     CREATE TABLE IF NOT EXISTS flight_raw_files (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         flight_id BIGINT NOT NULL,
-        file_object_id BIGINT NOT NULL,
         original_name VARCHAR(255) NOT NULL,
         original_rel_path VARCHAR(1024) NOT NULL,
+        storage_rel_path VARCHAR(1024) NOT NULL,
+        sha256 CHAR(64) NOT NULL,
+        size_bytes BIGINT NOT NULL,
         data_type_key VARCHAR(128) NULL,
         source_mtime DOUBLE NULL,
         created_at DATETIME(6) NOT NULL,
-        UNIQUE KEY uniq_flight_raw (flight_id, file_object_id, original_rel_path(255)),
+        UNIQUE KEY uniq_flight_raw (flight_id, storage_rel_path(255)),
         INDEX idx_flight_raw_flight (flight_id),
-        INDEX idx_flight_raw_object (file_object_id),
+        INDEX idx_flight_raw_sha256 (sha256),
         CONSTRAINT fk_flight_raw_flight
-            FOREIGN KEY (flight_id) REFERENCES flights(id),
-        CONSTRAINT fk_flight_raw_object
-            FOREIGN KEY (file_object_id) REFERENCES file_objects(id)
+            FOREIGN KEY (flight_id) REFERENCES flights(id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
@@ -245,7 +236,6 @@ SCHEMA_DDL = [
     """,
 ]
 
-
 def text(statement: str):
     from sqlalchemy import text as sqlalchemy_text
 
@@ -284,11 +274,14 @@ def init_server_schema(engine: Engine | None = None) -> None:
         for ddl in SCHEMA_DDL:
             conn.execute(text(ddl))
         ensure_builtin_admin(conn)
+        from .model_seeds import apply_builtin_model_seeds_to_server
+
+        apply_builtin_model_seeds_to_server(conn)
 
 
 def ensure_server_data_dir() -> None:
     for rel in (
-        ("objects", "sha256"),
+        ("raw_files",),
         ("incoming",),
         ("bundles",),
     ):

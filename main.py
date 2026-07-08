@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import subprocess
 import threading
 import time as _time
 import traceback
@@ -44,7 +45,12 @@ from backend.format_configs import (
     update_column_metadata, data_table_name,
 )
 from backend.scanner import scan_folder_sessions
-from backend.raw_storage import get_raw_files_for_flight, build_flight_manifest
+from backend.raw_storage import (
+    get_raw_files_for_flight,
+    build_flight_manifest,
+    get_raw_directory_for_flight,
+    refresh_raw_storage_paths,
+)
 from backend.sync_package import export_package
 from backend.sync_import import preview_import, import_package, import_pull_bundle, get_import_report
 from backend import flight_repository, user_repository, sync_repository, sync_client
@@ -661,8 +667,9 @@ def update_model(model_id: int, req: UpdateModelRequest):
                WHERE id=?""",
             (req.name.strip(), model_id),
         )
+        raw_warnings = refresh_raw_storage_paths(conn, model_id=model_id)
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "raw_warnings": raw_warnings}
     except HTTPException:
         raise
     except Exception as e:
@@ -1131,8 +1138,9 @@ def update_aircraft(aircraft_id: int, req: UpdateAircraftRequest):
                WHERE id=?""",
             (req.name.strip(), aircraft_id),
         )
+        raw_warnings = refresh_raw_storage_paths(conn, aircraft_id=aircraft_id)
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "raw_warnings": raw_warnings}
     except HTTPException:
         raise
     except Exception as e:
@@ -1301,6 +1309,37 @@ def get_flight_raw_manifest(flight_id: int):
         if not manifest:
             raise HTTPException(404, "Flight not found")
         return manifest
+    finally:
+        conn.close()
+
+
+def _open_directory(path: str) -> None:
+    if sys.platform.startswith("win"):
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+@app.post("/api/flights/{flight_id}/raw-folder/open")
+def open_flight_raw_folder(flight_id: int):
+    """Open the readable stored raw-file directory for a flight."""
+    conn = get_db()
+    try:
+        folder = get_raw_directory_for_flight(conn, flight_id)
+        if not folder:
+            raise HTTPException(404, "Flight not found")
+        if not folder["path"] or not folder.get("file_count"):
+            raise HTTPException(404, "No stored raw files for this flight")
+        os.makedirs(folder["path"], exist_ok=True)
+        _open_directory(folder["path"])
+        conn.commit()
+        return folder
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Cannot open readable raw file directory: {exc}") from exc
     finally:
         conn.close()
 
@@ -1739,7 +1778,7 @@ def post_sync_run(req: SyncRunRequest, request: Request):
             push_ids = [
                 int(item["id"])
                 for item in queue_rows
-                if item.get("sync_state") in {"pending_upload", "upload_failed"}
+                if item.get("sync_state") in {"local_only", "pending_upload", "upload_failed"}
             ]
             dirty_count = sum(1 for item in queue_rows if item.get("sync_state") == "dirty")
         else:
@@ -1753,7 +1792,7 @@ def post_sync_run(req: SyncRunRequest, request: Request):
                 push_ids = [
                     int(row["id"])
                     for row in rows
-                    if row["sync_state"] in {"pending_upload", "upload_failed"}
+                    if row["sync_state"] in {"local_only", "pending_upload", "upload_failed"}
                 ]
                 dirty_count = sum(1 for row in rows if row["sync_state"] == "dirty")
             else:
@@ -1797,7 +1836,7 @@ def post_sync_run(req: SyncRunRequest, request: Request):
 
 @app.post("/api/sync/abandon")
 def post_sync_abandon(req: SyncAbandonRequest):
-    """Keep selected queued flights local-only so they no longer upload automatically."""
+    """Deprecated: local-only flights are still upload queue items."""
     conn = get_db()
     try:
         changed = sync_repository.abandon_uploads(conn, req.flight_ids)

@@ -91,6 +91,16 @@ def load_app_config(path: str | os.PathLike[str] | None = None) -> Path | None:
     if parser.has_section("mysql"):
         _setenv_if_present("SERVER_DB_URL", _mysql_url(parser))
 
+    if parser.has_section("dev"):
+        _setenv_if_present(
+            "BUILTIN_MODEL_SEEDS_ENABLED",
+            parser.get("dev", "load_local", fallback=""),
+        )
+        _setenv_if_present(
+            "SERVER_BUILTIN_MODEL_SEEDS_ENABLED",
+            parser.get("dev", "load_server", fallback=""),
+        )
+
     return config_path
 
 

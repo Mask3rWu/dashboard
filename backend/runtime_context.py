@@ -112,7 +112,11 @@ def _count_flights_by_state(conn, state: str) -> int:
 
 def _sync_summary(conn) -> dict:
     return {
-        "pending_upload": _count_flights_by_state(conn, "pending_upload") + _count_flights_by_state(conn, "dirty"),
+        "pending_upload": (
+            _count_flights_by_state(conn, "local_only")
+            + _count_flights_by_state(conn, "pending_upload")
+            + _count_flights_by_state(conn, "dirty")
+        ),
         "upload_failed": _count_flights_by_state(conn, "upload_failed"),
         "conflict": _count_flights_by_state(conn, "conflict"),
         "last_push_at": permission_repository.get_setting(conn, "last_successful_push_at"),
