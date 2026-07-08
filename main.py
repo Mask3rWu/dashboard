@@ -210,8 +210,6 @@ class UpdateAircraftRequest(BaseModel):
 
 class AlignedRequest(BaseModel):
     column_keys: list[str]
-    ref_table: str | None = None
-    tolerance: float | None = None
     filter: dict | None = None
 
 
@@ -2134,8 +2132,7 @@ def get_columns(flight_id: int):
 def get_aligned(flight_id: int, req: AlignedRequest):
     """Get time-aligned multi-column data."""
     result = analysis.get_aligned_data(
-        flight_id, req.column_keys, req.ref_table, req.tolerance,
-        filter_spec=req.filter
+        flight_id, req.column_keys, filter_spec=req.filter
     )
     return result
 
@@ -2176,6 +2173,9 @@ def get_alerts(flight_id: int):
         except Exception:
             return {"alerts": []}
 
+        data_tables = analysis._get_available_data_tables(conn, model_id, flight_id)
+        _, _, axis_start_sec = analysis._generate_flight_grid(conn, flight_id, data_tables)
+
         # Map to frontend-compatible {desc, extra} format.
         desc_col = next((c for c in col_names if 'desc' in c.lower()), col_names[0] if col_names else None)
         extra_candidates = [c for c in col_names if 'extra' in c.lower()]
@@ -2184,7 +2184,10 @@ def get_alerts(flight_id: int):
         )
 
         return {"alerts": [
-            {"time_str": r["time_str"], "time_sec": r["time_sec"],
+            {"time_str": r["time_str"], "time_sec": (
+                analysis._time_offset_from_axis(r["time_str"], axis_start_sec)
+                if axis_start_sec is not None else r["time_sec"]
+            ),
              "desc": str(r[desc_col]) if desc_col and r[desc_col] is not None else '',
              "extra": str(r[extra_col]) if extra_col and r[extra_col] is not None else ''}
             for r in rows

@@ -235,7 +235,9 @@ def _fix_duplicate_seconds(conn, table_name, flight_id):
     Pattern [a, b, b, c] with c - b >= 2 → second b becomes b+1 to fill the gap.
     Pattern [a, b, b, b+1] → no change (next second is already continuous).
 
-    Only applies to tables with sample rate in [0.9, 1.1] Hz.
+    Only applies to tables whose overall row density is close to one row per
+    second. This is a guard for the repair heuristic, not a displayed sampling
+    frequency.
     """
     rows = conn.execute(
         f"SELECT id, time_sec FROM {table_name} WHERE flight_id=? ORDER BY time_sec",
@@ -245,14 +247,14 @@ def _fix_duplicate_seconds(conn, table_name, flight_id):
     if len(rows) < 3:
         return
 
-    # Check sample rate
+    # Check overall row density.
     min_sec = rows[0]['time_sec']
     max_sec = rows[-1]['time_sec']
     duration = max_sec - min_sec
     if duration <= 0:
         return
-    sample_hz = (len(rows) - 1) / duration
-    if not (0.9 <= sample_hz <= 1.1):
+    overall_density = (len(rows) - 1) / duration
+    if not (0.9 <= overall_density <= 1.1):
         return
 
     # Scan for duplicate integer-second groups with a gap ahead

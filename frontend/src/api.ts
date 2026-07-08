@@ -462,7 +462,6 @@ export interface ColumnGroup {
   table: string;
   label: string;
   row_count?: number;
-  sample_hz?: number | null;
   duration_sec?: number;
   columns: ColumnItem[];
 }
@@ -474,21 +473,7 @@ export interface ColumnItem {
   scale_factor: number;
 }
 
-export interface RefTableInfo {
-  data_type_key: string;
-  label: string;
-  row_count: number;
-  sample_hz: number | null;
-  duration_sec: number;
-  is_alert: boolean;
-}
-
 export interface AlignedData {
-  ref_table?: string;
-  ref_label?: string;
-  ref_sample_hz?: number | null;
-  tolerance?: number;
-  ref_tables?: RefTableInfo[];
   times: string[];
   ref_secs: number[];
   series: Record<string, {
@@ -761,10 +746,10 @@ export const getRegistryColumns = (modelId: number) =>
 
 // Data
 export const getColumns = (flightId: number) => request<{ columns: ColumnGroup[] }>(`/flights/${flightId}/columns`);
-export const getAlignedData = (flightId: number, columnKeys: string[], refTable?: string | null, tolerance?: number | null, filter?: FilterSpec) =>
+export const getAlignedData = (flightId: number, columnKeys: string[], filter?: FilterSpec) =>
   request<AlignedData>(`/flights/${flightId}/aligned`, {
     method: 'POST',
-    body: JSON.stringify({ column_keys: columnKeys, ref_table: refTable || null, tolerance: tolerance ?? null, filter: filter || undefined }),
+    body: JSON.stringify({ column_keys: columnKeys, filter: filter || undefined }),
   });
 export const getAlerts = (flightId: number) => request<{ alerts: AlertItem[] }>(`/flights/${flightId}/alerts`);
 export const getStats = (flightId: number) => request<FlightStats>(`/flights/${flightId}/stats`);

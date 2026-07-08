@@ -58,17 +58,6 @@ function explainAlert(desc: string): string {
   return '飞行状态告警，需结合前后数据综合判断';
 }
 
-function formatSampleHz(hz?: number | null): string {
-  if (hz == null || !Number.isFinite(hz) || hz <= 0) return '频率未知';
-  if (hz < 0.1) return `${hz.toFixed(3)}Hz`;
-  if (hz < 10) return `${hz.toFixed(2)}Hz`;
-  return `${hz.toFixed(1)}Hz`;
-}
-
-function groupKey(group: ColumnGroup): string {
-  return group.data_type_key || group.columns[0]?.key.split('.')[0] || group.table;
-}
-
 // ═══════════════════════════════════════════════════════════════
 // Chart option builder — pure function, hoisted out of the
 // component so it allocates fresh each call and isn't recreated
@@ -343,7 +332,6 @@ export default function FlightView({
   const [stats, setStats] = useState<FlightStats | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [normalize, setNormalize] = useState(false);
-  const [refTable, setRefTable] = useState<string | null>(null);
   const [, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
   const [anomalyCol, setAnomalyCol] = useState('');
@@ -477,8 +465,6 @@ export default function FlightView({
       if (latestFlightRef.current !== selectedFlightId) return;
       setColumnGroups(flightData.columns);
       setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
-      const availableRefKeys = new Set(flightData.columns.map((g: ColumnGroup) => groupKey(g)));
-      setRefTable((prev) => (prev && availableRefKeys.has(prev) ? prev : null));
       // Initialize scale factors from column metadata
       const sf: Record<string, number> = {};
       flightData.columns.forEach((g: ColumnGroup) => {
@@ -522,7 +508,7 @@ export default function FlightView({
   useEffect(() => {
     if (!selectedFlightId || selectedColumns.length === 0) return;
     const flightId = selectedFlightId;
-    getAlignedData(flightId, selectedColumns, refTable, null, filterSpec ?? undefined)
+    getAlignedData(flightId, selectedColumns, filterSpec ?? undefined)
       .then((data) => {
         // Abort if flight changed during fetch
         if (latestFlightRef.current === flightId) {
@@ -535,7 +521,7 @@ export default function FlightView({
           setAligned(null);
         }
       });
-  }, [selectedFlightId, selectedColumns, refTable, filterSpec]);
+  }, [selectedFlightId, selectedColumns, filterSpec]);
 
   // ─── Chart: lifecycle ──────────────────────────────────
   //
@@ -1078,23 +1064,6 @@ export default function FlightView({
         >
           ↺ 重置
         </button>
-
-        <select
-          value={refTable || ''}
-          onChange={(e) => setRefTable(e.target.value || null)}
-          className="bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-500"
-          title={`选择时间基准数据源；当前容差 ${aligned?.tolerance?.toFixed(2) ?? '-'}s，较低频数据容差会自动放宽以减少断线`}
-        >
-          <option value="">自动基准:最高频</option>
-          {columnGroups.map((g) => {
-            const key = groupKey(g);
-            return (
-              <option key={key} value={key}>
-                基准:{g.label} · {formatSampleHz(g.sample_hz)}
-              </option>
-            );
-          })}
-        </select>
       </div>
 
       {/* ── Error message banner ─────────────────────────── */}
@@ -1146,8 +1115,6 @@ export default function FlightView({
           >
             {sidebarOpen ? '◀ 收起筛选' : '▶ 展开筛选'}
           </button>
-          <span className="text-gray-500">基准: <strong className="text-gray-800">{aligned?.ref_label || '自动'}</strong>{aligned?.ref_sample_hz ? <span className="text-gray-400"> · {formatSampleHz(aligned.ref_sample_hz)}</span> : null}</span>
-          <span className="text-gray-500">对齐容差: <strong className="text-gray-800">{aligned?.tolerance?.toFixed(2) ?? '-'}s</strong></span>
           <span className="text-gray-500">时长: <strong className="text-gray-800">{Math.round(stats.duration_sec / 60)}min</strong></span>
         </div>
       )}
@@ -1222,7 +1189,7 @@ export default function FlightView({
                       >
                         <span className="min-w-0">
                           <span className="block truncate">{group.label}</span>
-                          <span className="block text-[10px] font-normal text-gray-400">{formatSampleHz(group.sample_hz)} · {group.row_count ?? 0}行</span>
+                          <span className="block text-[10px] font-normal text-gray-400">{group.row_count ?? 0}行</span>
                         </span>
                         <span className="text-gray-400 text-[10px]">
                           {selectedCount}/{group.columns.length}

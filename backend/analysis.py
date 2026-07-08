@@ -5,7 +5,8 @@ of hardcoded DATA_TABLES.
 """
 
 import math
-from collections import defaultdict, OrderedDict
+from bisect import bisect_left
+from collections import Counter, defaultdict, OrderedDict
 from backend.database import get_db
 from backend.format_configs import get_table_name, get_columns_for_flight
 
@@ -122,11 +123,13 @@ def get_columns_for_flight_api(flight_id):
 
 
 def _get_table_stats(conn, table_name, flight_id):
-    """Return row count, time span, and estimated sampling rate for a flight table."""
+    """Return row count and time span for a flight table."""
     row = conn.execute(
         f"""SELECT COUNT(*) as row_count,
                   MIN(time_sec) as start_sec,
-                  MAX(time_sec) as end_sec
+                  MAX(time_sec) as end_sec,
+                  MIN(time_str) as start_str,
+                  MAX(time_str) as end_str
            FROM {table_name} WHERE flight_id=?""",
         (flight_id,)
     ).fetchone()
@@ -134,17 +137,17 @@ def _get_table_stats(conn, table_name, flight_id):
     start_sec = row['start_sec'] if row else None
     end_sec = row['end_sec'] if row else None
     duration = (end_sec - start_sec) if start_sec is not None and end_sec is not None else 0
-    sample_hz = ((row_count - 1) / duration) if row_count > 1 and duration > 0 else None
     return {
         'row_count': row_count,
         'start_sec': start_sec,
         'end_sec': end_sec,
+        'start_str': row['start_str'] if row else None,
+        'end_str': row['end_str'] if row else None,
         'duration_sec': duration,
-        'sample_hz': sample_hz,
     }
 
 
-def _get_available_ref_tables(conn, model_id, flight_id):
+def _get_available_data_tables(conn, model_id, flight_id):
     """Return registered data tables that actually contain rows for this flight."""
     rows = conn.execute(
         """SELECT data_type_key, display_label, table_name, is_alert
@@ -167,78 +170,110 @@ def _get_available_ref_tables(conn, model_id, flight_id):
     return refs
 
 
-def _pick_reference_table(ref_tables, requested_ref_table=None):
-    """Pick a reference table, preferring the request then the highest-rate data table."""
-    if requested_ref_table:
-        requested = next(
-            (r for r in ref_tables if r['data_type_key'] == requested_ref_table),
-            None,
-        )
-        if requested:
-            return requested
+def _nearest_table_data(table_data, table_times, ref_t, tolerance):
+    """Return the row data nearest to ref_t within tolerance, or None.
 
-    non_alert = [r for r in ref_tables if not r['is_alert']]
-    candidates = non_alert or ref_tables
-    if not candidates:
+    Uses binary search instead of a moving pointer so duplicate timestamps do
+    not block progress for later reference times.
+    """
+    if not table_data:
         return None
-    return max(candidates, key=lambda r: (r['sample_hz'] or 0, r['row_count']))
+    if ref_t < table_times[0] or ref_t > table_times[-1]:
+        return None
+
+    pos = bisect_left(table_times, ref_t)
+    candidates = []
+    if pos < len(table_data):
+        candidates.append(pos)
+    if pos > 0:
+        candidates.append(pos - 1)
+
+    best_idx = None
+    best_delta = None
+    for idx in candidates:
+        delta = abs(table_times[idx] - ref_t)
+        if best_delta is None or delta < best_delta:
+            best_idx = idx
+            best_delta = delta
+
+    if best_idx is not None and best_delta is not None and best_delta <= tolerance:
+        return table_data[best_idx][1]
+    return None
 
 
-def _auto_tolerance(ref_info, selected_infos):
-    """Choose a nearest-neighbor tolerance from the slowest selected sampling period."""
-    periods = []
-    for info in [ref_info, *selected_infos]:
-        hz = info.get('sample_hz') if info else None
-        if hz and hz > 0:
-            periods.append(1 / hz)
-    if not periods:
-        return 0.5
-    return max(0.5, min(5.0, max(periods) * 0.6))
+def _table_time_shape(table_times):
+    """Classify a table's timestamp structure without estimating Hz."""
+    if not table_times:
+        return {'high_rate': False, 'irregular': False}
+
+    seconds = [int(math.floor(t)) for t in table_times]
+    counts = Counter(seconds)
+    occupied = sorted(counts)
+    row_density = len(table_times) / max(1, len(occupied))
+    has_gaps = any((occupied[i] - occupied[i - 1]) != 1 for i in range(1, len(occupied)))
+    has_duplicates = any(count > 1 for count in counts.values())
+
+    return {
+        'high_rate': row_density >= 1.5,
+        'irregular': has_gaps or has_duplicates,
+    }
+
+
+def _time_part(value):
+    if not value:
+        return None
+    return str(value).strip().split()[-1]
+
+
+def _time_offset_from_axis(time_str, axis_start_sec):
+    sec = time_to_sec(time_str)
+    if sec < axis_start_sec - 43200:
+        sec += 86400
+    return sec - axis_start_sec
+
+
+def _generate_flight_grid(conn, flight_id, data_tables):
+    """Generate a uniform 1-second grid covering all data in the flight."""
+    flight = conn.execute(
+        "SELECT start_time, end_time, duration_sec FROM flights WHERE id=?",
+        (flight_id,),
+    ).fetchone()
+
+    start_parts = [r.get('start_str') for r in data_tables if r.get('start_str')]
+    end_parts = [r.get('end_str') for r in data_tables if r.get('end_str')]
+    if flight:
+        flight_start = _time_part(flight['start_time'])
+        flight_end = _time_part(flight['end_time'])
+        if flight_start:
+            start_parts.append(flight_start)
+        if flight_end:
+            end_parts.append(flight_end)
+
+    if not start_parts or not end_parts:
+        return [], [], None
+
+    axis_start_sec = min(time_to_sec(t) for t in start_parts)
+    end_secs = []
+    for value in end_parts:
+        sec = time_to_sec(value)
+        if sec < axis_start_sec:
+            sec += 86400
+        end_secs.append(sec)
+    axis_end_sec = max(end_secs)
+
+    ref_secs = list(range(0, int(math.ceil(axis_end_sec - axis_start_sec)) + 1))
+    times = [sec_to_time_str(axis_start_sec + s) for s in ref_secs]
+    return ref_secs, times, axis_start_sec
 
 
 # ── Aligned data ──
 
-def _generate_uniform_grid(conn, ref_info, flight_id):
-    """Generate a uniform 1-second integer grid as the alignment reference.
-
-    Args:
-        conn: SQLite connection
-        ref_info: Reference table info dict (must have table_name)
-        flight_id: Flight ID
-
-    Returns:
-        (ref_secs, times) — both lists of equal length:
-            ref_secs: list of int (0, 1, 2, ...)
-            times: list of str ("HH:MM:SS")
-        Returns ([], []) if no data.
-    """
-    row = conn.execute(
-        f"SELECT MIN(time_sec) as start_sec, MAX(time_sec) as end_sec, "
-        f"MIN(time_str) as start_str "
-        f"FROM {ref_info['table_name']} WHERE flight_id=?",
-        (flight_id,)
-    ).fetchone()
-    if not row or row['start_sec'] is None or row['end_sec'] is None:
-        return [], []
-
-    start_int = int(math.floor(row['start_sec']))
-    end_int = int(math.floor(row['end_sec']))
-    base_sec = time_to_sec(row['start_str'])
-
-    ref_secs = list(range(start_int, end_int + 1))
-    times = [sec_to_time_str(base_sec + (s - start_int)) for s in ref_secs]
-    return ref_secs, times
-
-
-def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, filter_spec=None):
-    """Align selected columns to a reference time series.
+def get_aligned_data(flight_id, column_keys, filter_spec=None):
+    """Align selected columns to the flight's unified 1-second time series.
 
     Args:
         flight_id: Flight ID
         column_keys: List of "data_type_key.column_name" strings
-        ref_table: Reference data_type_key for time base. If omitted, the
-                   highest-rate data table in the current flight is used.
-        tolerance: Max time difference for nearest-neighbor matching
         filter_spec: Optional filter with {logic, conditions}
 
     Returns:
@@ -250,28 +285,9 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
         conn.close()
         return {'times': [], 'series': {}, 'alerts': [], 'error': 'Flight not found'}
 
-    ref_tables = _get_available_ref_tables(conn, model_id, flight_id)
-    ref_info = _pick_reference_table(ref_tables, ref_table)
-    if ref_info is None:
-        conn.close()
-        return {'times': [], 'series': {}, 'alerts': []}
-    ref_table_name = ref_info['table_name']
-
-    # Generate uniform 1s integer grid as the reference time axis
-    ref_secs, times = _generate_uniform_grid(conn, ref_info, flight_id)
-
-    if not ref_secs:
-        # Fall back to another populated table for this flight.
-        for candidate in ref_tables:
-            if candidate['table_name'] == ref_table_name:
-                continue
-            ref_secs, times = _generate_uniform_grid(conn, candidate, flight_id)
-            if ref_secs:
-                ref_info = candidate
-                ref_table_name = candidate['table_name']
-                break
-
-    if not ref_secs:
+    data_tables = _get_available_data_tables(conn, model_id, flight_id)
+    ref_secs, times, axis_start_sec = _generate_flight_grid(conn, flight_id, data_tables)
+    if not ref_secs or axis_start_sec is None:
         conn.close()
         return {'times': [], 'series': {}, 'alerts': []}
 
@@ -282,13 +298,6 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
             dt_key, col_name = key.split('.', 1)
             by_dt[dt_key].append(col_name)
 
-    selected_table_infos = []
-    for dt_key in by_dt:
-        selected_info = next((r for r in ref_tables if r['data_type_key'] == dt_key), None)
-        if selected_info:
-            selected_table_infos.append(selected_info)
-    effective_tolerance = tolerance if tolerance is not None else _auto_tolerance(ref_info, selected_table_infos)
-
     # Fetch and align data for each data type
     series = {}
     for dt_key, cols in by_dt.items():
@@ -297,10 +306,10 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
             continue
 
         # Fetch all data for this table
-        col_str = ', '.join(cols + ['time_sec'])
+        col_str = ', '.join(cols + ['time_str'])
         try:
             db_rows = conn.execute(
-                f"SELECT {col_str} FROM {table_name} WHERE flight_id=? ORDER BY time_sec",
+                f"SELECT {col_str} FROM {table_name} WHERE flight_id=? ORDER BY time_str, id",
                 (flight_id,)
             ).fetchall()
         except Exception:
@@ -313,11 +322,10 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
         table_data = []
         for row in db_rows:
             d = {c: row[c] for c in cols}
-            table_data.append((row['time_sec'], d))
-
-        # Determine this table's sample rate for frequency-dependent alignment
-        dt_stats = _get_table_stats(conn, table_name, flight_id)
-        dt_hz = dt_stats['sample_hz']
+            table_data.append((_time_offset_from_axis(row['time_str'], axis_start_sec), d))
+        table_data.sort(key=lambda item: item[0])
+        table_times = [t for t, _ in table_data]
+        time_shape = _table_time_shape(table_times)
 
         # Align to uniform integer-second grid
         for col in cols:
@@ -325,42 +333,29 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
             label, unit, scale_factor, is_numeric = _get_column_info(conn, model_id, dt_key, col)
             values = []
 
-            if dt_hz is not None and dt_hz >= 1.1:
-                # ── >1Hz: take first row within each integer second ──
+            if time_shape['high_rate']:
+                # Multi-row-per-second tables are downsampled to the first row
+                # in each displayed second.
                 row_idx = 0
                 for s in ref_secs:
-                    # Advance to first row >= s
                     while row_idx < len(table_data) and table_data[row_idx][0] < s:
                         row_idx += 1
                     if row_idx < len(table_data) and table_data[row_idx][0] < s + 1:
                         values.append(table_data[row_idx][1].get(col))
-                        # Skip remaining rows in this integer second
                         while row_idx + 1 < len(table_data) and table_data[row_idx + 1][0] < s + 1:
                             row_idx += 1
                     else:
                         values.append(None)
-            elif dt_hz is not None and 0.9 <= dt_hz <= 1.1:
-                # ── ~1Hz: exact integer-second match (duplicate seconds already fixed at import) ──
-                row_idx = 0
-                for s in ref_secs:
-                    while row_idx < len(table_data) and table_data[row_idx][0] < s:
-                        row_idx += 1
-                    if row_idx < len(table_data) and abs(table_data[row_idx][0] - s) <= 0.05:
-                        values.append(table_data[row_idx][1].get(col))
-                    else:
-                        values.append(None)
             else:
-                # ── <1Hz or unknown: nearest-neighbor within tolerance ──
-                ti = 0
-                for ref_t in ref_secs:
-                    while ti < len(table_data) - 1 and (
-                        abs(table_data[ti + 1][0] - ref_t) < abs(table_data[ti][0] - ref_t)
-                    ):
-                        ti += 1
-                    if ti < len(table_data) and abs(table_data[ti][0] - ref_t) <= effective_tolerance:
-                        values.append(table_data[ti][1].get(col))
-                    else:
-                        values.append(None)
+                match_tolerance = 1.0 if time_shape['irregular'] else 0.05
+                for s in ref_secs:
+                    nearest = _nearest_table_data(
+                        table_data,
+                        table_times,
+                        s,
+                        match_tolerance,
+                    )
+                    values.append(nearest.get(col) if nearest else None)
 
             entry = {
                 'label': label,
@@ -412,7 +407,7 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
 
             alerts = [{
                 'time_str': r['time_str'],
-                'time_sec': r['time_sec'],
+                'time_sec': _time_offset_from_axis(r['time_str'], axis_start_sec),
                 'desc': str(r[desc_col]) if desc_col and r[desc_col] is not None else '',
                 'extra': str(r[extra_col]) if extra_col and r[extra_col] is not None else '',
             } for r in alert_rows]
@@ -420,18 +415,6 @@ def get_aligned_data(flight_id, column_keys, ref_table=None, tolerance=None, fil
     conn.close()
 
     result = {
-        'ref_table': ref_info['data_type_key'],
-        'ref_label': ref_info['label'],
-        'ref_sample_hz': ref_info['sample_hz'],
-        'tolerance': effective_tolerance,
-        'ref_tables': [{
-            'data_type_key': r['data_type_key'],
-            'label': r['label'],
-            'row_count': r['row_count'],
-            'sample_hz': r['sample_hz'],
-            'duration_sec': r['duration_sec'],
-            'is_alert': r['is_alert'],
-        } for r in ref_tables],
         'times': times,
         'ref_secs': ref_secs,
         'series': series,

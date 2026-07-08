@@ -864,13 +864,11 @@ def get_columns_for_flight(conn, flight_id):
             start_sec = stat['start_sec'] if stat else None
             end_sec = stat['end_sec'] if stat else None
             duration = (end_sec - start_sec) if start_sec is not None and end_sec is not None else 0
-            sample_hz = ((row_count - 1) / duration) if row_count > 1 and duration > 0 else None
             table_stats[tk] = {
                 'row_count': row_count,
                 'start_sec': start_sec,
                 'end_sec': end_sec,
                 'duration_sec': duration,
-                'sample_hz': sample_hz,
             }
 
         stats = table_stats[tk]
@@ -883,7 +881,6 @@ def get_columns_for_flight(conn, flight_id):
                 'table': table_name,
                 'label': row['display_label'],
                 'row_count': stats['row_count'],
-                'sample_hz': stats['sample_hz'],
                 'duration_sec': stats['duration_sec'],
                 'columns': [],
             }
