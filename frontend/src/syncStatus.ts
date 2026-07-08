@@ -5,6 +5,7 @@ export type SyncStateFilter =
   | 'server_cache'
   | 'synced'
   | 'local_unsynced'
+  | 'dirty'
   | 'upload_failed'
   | 'conflict'
   | 'server_deleted';
@@ -13,7 +14,8 @@ export const SYNC_STATE_FILTERS: { key: SyncStateFilter; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'server_cache', label: '服务器缓存' },
   { key: 'synced', label: '已同步' },
-  { key: 'local_unsynced', label: '本地未同步' },
+  { key: 'local_unsynced', label: '本地' },
+  { key: 'dirty', label: '待更新' },
   { key: 'upload_failed', label: '上传失败' },
   { key: 'conflict', label: '冲突' },
   { key: 'server_deleted', label: '服务器已删除' },
@@ -22,7 +24,7 @@ export const SYNC_STATE_FILTERS: { key: SyncStateFilter; label: string }[] = [
 export function syncStateLabel(state?: string | null) {
   const labels: Record<string, string> = {
     local_only: '本地',
-    pending_upload: '本地未同步',
+    pending_upload: '本地',
     syncing: '同步中',
     synced: '已同步',
     dirty: '待更新',
@@ -35,7 +37,7 @@ export function syncStateLabel(state?: string | null) {
 }
 
 export function syncStateClass(state?: string | null) {
-  if (state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
+  if (state === 'local_only' || state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
   if (state === 'upload_failed' || state === 'conflict') return 'bg-red-50 text-red-700 border-red-200';
   if (state === 'synced' || state === 'server_cache') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
   if (state === 'server_deleted') return 'bg-gray-100 text-gray-500 border-gray-300 line-through';
@@ -52,12 +54,12 @@ export function deleteActionLabel(item?: { sync_state?: string | null; server_id
   const scope = deleteScopeFor(item);
   if (scope === 'server') return '删除服务器数据';
   if (scope === 'local_cache') return '清理本地缓存';
-  return '删除本地未同步数据';
+  return '删除本地数据';
 }
 
 export function matchesSyncStateFilter(flight: Pick<Flight, 'sync_state'>, filter: SyncStateFilter) {
   const state = flight.sync_state || '';
   if (filter === 'all') return true;
-  if (filter === 'local_unsynced') return state === 'pending_upload' || state === 'dirty' || state === 'local_only';
+  if (filter === 'local_unsynced') return state === 'local_only' || state === 'pending_upload';
   return state === filter;
 }

@@ -21,7 +21,7 @@ import {
 
 
 interface Props {
-  onImported: () => void;
+  onImported: () => void | Promise<void>;
   canDeleteFlights: boolean;
   isLoggedIn?: boolean;
 }
@@ -505,9 +505,9 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
       });
       if (result.error) throw new Error(result.error);
       setImportedKeys((prev) => new Set(prev).add(key));
-      onImported();
-      loadFlights();
-      refreshScan();
+      await onImported();
+      await loadFlights();
+      await refreshScan();
     } catch (e: any) {
       setErrorKeys((prev) => ({ ...prev, [key]: e.message }));
     } finally {
@@ -590,9 +590,9 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
   const handleDelete = async (flight: Flight) => {
     await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
     setDeletingFlightId(null);
-    loadFlights();
-    onImported();
-    refreshScan();
+    await loadFlights();
+    await onImported();
+    await refreshScan();
   };
 
   const handleRename = async (id: number) => {
@@ -768,7 +768,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
       setSyncImportReport(report);
       await loadFlights();
       await loadContext();
-      onImported();
+      await onImported();
     } catch (e) {
       setSyncImportError(e instanceof Error ? e.message : String(e));
     } finally {

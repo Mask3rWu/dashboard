@@ -4,7 +4,7 @@ import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight, updateFlightRecord,
-  getRawFiles, getRawManifest,
+  getRawFiles, openRawFolder,
   getModelColumns, updateModelColumn, updateModelDataTypeLabel,
   exportModel, importModel,
   type AircraftModel, type Aircraft, type Flight,
@@ -24,7 +24,7 @@ interface Props {
 function syncStateLabel(state?: string | null) {
   const labels: Record<string, string> = {
     local_only: '本地',
-    pending_upload: 'pending_upload',
+    pending_upload: '本地',
     syncing: '同步中',
     synced: '已同步',
     dirty: '待更新',
@@ -37,7 +37,7 @@ function syncStateLabel(state?: string | null) {
 }
 
 function syncStateClass(state?: string | null) {
-  if (state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
+  if (state === 'local_only' || state === 'pending_upload' || state === 'dirty') return 'bg-amber-50 text-amber-700 border-amber-200';
   if (state === 'upload_failed' || state === 'conflict') return 'bg-red-50 text-red-700 border-red-200';
   if (state === 'synced' || state === 'server_cache') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
   return 'bg-gray-50 text-gray-600 border-gray-200';
@@ -583,12 +583,14 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     }
   };
 
-  const createRawManifest = async (flightId: number) => {
+  const openRawStorageFolder = async (flightId: number) => {
     try {
-      const manifest = await getRawManifest(flightId);
-      alert(`原始文件清单已生成:\n${manifest.manifest_path}`);
+      const result = await openRawFolder(flightId);
+      if (result.warnings?.length) {
+        alert(`原始文件目录已打开，但有 ${result.warnings.length} 个路径更新警告。`);
+      }
     } catch (e: any) {
-      alert('生成清单失败: ' + (e.message || e));
+      alert('打开目录失败: ' + (e.message || e));
     }
   };
 
@@ -1074,10 +1076,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                           </span>
                                           <button
                                             type="button"
-                                            onClick={() => createRawManifest(f.id)}
+                                            onClick={() => openRawStorageFolder(f.id)}
                                             className="text-xs text-blue-600 hover:text-blue-500"
                                           >
-                                            生成 manifest
+                                            打开目录
                                           </button>
                                         </div>
                                         {loadingRawFlightId === f.id ? (

@@ -147,10 +147,13 @@ export default function App() {
     }
   };
 
-  const onDataChanged = () => {
-    loadFlights();
-    loadModels();
-    loadRuntimeContext();
+  const onDataChanged = async () => {
+    await Promise.all([
+      loadFlights(),
+      loadModels(),
+      loadRuntimeContext(),
+      selectedModelId ? loadAircraftForModel(selectedModelId) : Promise.resolve(),
+    ]);
     setModelsVersion(v => v + 1);
   };
 

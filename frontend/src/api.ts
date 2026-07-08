@@ -274,18 +274,16 @@ export interface RawFileItem {
   data_type_key?: string | null;
   source_mtime?: number | null;
   created_at: string;
-  file_object_id: number;
   sha256: string;
   size_bytes: number;
   storage_rel_path: string;
 }
 
-export interface RawManifest {
-  flight: Flight;
-  logical_prefix: string;
-  files: (RawFileItem & { logical_rel_path: string })[];
-  warnings: { file?: string; path?: string; error: string }[];
-  manifest_path: string;
+export interface RawFolderOpenResult {
+  flight_id: number;
+  file_count: number;
+  path: string;
+  warnings: { file?: string; storage_rel_path?: string; error: string; detail?: string }[];
 }
 
 export interface SyncExportFlightNode {
@@ -694,8 +692,8 @@ export const listFlights = (filters: FlightListFilters = {}) =>
 export const getFlight = (id: number) => request<Flight & { columns: ColumnGroup[] }>(`/flights/${id}`);
 export const getRawFiles = (id: number) =>
   request<{ flight_id: number; files: RawFileItem[]; warnings: { file?: string; path?: string; error: string }[] }>(`/flights/${id}/raw-files`);
-export const getRawManifest = (id: number) =>
-  request<RawManifest>(`/flights/${id}/raw-manifest`);
+export const openRawFolder = (id: number) =>
+  request<RawFolderOpenResult>(`/flights/${id}/raw-folder/open`, { method: 'POST' });
 export const getSyncExportTree = (q = '') =>
   request<{ tree: SyncExportModelNode[]; flight_count: number }>(`/sync/export-tree${buildQuery({ q })}`);
 export const exportSyncPackage = (flightIds: number[]) =>

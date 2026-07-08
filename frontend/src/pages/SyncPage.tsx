@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Download, Eye, LogIn, LogOut, RefreshCw, RotateCcw, Server, Upload, XCircle } from 'lucide-react';
 import {
-  abandonSync,
   getSyncQueue,
   pullSync,
   pushSync,
@@ -17,18 +16,18 @@ import {
 import { syncStateClass, syncStateLabel } from '../syncStatus';
 
 type QueueFilter = 'all' | 'pending_upload' | 'dirty' | 'upload_failed' | 'conflict';
-type ActionKind = 'run' | 'push' | 'pull' | 'retry' | 'abandon';
+type ActionKind = 'run' | 'push' | 'pull' | 'retry';
 
 interface Props {
   runtime: RuntimeContext | null;
   onRefreshContext: () => Promise<void>;
-  onDataChanged: () => void;
+  onDataChanged: () => void | Promise<void>;
   onNavigateToFlight: (flightId: number) => void;
 }
 
 const QUEUE_FILTERS: { key: QueueFilter; label: string }[] = [
   { key: 'all', label: '全部' },
-  { key: 'pending_upload', label: '本地未同步' },
+  { key: 'pending_upload', label: '本地' },
   { key: 'dirty', label: '待更新' },
   { key: 'upload_failed', label: '上传失败' },
   { key: 'conflict', label: '冲突' },
@@ -95,6 +94,9 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
   const filteredItems = useMemo(() => {
     const items = queue?.items ?? [];
     if (filter === 'all') return items;
+    if (filter === 'pending_upload') {
+      return items.filter((item) => item.sync_state === 'local_only' || item.sync_state === 'pending_upload');
+    }
     return items.filter((item) => item.sync_state === filter);
   }, [filter, queue]);
 
@@ -114,7 +116,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
   const refreshAll = async () => {
     await loadQueue();
     await onRefreshContext();
-    onDataChanged();
+    await onDataChanged();
   };
 
   const execute = async (kind: ActionKind, action: () => Promise<SyncOperationResult>) => {
@@ -156,7 +158,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
     });
   };
 
-  const selectedIdsArray = [...selectedIds];
   const summary = queue?.summary;
 
   const loginServer = async () => {
@@ -311,7 +312,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
           <div>
             <h2 className="text-lg font-semibold text-gray-900">上传队列与冲突</h2>
             <div className="text-xs text-gray-500 mt-1">
-              pending {summary?.pending_upload ?? 0} / dirty {summary?.dirty ?? 0} / failed {summary?.upload_failed ?? 0} / conflict {summary?.conflict ?? 0}
+              本地 {summary?.pending_upload ?? 0} / dirty {summary?.dirty ?? 0} / failed {summary?.upload_failed ?? 0} / conflict {summary?.conflict ?? 0}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -341,14 +342,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             >
               <RotateCcw className="w-3.5 h-3.5" />
               重试选中
-            </button>
-            <button
-              type="button"
-              disabled={!!busy || selectedIdsArray.length === 0}
-              onClick={() => execute('abandon', () => abandonSync(selectedIdsArray))}
-              className="px-3 py-1.5 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
-            >
-              放弃上传
             </button>
           </div>
         </div>
