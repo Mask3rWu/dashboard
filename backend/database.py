@@ -34,7 +34,7 @@ CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
     'app_settings', 'users', 'auth_sessions',
-    'file_objects', 'flight_raw_files', 'sync_imports', 'sync_runs',
+    'flight_raw_files', 'sync_imports', 'sync_runs',
 }
 SYNC_COLUMNS = {
     'client_uid', 'server_id', 'source_node_id', 'sync_origin', 'sync_state',
@@ -77,12 +77,10 @@ REQUIRED_COLUMNS = {
     'auth_sessions': {
         'token_hash', 'user_id', 'created_at', 'expires_at',
     },
-    'file_objects': {
-        'id', 'sha256', 'size_bytes', 'storage_rel_path', 'created_at',
-    } | SYNC_COLUMNS,
     'flight_raw_files': {
-        'id', 'flight_id', 'file_object_id', 'original_name',
-        'original_rel_path', 'data_type_key', 'source_mtime', 'created_at',
+        'id', 'flight_id', 'original_name', 'original_rel_path',
+        'storage_rel_path', 'sha256', 'size_bytes',
+        'data_type_key', 'source_mtime', 'created_at',
     } | SYNC_COLUMNS,
     'sync_imports': {
         'id', 'package_path', 'source_node_id', 'status', 'report_json',
@@ -98,7 +96,7 @@ def ensure_data_dir():
     """Create the application data directory with contextual errors."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        for name in ('objects', 'sync_exports', 'sync_cache', 'manifests'):
+        for name in ('raw_files', 'sync_exports', 'sync_cache', 'manifests'):
             os.makedirs(os.path.join(DATA_DIR, name), exist_ok=True)
     except OSError as e:
         raise RuntimeError(
@@ -350,28 +348,9 @@ CREATE TABLE IF NOT EXISTS flights (
     UNIQUE(aircraft_id, flight_date, session_key)
 );
 
--- Content-addressed raw file object store. Files are physically stored under
--- DATA_DIR/objects/sha256/<prefix>/<sha256>.<ext>, while business ownership is
--- resolved through flight_raw_files.
-CREATE TABLE IF NOT EXISTS file_objects (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_uid       TEXT,
-    server_id        INTEGER,
-    source_node_id   TEXT,
-    sync_origin      TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local', 'server', 'package')),
-    sync_state       TEXT NOT NULL DEFAULT 'pending_upload',
-    server_version   INTEGER,
-    last_sync_at     TEXT,
-    sync_error_json  TEXT,
-    sha256           TEXT NOT NULL UNIQUE,
-    size_bytes       INTEGER NOT NULL,
-    storage_rel_path TEXT NOT NULL,
-    created_at       TEXT DEFAULT (datetime('now','localtime')),
-    updated_at       TEXT DEFAULT (datetime('now','localtime')),
-    deleted_at       TEXT,
-    server_deleted_at TEXT
-);
-
+-- Readable raw files are physically stored under DATA_DIR/raw_files using
+-- current model/aircraft/flight names plus stable IDs. sha256 is metadata for
+-- verification and sync, not the physical storage key.
 CREATE TABLE IF NOT EXISTS flight_raw_files (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     client_uid        TEXT,
@@ -383,18 +362,21 @@ CREATE TABLE IF NOT EXISTS flight_raw_files (
     last_sync_at      TEXT,
     sync_error_json   TEXT,
     flight_id         INTEGER NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
-    file_object_id    INTEGER NOT NULL REFERENCES file_objects(id),
     original_name     TEXT NOT NULL,
     original_rel_path TEXT NOT NULL,
+    storage_rel_path  TEXT NOT NULL,
+    sha256            TEXT NOT NULL,
+    size_bytes        INTEGER NOT NULL,
     data_type_key     TEXT,
     source_mtime      REAL,
     created_at        TEXT DEFAULT (datetime('now','localtime')),
     updated_at        TEXT DEFAULT (datetime('now','localtime')),
     deleted_at        TEXT,
     server_deleted_at TEXT,
-    UNIQUE(flight_id, file_object_id, original_rel_path)
+    UNIQUE(flight_id, storage_rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_flight_raw_files_flight ON flight_raw_files(flight_id);
+CREATE INDEX IF NOT EXISTS idx_flight_raw_files_sha256 ON flight_raw_files(sha256);
 
 -- Offline sync import reports for research-network package ingestion.
 CREATE TABLE IF NOT EXISTS sync_imports (
@@ -476,7 +458,6 @@ CREATE TABLE IF NOT EXISTS filter_presets (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_aircraft_models_client_uid ON aircraft_models(client_uid) WHERE client_uid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_aircraft_client_uid ON aircraft(client_uid) WHERE client_uid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_flights_client_uid ON flights(client_uid) WHERE client_uid IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_file_objects_client_uid ON file_objects(client_uid) WHERE client_uid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_flight_raw_files_client_uid ON flight_raw_files(client_uid) WHERE client_uid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_imports_client_uid ON sync_imports(client_uid) WHERE client_uid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_flights_sync_state ON flights(sync_state);
@@ -506,16 +487,6 @@ AFTER INSERT ON flights
 WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
 BEGIN
     UPDATE flights
-       SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
-           source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
-     WHERE id = NEW.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_file_objects_sync_insert
-AFTER INSERT ON file_objects
-WHEN NEW.client_uid IS NULL OR NEW.source_node_id IS NULL
-BEGIN
-    UPDATE file_objects
        SET client_uid = COALESCE(NEW.client_uid, lower(hex(randomblob(16)))),
            source_node_id = COALESCE(NEW.source_node_id, (SELECT value FROM app_settings WHERE key='local_node_id'), 'node-' || lower(hex(randomblob(4))))
      WHERE id = NEW.id;
@@ -559,13 +530,6 @@ AFTER UPDATE ON flights
 WHEN NEW.updated_at = OLD.updated_at
 BEGIN
     UPDATE flights SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_file_objects_updated_at
-AFTER UPDATE ON file_objects
-WHEN NEW.updated_at = OLD.updated_at
-BEGIN
-    UPDATE file_objects SET updated_at = datetime('now','localtime') WHERE id = NEW.id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_flight_raw_files_updated_at

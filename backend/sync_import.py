@@ -20,7 +20,7 @@ from backend.format_configs import (
     data_table_name,
     register_model_tables,
 )
-from backend.raw_storage import OBJECT_ROOT
+from backend.raw_storage import store_raw_file_for_flight
 from backend.sync_package import PACKAGE_VERSION
 from backend import sync_repository
 
@@ -42,9 +42,10 @@ _RECORD_COLUMNS = (
 
 
 def _q(identifier: str) -> str:
-    if not _SAFE_IDENTIFIER.match(identifier):
+    value = str(identifier or "")
+    if not value or "\x00" in value:
         raise ValueError(f"Unsafe SQL identifier: {identifier}")
-    return f'"{identifier}"'
+    return f'"{value.replace(chr(34), chr(34) + chr(34))}"'
 
 
 def _safe_zip_path(path: str) -> str:
@@ -598,56 +599,33 @@ def _import_raw_files(
         if not target_flight_id:
             continue
         try:
-            package_rel = _safe_zip_path(raw.get("package_path") or f"objects/{raw.get('storage_rel_path')}")
+            package_rel = _safe_zip_path(raw.get("package_path") or f"raw_files/{raw.get('storage_rel_path')}")
             src = os.path.abspath(os.path.join(tmp_dir, package_rel))
             root = os.path.abspath(tmp_dir)
             if os.path.commonpath([src, root]) != root:
-                raise ValueError("raw object path escapes package temp dir")
+                raise ValueError("raw file path escapes package temp dir")
             if not os.path.exists(src):
-                raise ValueError("raw object missing")
+                raise ValueError("raw file missing")
             expected_size = int(raw.get("size_bytes") or -1)
             expected_sha = raw.get("sha256") or ""
             if os.path.getsize(src) != expected_size or _sha256_file(src) != expected_sha:
-                raise ValueError("raw object hash/size mismatch")
+                raise ValueError("raw file hash/size mismatch")
 
-            existing = conn.execute(
-                "SELECT id FROM file_objects WHERE sha256=?",
-                (expected_sha,),
-            ).fetchone()
-            if existing:
-                file_object_id = int(existing["id"])
-            else:
-                storage_rel = _safe_zip_path(raw.get("storage_rel_path") or f"sha256/{expected_sha[:2]}/{expected_sha}")
-                dst = os.path.abspath(os.path.join(OBJECT_ROOT, storage_rel))
-                object_root = os.path.abspath(OBJECT_ROOT)
-                if os.path.commonpath([dst, object_root]) != object_root:
-                    raise ValueError("raw object path escapes object root")
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                if os.path.exists(dst):
-                    if os.path.getsize(dst) != expected_size or _sha256_file(dst) != expected_sha:
-                        raise ValueError("existing raw object path hash/size mismatch")
-                else:
-                    shutil.copy2(src, dst)
-                conn.execute(
-                    """INSERT INTO file_objects (sha256, size_bytes, storage_rel_path)
-                       VALUES (?, ?, ?)""",
-                    (expected_sha, expected_size, storage_rel),
-                )
-                file_object_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-
-            conn.execute(
-                """INSERT OR IGNORE INTO flight_raw_files
-                   (flight_id, file_object_id, original_name, original_rel_path,
-                    data_type_key, source_mtime)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    target_flight_id,
-                    file_object_id,
-                    raw.get("original_name") or os.path.basename(raw.get("original_rel_path") or expected_sha),
-                    raw.get("original_rel_path") or raw.get("original_name") or expected_sha,
-                    raw.get("data_type_key"),
-                    raw.get("source_mtime"),
-                ),
+            store_raw_file_for_flight(
+                conn,
+                target_flight_id,
+                src,
+                raw.get("original_name") or os.path.basename(raw.get("original_rel_path") or expected_sha),
+                raw.get("original_rel_path") or raw.get("original_name") or expected_sha,
+                raw.get("data_type_key"),
+                raw.get("source_mtime"),
+                expected_sha=expected_sha,
+                expected_size=expected_size,
+                sync_values={
+                    "sync_origin": "package",
+                    "sync_state": "local_only",
+                    "source_node_id": manifest.get("source_node_id") or "package",
+                },
             )
             report["raw_files"]["attached"] += 1
         except Exception as e:
@@ -1159,81 +1137,44 @@ def _import_pull_raw_files(
         try:
             expected_sha = raw.get("sha256") or ""
             expected_size = int(raw.get("size_bytes") or -1)
-            package_rel = _safe_zip_path(raw.get("package_path") or f"objects/{raw.get('storage_rel_path')}")
+            package_rel = _safe_zip_path(raw.get("package_path") or f"raw_files/{raw.get('storage_rel_path')}")
             src = os.path.abspath(os.path.join(tmp_dir, package_rel))
             root = os.path.abspath(tmp_dir)
             if os.path.commonpath([src, root]) != root:
-                raise ValueError("raw object path escapes package temp dir")
+                raise ValueError("raw file path escapes package temp dir")
             if not os.path.exists(src):
-                raise ValueError("raw object missing from pull bundle")
+                raise ValueError("raw file missing from pull bundle")
             if os.path.getsize(src) != expected_size or _sha256_file(src) != expected_sha:
-                raise ValueError("raw object hash/size mismatch")
-
-            existing = _find_local_by_server_id(conn, "file_objects", int(raw.get("file_object_id") or 0))
-            if not existing:
-                existing = conn.execute("SELECT * FROM file_objects WHERE sha256=?", (expected_sha,)).fetchone()
-            if existing:
-                file_object_id = int(existing["id"])
-                conn.execute(
-                    """UPDATE file_objects
-                       SET server_id=COALESCE(server_id, ?), sync_origin='server',
-                           sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
-                           server_version=1, last_sync_at=datetime('now','localtime')
-                       WHERE id=?""",
-                    (raw.get("file_object_id"), file_object_id),
-                )
-            else:
-                storage_rel = _safe_zip_path(raw.get("storage_rel_path") or f"sha256/{expected_sha[:2]}/{expected_sha}")
-                dst = os.path.abspath(os.path.join(OBJECT_ROOT, storage_rel))
-                object_root = os.path.abspath(OBJECT_ROOT)
-                if os.path.commonpath([dst, object_root]) != object_root:
-                    raise ValueError("raw object path escapes object root")
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-                conn.execute(
-                    """INSERT INTO file_objects
-                       (server_id, source_node_id, sync_origin, sync_state, server_version,
-                        last_sync_at, sha256, size_bytes, storage_rel_path)
-                       VALUES (?, ?, 'server', 'server_cache', 1, datetime('now','localtime'),
-                               ?, ?, ?)""",
-                    (
-                        raw.get("file_object_id"),
-                        manifest.get("source_node_id") or "server",
-                        expected_sha,
-                        expected_size,
-                        storage_rel,
-                    ),
-                )
-                file_object_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                raise ValueError("raw file hash/size mismatch")
 
             existing_link = _find_local_by_server_id(conn, "flight_raw_files", int(raw.get("id") or 0))
             if existing_link:
                 conn.execute(
                     """UPDATE flight_raw_files
-                       SET flight_id=?, file_object_id=?, sync_origin='server',
+                       SET sync_origin='server',
                            sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
-                           last_sync_at=datetime('now','localtime')
+                           server_version=1, last_sync_at=datetime('now','localtime')
                        WHERE id=?""",
-                    (local_flight_id, file_object_id, int(existing_link["id"])),
+                    (int(existing_link["id"]),),
                 )
             else:
-                conn.execute(
-                    """INSERT OR IGNORE INTO flight_raw_files
-                       (server_id, source_node_id, sync_origin, sync_state, server_version,
-                        last_sync_at, flight_id, file_object_id, original_name,
-                        original_rel_path, data_type_key, source_mtime)
-                       VALUES (?, ?, 'server', 'server_cache', 1, datetime('now','localtime'),
-                               ?, ?, ?, ?, ?, ?)""",
-                    (
-                        raw.get("id"),
-                        manifest.get("source_node_id") or "server",
-                        local_flight_id,
-                        file_object_id,
-                        raw.get("original_name") or os.path.basename(raw.get("original_rel_path") or expected_sha),
-                        raw.get("original_rel_path") or raw.get("original_name") or expected_sha,
-                        raw.get("data_type_key"),
-                        raw.get("source_mtime"),
-                    ),
+                store_raw_file_for_flight(
+                    conn,
+                    local_flight_id,
+                    src,
+                    raw.get("original_name") or os.path.basename(raw.get("original_rel_path") or expected_sha),
+                    raw.get("original_rel_path") or raw.get("original_name") or expected_sha,
+                    raw.get("data_type_key"),
+                    raw.get("source_mtime"),
+                    expected_sha=expected_sha,
+                    expected_size=expected_size,
+                    sync_values={
+                        "server_id": raw.get("id"),
+                        "source_node_id": manifest.get("source_node_id") or "server",
+                        "sync_origin": "server",
+                        "sync_state": "server_cache",
+                        "server_version": 1,
+                    },
                 )
             report["raw_files"]["attached"] += 1
         except Exception as exc:

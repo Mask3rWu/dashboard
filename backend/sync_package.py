@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 from backend import sync_repository
 from backend.database import CURRENT_SCHEMA_VERSION, DATA_DIR
 from backend.format_configs import build_model_config_from_db
-from backend.raw_storage import OBJECT_ROOT
+from backend.raw_storage import RAW_ROOT
 
 
 PACKAGE_VERSION = 2
@@ -97,23 +97,10 @@ def _manifest(
                   frf.sync_origin, frf.sync_state, frf.server_version,
                   frf.last_sync_at, frf.sync_error_json,
                   frf.flight_id, frf.original_name, frf.original_rel_path,
+                  frf.storage_rel_path, frf.sha256, frf.size_bytes,
                   frf.data_type_key, frf.source_mtime, frf.created_at,
-                  frf.updated_at, frf.deleted_at, frf.server_deleted_at,
-                  fo.id as file_object_id, fo.client_uid as file_object_client_uid,
-                  fo.server_id as file_object_server_id,
-                  fo.source_node_id as file_object_source_node_id,
-                  fo.sync_origin as file_object_sync_origin,
-                  fo.sync_state as file_object_sync_state,
-                  fo.server_version as file_object_server_version,
-                  fo.last_sync_at as file_object_last_sync_at,
-                  fo.sync_error_json as file_object_sync_error_json,
-                  fo.sha256, fo.size_bytes, fo.storage_rel_path,
-                  fo.created_at as file_object_created_at,
-                  fo.updated_at as file_object_updated_at,
-                  fo.deleted_at as file_object_deleted_at,
-                  fo.server_deleted_at as file_object_server_deleted_at
+                  frf.updated_at, frf.deleted_at, frf.server_deleted_at
             FROM flight_raw_files frf
-            JOIN file_objects fo ON fo.id = frf.file_object_id
             WHERE frf.flight_id IN ({placeholders})
             ORDER BY frf.flight_id, frf.original_rel_path, frf.id""",
         sorted(ids["flights"]),
@@ -123,7 +110,7 @@ def _manifest(
         item = dict(row)
         storage_rel_path = _safe_zip_path(item["storage_rel_path"])
         item["storage_rel_path"] = storage_rel_path
-        item["package_path"] = _safe_zip_path(f"objects/{storage_rel_path}")
+        item["package_path"] = _safe_zip_path(f"raw_files/{storage_rel_path}")
         raw_files.append(item)
 
     return {
@@ -301,14 +288,14 @@ def export_package(
                 )
             for raw in manifest["raw_files"]:
                 rel = _safe_zip_path(raw["storage_rel_path"])
-                src = os.path.abspath(os.path.join(OBJECT_ROOT, rel))
-                root = os.path.abspath(OBJECT_ROOT)
+                src = os.path.abspath(os.path.join(RAW_ROOT, rel))
+                root = os.path.abspath(RAW_ROOT)
                 if os.path.commonpath([src, root]) != root:
-                    raise ValueError("raw object path escapes object root")
+                    raise ValueError("raw file path escapes raw storage root")
                 if not os.path.exists(src):
-                    raise ValueError(f"原始文件对象缺失: {rel}")
+                    raise ValueError(f"原始文件缺失: {rel}")
                 if os.path.getsize(src) != raw["size_bytes"] or _sha256_file(src) != raw["sha256"]:
-                    raise ValueError(f"原始文件对象校验失败: {rel}")
+                    raise ValueError(f"原始文件校验失败: {rel}")
                 zf.write(src, _safe_zip_path(raw["package_path"]))
         return {
             "ok": True,
