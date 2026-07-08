@@ -180,3 +180,21 @@ server_base_url = http://服务器IP:9000/api
 username = admin
 password = 你的服务器登录密码
 ```
+
+
+
+&nbsp;
+
+&nbsp;
+
+# 其他
+
+清空数据
+
+```
+.venv/Scripts/python tools/reset_project_data.py --scope all --yes
+```
+
+
+
+&nbsp;
