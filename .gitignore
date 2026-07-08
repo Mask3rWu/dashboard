@@ -27,6 +27,8 @@ frontend/node_modules/
 Thumbs.db
 data/
 data.db
+flights.db
+*.db
 *.export.json
 
 # Others
