@@ -328,7 +328,8 @@ export default function FlightView({
   const [stats, setStats] = useState<FlightStats | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [normalize, setNormalize] = useState(false);
-  const [, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [alignedLoading, setAlignedLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
   const [anomalyCol, setAnomalyCol] = useState('');
   const [anomalyData, setAnomalyData] = useState<any>(null);
@@ -513,9 +514,11 @@ export default function FlightView({
     const requestId = ++alignedRequestRef.current;
     if (!selectedFlightId || selectedColumns.length === 0) {
       setAligned(null);
+      setAlignedLoading(false);
       return;
     }
     const flightId = selectedFlightId;
+    setAlignedLoading(true);
     getAlignedData(flightId, selectedColumns, filterSpec ?? undefined)
       .then((data) => {
         // Abort if flight changed during fetch
@@ -527,6 +530,11 @@ export default function FlightView({
         console.error('Failed to fetch aligned data:', err);
         if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
           setAligned(null);
+        }
+      })
+      .finally(() => {
+        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
+          setAlignedLoading(false);
         }
       });
   }, [selectedFlightId, selectedColumns, filterSpec]);
@@ -813,6 +821,40 @@ export default function FlightView({
     { key: 'anomaly', label: '异常检测' },
   ];
   const deletingFlight = deletingFlightId ? flights.find((f) => f.id === deletingFlightId) : null;
+  const hasAnyColumns = columnGroups.some((g) => g.columns.length > 0);
+  const hasAlignedData = !!aligned
+    && (aligned.times?.length ?? 0) > 0
+    && Object.keys(aligned.series || {}).length > 0;
+  const chartEmptyState = (() => {
+    if (loading || alignedLoading) return null;
+    if (!selectedFlightId) {
+      return {
+        title: '请选择一个架次',
+        description: flights.length > 0 ? '从上方架次选择器中选择需要分析的飞行数据。' : '当前还没有可分析的飞行数据。',
+      };
+    }
+    if (!hasAnyColumns) {
+      return {
+        title: '该架次没有可展示的数据',
+        description: '导入记录存在，但没有解析出有效数据列。常见原因是数据文件仅包含表头，或文件中没有有效数据行。',
+      };
+    }
+    if (selectedColumns.length === 0) {
+      return {
+        title: '请选择数据列',
+        description: '从左侧“数据列”中勾选至少一列后查看时序图。',
+      };
+    }
+    if (!hasAlignedData) {
+      return {
+        title: '当前选择没有可展示的数据',
+        description: filterSpec
+          ? '所选数据列在当前筛选条件下没有匹配的数据点。可以调整筛选条件或选择其他数据列。'
+          : '所选数据列没有有效数据点。可以选择其他数据列，或检查该架次的原始数据文件。',
+      };
+    }
+    return null;
+  })();
 
   return (
     <div className="h-full flex flex-col">
@@ -1332,6 +1374,12 @@ export default function FlightView({
           {viewMode === 'chart' && (
             <>
               <div ref={chartRef} className="flex-1 min-h-0" />
+              {chartEmptyState && (
+                <EmptyState
+                  title={chartEmptyState.title}
+                  description={chartEmptyState.description}
+                />
+              )}
               <ChartDebugBadge
                 active={active}
                 chartRef={chartRef}
@@ -1396,6 +1444,20 @@ export default function FlightView({
 // ═══════════════════════════════════════════════════════════
 // Sub-components
 // ═══════════════════════════════════════════════════════════
+
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div className="max-w-md px-6 py-5 text-center">
+        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-gray-400">
+          !
+        </div>
+        <div className="text-sm font-medium text-gray-700">{title}</div>
+        <div className="mt-1 text-xs leading-5 text-gray-500">{description}</div>
+      </div>
+    </div>
+  );
+}
 
 // In-app debug HUD — no DevTools needed.
 // Sticks to the bottom-right of the chart area, updates ~4×/sec,
