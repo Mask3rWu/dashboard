@@ -31,6 +31,40 @@ def insert_user(conn, username: str, password_hash: str, role: str) -> int:
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
+def upsert_user_cache(
+    conn,
+    username: str,
+    password_hash: str,
+    role: str,
+    *,
+    created_at: str | None = None,
+    password_changed_at: str | None = None,
+) -> int:
+    row = get_user_by_username(conn, username)
+    if row:
+        conn.execute(
+            """UPDATE users
+               SET password_hash=?, role=?, password_changed_at=COALESCE(?, password_changed_at)
+               WHERE id=?""",
+            (password_hash, role, password_changed_at, row["id"]),
+        )
+        return int(row["id"])
+
+    if created_at:
+        conn.execute(
+            """INSERT INTO users (username, password_hash, role, created_at, password_changed_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (username, password_hash, role, created_at, password_changed_at),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO users (username, password_hash, role, password_changed_at)
+               VALUES (?, ?, ?, ?)""",
+            (username, password_hash, role, password_changed_at),
+        )
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
 def update_password(conn, user_id: int, password_hash: str, changed_at: str) -> None:
     conn.execute(
         "UPDATE users SET password_hash=?, password_changed_at=? WHERE id=?",

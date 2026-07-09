@@ -24,6 +24,7 @@ interface Props {
   onImported: () => void | Promise<void>;
   canDeleteFlights: boolean;
   isLoggedIn?: boolean;
+  serverOnline?: boolean;
 }
 
 // ── Directory structure validation ─────────────────────────
@@ -264,7 +265,7 @@ function RecordTextarea({
 
 // ── ImportPage ─────────────────────────────────────────────
 
-export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }: Props) {
+export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, serverOnline = true }: Props) {
   const [path, setPath] = useState('');
   const [scanning, setScanning] = useState(false);
   const [browsing, setBrowsing] = useState(false);
@@ -588,7 +589,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
   }, []);
 
   const handleDelete = async (flight: Flight) => {
-    await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
+    await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
     setDeletingFlightId(null);
     await loadFlights();
     await onImported();
@@ -1233,7 +1234,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn }:
                 </div>
                 {canDeleteFlights && deletingFlightId === f.id ? (
                   <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500">{deleteActionLabel(f)}?</span>
+                    <span className="text-xs text-gray-500">{deleteActionLabel(f, serverOnline)}?</span>
                     <button onClick={() => handleDelete(f)} className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500">是</button>
                     <button onClick={() => setDeletingFlightId(null)} className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">否</button>
                   </div>

@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Download, Eye, LogIn, LogOut, RefreshCw, RotateCcw, Server, Upload, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Download, Eye, RefreshCw, RotateCcw, Server, Upload, XCircle } from 'lucide-react';
 import {
   getSyncQueue,
   pullSync,
   pushSync,
   retrySync,
   runSync,
-  serverLogin,
-  serverLogout,
-  setServerToken,
   type RuntimeContext,
   type SyncOperationResult,
   type SyncQueueResponse,
@@ -69,9 +66,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [serverUsername, setServerUsername] = useState('admin');
-  const [serverPassword, setServerPassword] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
 
   const loadQueue = useCallback(async () => {
     setLoading(true);
@@ -160,41 +154,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
 
   const summary = queue?.summary;
 
-  const loginServer = async () => {
-    if (!serverUsername.trim() || !serverPassword) return;
-    setAuthBusy(true);
-    setError('');
-    setMessage('');
-    try {
-      const result = await serverLogin(serverUsername.trim(), serverPassword);
-      if (!result.token) throw new Error('服务器未返回登录 token');
-      setServerToken(result.token);
-      setServerPassword('');
-      setMessage(`已登录服务器：${result.user?.username || serverUsername.trim()}`);
-      await onRefreshContext();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const logoutServer = async () => {
-    setAuthBusy(true);
-    setError('');
-    setMessage('');
-    try {
-      await serverLogout();
-    } catch {
-      // Clearing the local token is sufficient if the server session has expired.
-    } finally {
-      setServerToken(null);
-      setMessage('已退出服务器登录');
-      await onRefreshContext();
-      setAuthBusy(false);
-    }
-  };
-
   return (
     <div className="h-full overflow-auto p-6 space-y-5 bg-white">
       <section className="border border-gray-200 rounded-lg bg-gray-50 px-4 py-3">
@@ -221,45 +180,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             </div>
           </div>
           <div className="flex flex-wrap justify-end gap-2 shrink-0">
-            {runtime?.server_user ? (
-              <button
-                type="button"
-                disabled={authBusy}
-                onClick={logoutServer}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                退出服务器
-              </button>
-            ) : (
-              <div className="flex items-center gap-2">
-                <input
-                  value={serverUsername}
-                  onChange={(e) => setServerUsername(e.target.value)}
-                  disabled={!runtime?.server_reachable || authBusy}
-                  className="w-24 border border-gray-300 rounded px-2 py-1.5 text-xs"
-                  placeholder="服务器用户"
-                />
-                <input
-                  type="password"
-                  value={serverPassword}
-                  onChange={(e) => setServerPassword(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') loginServer(); }}
-                  disabled={!runtime?.server_reachable || authBusy}
-                  className="w-28 border border-gray-300 rounded px-2 py-1.5 text-xs"
-                  placeholder="服务器密码"
-                />
-                <button
-                  type="button"
-                  disabled={!runtime?.server_reachable || authBusy || !serverUsername.trim() || !serverPassword}
-                  onClick={loginServer}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-blue-200 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
-                >
-                  <LogIn className="w-3.5 h-3.5" />
-                  登录服务器
-                </button>
-              </div>
-            )}
             <button
               type="button"
               disabled={!ready || !runtime?.server_user || !!busy}

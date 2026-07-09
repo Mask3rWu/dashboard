@@ -212,6 +212,28 @@ def create_user(
     return {"id": user_id, "username": username, "role": req.role}
 
 
+@app.get("/api/users")
+def list_users(
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "manage_users")
+    users = []
+    for item in db.list_users(conn):
+        users.append(
+            {
+                "id": item["id"],
+                "username": item["username"],
+                "password_hash": item["password_hash"],
+                "role": item["role"],
+                "created_at": str(item.get("created_at")) if item.get("created_at") else None,
+                "password_changed_at": str(item.get("password_changed_at")) if item.get("password_changed_at") else None,
+                "disabled_at": str(item.get("disabled_at")) if item.get("disabled_at") else None,
+            }
+        )
+    return {"users": users}
+
+
 @app.get("/api/capabilities")
 def capabilities(user=Depends(current_user)):
     return {"capabilities": db.capabilities_for_user(user)}

@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from .format_configs import register_model_tables
+from . import user_repository
 
 
 logger = logging.getLogger(__name__)
@@ -48,24 +49,67 @@ def _find_existing_model(conn, *, server_id: int | None, client_uid: str | None,
     return conn.execute("SELECT id FROM aircraft_models WHERE name=?", (name,)).fetchone()
 
 
-def apply_builtin_model_seeds(conn) -> dict[str, Any]:
-    """Create missing built-in model definitions in the local SQLite database."""
-
+def _seeds_disabled(conn) -> bool:
     env_enabled = os.environ.get("BUILTIN_MODEL_SEEDS_ENABLED")
     if env_enabled is not None and env_enabled.strip().lower() in {"0", "false", "no", "off"}:
-        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "disabled": True}
+        return True
 
     row = conn.execute(
         "SELECT value FROM app_settings WHERE key='builtin_model_seeds_enabled'"
     ).fetchone()
-    if row and str(row[0]).strip().lower() in {"0", "false", "no", "off"}:
-        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "disabled": True}
+    return bool(row and str(row[0]).strip().lower() in {"0", "false", "no", "off"})
+
+
+def _seed_users(conn, data: dict[str, Any]) -> dict[str, Any]:
+    users = data.get("users") or []
+    if not isinstance(users, list):
+        raise ValueError(f"{SEED_FILENAME}.users must be a list")
+
+    created = 0
+    updated = 0
+    skipped = 0
+    for item in users:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        username = str(item.get("username") or "").strip()
+        password_hash = str(item.get("password_hash") or "").strip()
+        role = str(item.get("role") or "user").strip()
+        disabled_at = item.get("disabled_at")
+        if disabled_at:
+            skipped += 1
+            continue
+        if not username or not password_hash or role not in {"admin", "user"}:
+            skipped += 1
+            continue
+        existed = user_repository.user_exists(conn, username)
+        user_repository.upsert_user_cache(
+            conn,
+            username,
+            password_hash,
+            role,
+            created_at=item.get("created_at"),
+            password_changed_at=item.get("password_changed_at"),
+        )
+        if existed:
+            updated += 1
+        else:
+            created += 1
+    return {"users": len(users), "created": created, "updated": updated, "skipped": skipped}
+
+
+def apply_builtin_model_seeds(conn) -> dict[str, Any]:
+    """Create missing built-in model and user definitions in the local SQLite database."""
+
+    if _seeds_disabled(conn):
+        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "user_seeds": {"users": 0}, "disabled": True}
 
     loaded = _load_seed_file()
     if loaded is None:
-        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0}
+        return {"seed_file": None, "created": 0, "skipped": 0, "models": 0, "user_seeds": {"users": 0}}
 
     path, data = loaded
+    user_result = _seed_users(conn, data)
     models = data.get("models") or []
     if not isinstance(models, list):
         raise ValueError(f"{SEED_FILENAME}.models must be a list")
@@ -133,7 +177,7 @@ def apply_builtin_model_seeds(conn) -> dict[str, Any]:
         (seed_hash,),
     )
     logger.info("Applied builtin model seeds from %s: created=%s skipped=%s", path, created, skipped)
-    return {"seed_file": path, "created": created, "skipped": skipped, "models": len(models)}
+    return {"seed_file": path, "created": created, "skipped": skipped, "models": len(models), "user_seeds": user_result}
 
 
 def apply_builtin_model_seeds_to_server(conn) -> dict[str, Any]:

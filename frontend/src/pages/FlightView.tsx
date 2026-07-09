@@ -28,6 +28,7 @@ interface Props {
   selectedAircraftId: number | null;
   onSelectAircraft: (id: number) => void;
   canDeleteFlights: boolean;
+  serverOnline?: boolean;
 }
 
 type ViewMode = 'chart' | 'correlation' | 'anomaly';
@@ -318,6 +319,7 @@ export default function FlightView({
   models, selectedModelId, onSelectModel,
   aircraft, selectedAircraftId, onSelectAircraft,
   canDeleteFlights,
+  serverOnline = true,
 }: Props) {
   // ─── State ─────────────────────────────────────────────
   const [columnGroups, setColumnGroups] = useState<ColumnGroup[]>([]);
@@ -786,7 +788,7 @@ export default function FlightView({
 
   const handleDeleteFlight = async (flight: Flight) => {
     try {
-      await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
+      await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
       if (selectedFlightId === flight.id) {
         const remaining = flights.filter((f) => f.id !== flight.id);
         onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
@@ -990,7 +992,7 @@ export default function FlightView({
         {/* Inline delete confirmation */}
         {deletingFlight && canDeleteFlights && (
           <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-500">{deleteActionLabel(deletingFlight)}?</span>
+            <span className="text-xs text-gray-500">{deleteActionLabel(deletingFlight, serverOnline)}?</span>
             <button
               type="button"
               onClick={() => handleDeleteFlight(deletingFlight)}

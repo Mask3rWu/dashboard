@@ -19,6 +19,7 @@ interface Props {
   flights: Flight[];
   modelsVersion: number;
   capabilities: string[];
+  serverOnline?: boolean;
 }
 
 function syncStateLabel(state?: string | null) {
@@ -202,7 +203,7 @@ function RecordTextarea({
   );
 }
 
-export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities }: Props) {
+export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities, serverOnline = true }: Props) {
   const [models, setModels] = useState<AircraftModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
@@ -360,7 +361,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   const handleDeleteModel = async (model: AircraftModel) => {
     try {
-      await deleteModel(model.id, deleteScopeFor(model) as DeleteScope);
+      await deleteModel(model.id, deleteScopeFor(model, serverOnline) as DeleteScope);
       setDeletingModelId(null);
       if (selectedModelId === model.id) setSelectedModelId(null);
       refresh();
@@ -389,7 +390,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   };
 
   const handleDeleteAircraft = async (aircraftItem: Aircraft) => {
-    await deleteAircraft(aircraftItem.id, deleteScopeFor(aircraftItem) as DeleteScope);
+    await deleteAircraft(aircraftItem.id, deleteScopeFor(aircraftItem, serverOnline) as DeleteScope);
     setDeletingAcId(null);
     if (selectedModelId) loadAircraft(selectedModelId);
     refresh();
@@ -403,7 +404,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   };
 
   const handleDeleteFlight = async (flight: Flight) => {
-    await deleteFlight(flight.id, deleteScopeFor(flight) as DeleteScope);
+    await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
     setDeletingFlightId(null);
     refresh();
   };
@@ -686,7 +687,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       </button>
                       {canDeleteModels && deletingModelId === m.id ? (
                         <span className="text-[10px] text-red-500 whitespace-nowrap">
-                          {deleteActionLabel(m)}?{' '}
+                          {deleteActionLabel(m, serverOnline)}?{' '}
                           <button
                             type="button"
                             onClick={() => handleDeleteModel(m)}
@@ -913,7 +914,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                   </button>
                                   {canDeleteAircraft && deletingAcId === ac.id ? (
                                     <span className="text-xs text-gray-500">
-                                      {deleteActionLabel(ac)}?{' '}
+                                      {deleteActionLabel(ac, serverOnline)}?{' '}
                                       <button type="button" onClick={() => handleDeleteAircraft(ac)} className="text-red-600 font-bold hover:text-red-700">是</button>
                                       {' / '}
                                       <button type="button" onClick={() => setDeletingAcId(null)} className="text-gray-400 hover:text-gray-500">否</button>
@@ -1010,7 +1011,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                         </button>
                                         {canDeleteFlights && deletingFlightId === f.id ? (
                                           <span className="text-xs text-gray-500" onClick={(e) => e.stopPropagation()}>
-                                            {deleteActionLabel(f)}?{' '}
+                                            {deleteActionLabel(f, serverOnline)}?{' '}
                                             <button type="button" onClick={() => handleDeleteFlight(f)} className="text-red-600 font-bold hover:text-red-700">是</button>
                                             {' / '}
                                             <button type="button" onClick={() => setDeletingFlightId(null)} className="text-gray-400 hover:text-gray-500">否</button>

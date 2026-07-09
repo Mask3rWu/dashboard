@@ -106,18 +106,33 @@ def main() -> int:
         bundle_path = Path(tmp) / "server_models.fapkg"
         sync_client.download_bundle(server_url, 0, str(bundle_path), token=token)
         models = _read_models_from_bundle(bundle_path)
+    users_payload = sync_client.list_users(server_url, token=token)
+    users = []
+    for item in users_payload.get("users") or []:
+        if not item.get("disabled_at"):
+            users.append(
+                {
+                    "id": item.get("id"),
+                    "username": item.get("username"),
+                    "password_hash": item.get("password_hash"),
+                    "role": item.get("role"),
+                    "created_at": item.get("created_at"),
+                    "password_changed_at": item.get("password_changed_at"),
+                }
+            )
 
     payload = {
         "version": 1,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "source_server_url": server_url,
         "source_node_id": "server",
+        "users": users,
         "models": models,
     }
     output = Path(args.output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Wrote {len(models)} model seed(s) to {output}")
+    print(f"Wrote {len(models)} model seed(s) and {len(users)} user seed(s) to {output}")
     return 0
 
 

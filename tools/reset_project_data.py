@@ -1,8 +1,9 @@
 """Reset Flight Analyzer test data for local and server environments.
 
-This script clears business/sync data and transferred raw-file storage while
-preserving user accounts and runtime configuration. It defaults to dry-run; pass
---yes to actually modify databases and delete storage directories.
+This script clears business/sync data, local cached users, sessions, and
+transferred raw-file storage while preserving runtime configuration. It defaults
+to dry-run; pass --yes to actually modify databases and delete storage
+directories.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from backend.config import load_app_config  # noqa: E402
 
 LOCAL_STATIC_TABLES = [
     "auth_sessions",
+    "users",
     "filter_presets",
     "presets",
     "sync_runs",
@@ -110,6 +112,8 @@ def _safe_clear_child_dirs(root: Path, child_names: Iterable[str], *, apply: boo
 
 def reset_local(*, apply: bool) -> None:
     from backend import database
+    from backend import auth as auth_helpers
+    from backend.model_seeds import apply_builtin_model_seeds
 
     data_dir = Path(database.DATA_DIR)
     db_path = Path(database.DB_PATH)
@@ -125,23 +129,20 @@ def reset_local(*, apply: bool) -> None:
             init_result = database.init_db()
             conn = database.get_db()
             try:
-                conn.execute(
-                    """INSERT INTO app_settings (key, value, updated_at)
-                       VALUES ('builtin_model_seeds_enabled', 'false', datetime('now','localtime'))
-                       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"""
-                )
                 dynamic_tables = _sqlite_dynamic_tables(conn)
                 conn.execute("PRAGMA foreign_keys=OFF")
                 for table in dynamic_tables:
                     conn.execute(f"DROP TABLE IF EXISTS {_sqlite_quote(table)}")
-                for table in ("column_registry", "data_table_registry", "aircraft_models"):
+                for table in ("auth_sessions", "users", "column_registry", "data_table_registry", "aircraft_models"):
                     if _sqlite_table_exists(conn, table):
                         conn.execute(f"DELETE FROM {_sqlite_quote(table)}")
                 conn.execute("PRAGMA foreign_keys=ON")
+                auth_helpers.ensure_builtin_admin(conn)
+                seed_result = apply_builtin_model_seeds(conn)
                 conn.commit()
             finally:
                 conn.close()
-            print(f"[local] created empty SQLite schema: {init_result}")
+            print(f"[local] created empty SQLite schema: {init_result}; seeds: {seed_result}")
         return
 
     conn = database.get_db()
@@ -167,9 +168,7 @@ def reset_local(*, apply: bool) -> None:
             if _sqlite_table_exists(conn, table):
                 conn.execute(f"DELETE FROM {_sqlite_quote(table)}")
         conn.execute(
-            """INSERT INTO app_settings (key, value, updated_at)
-               VALUES ('builtin_model_seeds_enabled', 'false', datetime('now','localtime'))
-               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"""
+            "DELETE FROM app_settings WHERE key IN ('builtin_model_seed_hash')"
         )
         if _sqlite_table_exists(conn, "sqlite_sequence"):
             targets = [*LOCAL_STATIC_TABLES]
@@ -179,9 +178,11 @@ def reset_local(*, apply: bool) -> None:
                 targets,
             )
         conn.execute("PRAGMA foreign_keys=ON")
+        auth_helpers.ensure_builtin_admin(conn)
+        seed_result = apply_builtin_model_seeds(conn)
         conn.commit()
         _safe_clear_child_dirs(data_dir, LOCAL_STORAGE_DIRS, apply=True)
-        print("[local] reset complete")
+        print(f"[local] reset complete; seeds: {seed_result}")
     finally:
         conn.close()
 
@@ -293,8 +294,9 @@ def main() -> int:
     config_path = load_app_config(args.config)
     print(f"Config: {config_path or '(none found; environment/defaults used)'}")
     print(f"Mode: {'APPLY' if args.yes else 'DRY-RUN'}")
-    print("Preserved: users, server admin account, app_settings, schema_version, flight_analyzer.ini")
-    print("Cleared: models, aircraft, flights, parsed dynamic tables, raw-file rows, sync history/cache, transferred raw files")
+    print("Preserved: runtime app_settings, schema_version, flight_analyzer.ini")
+    print("Cleared: cached users/sessions, models, aircraft, flights, parsed dynamic tables, raw-file rows, sync history/cache, transferred raw files")
+    print("Rebuilt: built-in admin and, when load_local is enabled, builtin model/user seeds")
 
     if args.scope in {"local", "all"}:
         reset_local(apply=args.yes)

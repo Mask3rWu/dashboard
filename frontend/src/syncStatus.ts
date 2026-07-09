@@ -44,14 +44,15 @@ export function syncStateClass(state?: string | null) {
   return 'bg-gray-50 text-gray-600 border-gray-200';
 }
 
-export function deleteScopeFor(item?: { sync_state?: string | null; server_id?: number | null }) {
+export function deleteScopeFor(item?: { sync_state?: string | null; server_id?: number | null }, serverOnline = true) {
   if (!item?.server_id) return 'local_unsynced';
+  if (!serverOnline) return 'local_cache';
   if (item.sync_state === 'synced' || item.sync_state === 'server_cache' || item.sync_state === 'dirty') return 'server';
   return 'local_cache';
 }
 
-export function deleteActionLabel(item?: { sync_state?: string | null; server_id?: number | null }) {
-  const scope = deleteScopeFor(item);
+export function deleteActionLabel(item?: { sync_state?: string | null; server_id?: number | null }, serverOnline = true) {
+  const scope = deleteScopeFor(item, serverOnline);
   if (scope === 'server') return '删除服务器数据';
   if (scope === 'local_cache') return '清理本地缓存';
   return '删除本地数据';

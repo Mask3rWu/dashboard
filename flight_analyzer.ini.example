@@ -37,3 +37,11 @@ charset = utf8mb4
 
 ; Optional full SQLAlchemy URL. If set, it overrides the host/user/password fields above.
 ; url = mysql+pymysql://flight:CHANGE_ME@127.0.0.1:3306/flight_analyzer?charset=utf8mb4
+
+[dev]
+; Controls whether packaged local installs preload backend/builtin_model_seeds.json.
+; The same file contains built-in model definitions and the preseeded server-account cache.
+load_local = true
+
+; Controls whether server startup applies built-in model seeds to MySQL.
+load_server = true

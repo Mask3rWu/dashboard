@@ -160,6 +160,33 @@ def logout(
     return _request_json(url, {}, token=token, timeout=timeout)
 
 
+def list_users(
+    base_url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/users"
+    return _request_get_json(url, token=token, timeout=timeout)
+
+
+def change_password(
+    base_url: str,
+    old_password: str,
+    new_password: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/auth/change-password"
+    return _request_json(
+        url,
+        {"old_password": old_password, "new_password": new_password},
+        token=token,
+        timeout=timeout,
+    )
+
+
 def preflight(
     base_url: str,
     manifest: dict[str, Any],

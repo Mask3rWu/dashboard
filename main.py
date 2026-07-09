@@ -431,10 +431,46 @@ def login(req: LoginRequest, request: Request):
     conn = get_db()
     try:
         get_app_context(conn, request)
+        username = req.username.strip()
+        server_base_url = runtime_context.get_server_base_url(conn)
+        online_error = None
+        if runtime_context.get_sync_enabled(conn) and server_base_url:
+            try:
+                server_auth = sync_client.login(server_base_url, username, req.password, timeout=5)
+                server_user = server_auth.get("user") if isinstance(server_auth.get("user"), dict) else None
+                if not server_user:
+                    raise HTTPException(502, "中心服务器未返回用户信息")
+                role = str(server_user.get("role") or "user")
+                if role not in ("admin", "user"):
+                    role = "user"
+                user_id = user_repository.upsert_user_cache(
+                    conn,
+                    username,
+                    auth_helpers.hash_password(req.password),
+                    role,
+                    created_at=server_user.get("created_at"),
+                    password_changed_at=server_user.get("password_changed_at"),
+                )
+                token = auth_helpers.create_session(conn, user_id)
+                user = user_repository.get_user_by_username(conn, username)
+                conn.commit()
+                return {
+                    **_context_payload(conn, request, user=dict(user)),
+                    "token": token,
+                    "server_token": server_auth.get("token"),
+                    "login_mode": "online",
+                }
+            except sync_client.SyncClientError as exc:
+                if exc.status_code in (400, 401, 403):
+                    raise HTTPException(exc.status_code, str(exc))
+                online_error = str(exc)
 
-        row = user_repository.get_user_by_username(conn, req.username.strip())
+        row = user_repository.get_user_by_username(conn, username)
         if not row or not auth_helpers.verify_password(req.password, row["password_hash"]):
-            raise HTTPException(401, "用户名或密码不正确")
+            detail = "用户名或密码不正确"
+            if online_error:
+                detail = f"无法连接中心服务器，且本地未找到可用预置账号或密码不正确：{online_error}"
+            raise HTTPException(401, detail)
 
         token = auth_helpers.create_session(conn, row["id"])
         user = {
@@ -445,7 +481,7 @@ def login(req: LoginRequest, request: Request):
             "password_changed_at": row["password_changed_at"],
         }
         conn.commit()
-        return {**_context_payload(conn, request, user=user), "token": token}
+        return {**_context_payload(conn, request, user=user), "token": token, "login_mode": "offline"}
     finally:
         conn.close()
 
@@ -482,37 +518,19 @@ def change_password(req: ChangePasswordRequest, request: Request):
     conn = get_db()
     try:
         user = require_capability(conn, request, "change_own_password")
+        server_token = _server_header_token(request)
+        server_base_url = runtime_context.get_server_base_url(conn)
+        if server_token and runtime_context.get_sync_enabled(conn) and server_base_url:
+            try:
+                sync_client.change_password(server_base_url, req.old_password, req.new_password, token=server_token, timeout=5)
+            except sync_client.SyncClientError as exc:
+                status = exc.status_code or 502
+                raise HTTPException(status, str(exc))
         auth_helpers.change_password(conn, user["id"], req.old_password, req.new_password)
         conn.commit()
         return {"ok": True}
     except ValueError as e:
         raise HTTPException(400, str(e))
-    finally:
-        conn.close()
-
-
-@app.post("/api/users")
-def create_user_api(req: CreateUserRequest, request: Request):
-    username = req.username.strip()
-    if not username:
-        raise HTTPException(400, "用户名不能为空")
-    if len(req.password) < 6:
-        raise HTTPException(400, "密码至少 6 位")
-    if req.role not in ("admin", "user"):
-        raise HTTPException(400, "角色必须是 admin 或 user")
-
-    conn = get_db()
-    try:
-        require_capability(conn, request, "manage_users")
-        user_id = auth_helpers.create_user(conn, username, req.password, req.role)
-        conn.commit()
-        return {"id": user_id, "username": username, "role": req.role}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        if "UNIQUE" in str(e):
-            raise HTTPException(400, f"用户 '{username}' 已存在")
-        raise
     finally:
         conn.close()
 
@@ -685,6 +703,7 @@ def delete_model(model_id: int, request: Request, req: DeleteEntityRequest | Non
         row = conn.execute("SELECT * FROM aircraft_models WHERE id=?", (model_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Model not found")
+        _require_local_delete_capability(conn, request, "model")
         scope = _delete_scope(row, req.scope if req else "auto")
         if scope == "server":
             server_id = row["server_id"]
@@ -694,7 +713,6 @@ def delete_model(model_id: int, request: Request, req: DeleteEntityRequest | Non
             _mark_local_server_deleted(conn, "model", model_id, result)
             conn.commit()
             return {"ok": True, "scope": "server", "server": result}
-        _require_local_delete_capability(conn, request, "model")
         if scope == "local_unsynced" and row["server_id"] is not None:
             raise HTTPException(400, "Server-backed model cannot be deleted as local_unsynced")
         _delete_local_model(conn, model_id)
@@ -1157,6 +1175,7 @@ def delete_aircraft(aircraft_id: int, request: Request, req: DeleteEntityRequest
         row = conn.execute("SELECT * FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Aircraft not found")
+        _require_local_delete_capability(conn, request, "aircraft")
         scope = _delete_scope(row, req.scope if req else "auto")
         if scope == "server":
             server_id = row["server_id"]
@@ -1166,7 +1185,6 @@ def delete_aircraft(aircraft_id: int, request: Request, req: DeleteEntityRequest
             _mark_local_server_deleted(conn, "aircraft", aircraft_id, result)
             conn.commit()
             return {"ok": True, "scope": "server", "server": result}
-        _require_local_delete_capability(conn, request, "aircraft")
         if scope == "local_unsynced" and row["server_id"] is not None:
             raise HTTPException(400, "Server-backed aircraft cannot be deleted as local_unsynced")
         conn.execute("DELETE FROM aircraft WHERE id=?", (aircraft_id,))
@@ -2011,6 +2029,7 @@ def delete_flight(flight_id: int, request: Request, req: DeleteEntityRequest | N
         row = conn.execute("SELECT * FROM flights WHERE id=?", (flight_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Flight not found")
+        _require_local_delete_capability(conn, request, "flight")
         scope = _delete_scope(row, req.scope if req else "auto")
         if scope == "server":
             server_id = row["server_id"]
@@ -2020,7 +2039,6 @@ def delete_flight(flight_id: int, request: Request, req: DeleteEntityRequest | N
             _mark_local_server_deleted(conn, "flight", flight_id, result)
             conn.commit()
             return {"ok": True, "scope": "server", "server": result}
-        _require_local_delete_capability(conn, request, "flight")
         if scope == "local_unsynced" and row["server_id"] is not None:
             raise HTTPException(400, "Server-backed flight cannot be deleted as local_unsynced")
         flight_repository.delete_flight(conn, flight_id)

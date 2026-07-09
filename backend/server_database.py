@@ -346,6 +346,18 @@ def get_user_by_username(conn: Connection, username: str) -> dict[str, Any] | No
     return row_to_dict(row)
 
 
+def list_users(conn: Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        text(
+            """SELECT id, username, password_hash, role, created_at,
+                      password_changed_at, disabled_at
+               FROM users
+               ORDER BY id ASC"""
+        )
+    ).fetchall()
+    return [row_to_dict(row) for row in rows]
+
+
 def get_user_by_session_token(conn: Connection, token: str | None) -> dict[str, Any] | None:
     if not token:
         return None

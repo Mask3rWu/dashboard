@@ -117,6 +117,12 @@ export interface ServerAuthPayload {
   token?: string;
 }
 
+export interface LoginPayload extends AppContext {
+  token: string;
+  server_token?: string;
+  login_mode?: 'online' | 'offline';
+}
+
 export interface SyncQueueSummary {
   pending_upload: number;
   dirty: number;
@@ -557,7 +563,7 @@ export const serverLogin = (username: string, password: string) =>
   });
 export const serverLogout = () => request<{ ok: boolean }>('/server-auth/logout', { method: 'POST' });
 export const login = (username: string, password: string) =>
-  request<AppContext & { token: string }>('/auth/login', {
+  request<LoginPayload>('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ username, password }),
   });
@@ -567,12 +573,6 @@ export const changePassword = (oldPassword: string, newPassword: string) =>
     method: 'POST',
     body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
   });
-export const createUser = (username: string, password: string, role: 'admin' | 'user') =>
-  request<CurrentUser>('/users', {
-    method: 'POST',
-    body: JSON.stringify({ username, password, role }),
-  });
-
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');
 export const createModel = (name: string) =>
