@@ -15,6 +15,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
+HEADER_SAMPLE_LIMIT_PER_PATTERN = 20
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Build config dict from database (replaces JSON file loading)
@@ -290,6 +292,39 @@ def _discover_file_patterns(source_path):
         list of (pattern_name, sample_filepath, token_count, header_names_or_none)
     """
     patterns = {}
+    sample_counts = {}
+
+    def read_pattern_sample(filepath):
+        from backend.scanner import has_header, parse_lines
+
+        lines = parse_lines(filepath)
+        if not lines:
+            return None
+
+        hdr = has_header(filepath)
+        start = 1 if hdr else 0
+        if start >= len(lines):
+            return None
+
+        token_count = len(lines[start].split())
+        header_names = lines[0].split() if hdr else None
+        return token_count, header_names
+
+    def is_better_pattern_sample(existing, candidate):
+        """Prefer header samples, then wider data rows for generic fallback."""
+        if existing is None:
+            return True
+
+        _name, _filepath, existing_token_count, existing_header_names = existing
+        _candidate_filepath, candidate_token_count, candidate_header_names = candidate
+
+        existing_has_header = bool(existing_header_names)
+        candidate_has_header = bool(candidate_header_names)
+        if candidate_has_header != existing_has_header:
+            return candidate_has_header
+
+        return candidate_token_count > existing_token_count
+
     for root, _dirs, files in os.walk(source_path):
         for fname in files:
             if not fname.endswith('.txt'):
@@ -308,27 +343,32 @@ def _discover_file_patterns(source_path):
             # merges per-aircraft samples into a single entry.
             pattern_name = re.sub(r'^\d+(?=[A-Z])', '', pattern_name)
 
-            if pattern_name not in patterns:
-                filepath = os.path.join(root, fname)
-                try:
-                    from backend.scanner import has_header, parse_lines
-                    lines = parse_lines(filepath)
-                    if lines:
-                        hdr = has_header(filepath)
-                        start = 1 if hdr else 0
-                        if start < len(lines):
-                            token_count = len(lines[start].split())
-                            header_names = lines[0].split() if hdr else None
-                            patterns[pattern_name] = (pattern_name, filepath, token_count, header_names)
-                except Exception:
-                    patterns[pattern_name] = (pattern_name, filepath, 0, None)
+            existing = patterns.get(pattern_name)
+            existing_has_header = bool(existing and existing[3])
+            checked = sample_counts.get(pattern_name, 0)
+            if existing_has_header or checked >= HEADER_SAMPLE_LIMIT_PER_PATTERN:
+                continue
+
+            filepath = os.path.join(root, fname)
+            sample_counts[pattern_name] = checked + 1
+            try:
+                sample = read_pattern_sample(filepath)
+                if sample is None:
+                    continue
+                token_count, header_names = sample
+            except Exception:
+                token_count, header_names = 0, None
+
+            candidate = (filepath, token_count, header_names)
+            if is_better_pattern_sample(existing, candidate):
+                patterns[pattern_name] = (pattern_name, filepath, token_count, header_names)
 
     return list(patterns.values())
 
 
 def _detect_has_header(source_path, sample_patterns):
     """Detect whether data files in this folder have headers."""
-    for entry in sample_patterns[:3]:
+    for entry in sample_patterns:
         _name, filepath = entry[0], entry[1]
         try:
             from backend.scanner import has_header
@@ -352,7 +392,7 @@ def _detect_has_uav_send_id(source_path, sample_patterns, has_header_flag):
     if not has_header_flag:
         return False
 
-    for entry in sample_patterns[:5]:
+    for entry in sample_patterns:
         _name, filepath = entry[0], entry[1]
         try:
             from backend.scanner import parse_lines
