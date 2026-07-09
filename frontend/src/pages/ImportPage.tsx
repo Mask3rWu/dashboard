@@ -152,6 +152,7 @@ function DirStructureBanner({ sourcePath, scanResult }: { sourcePath: string; sc
 function emptyRecord(): FlightRecordFields {
   return {
     record_daily_duration_min: null,
+    record_batch_name: '',
     record_location: '',
     record_payload: '',
     record_weather: '',
@@ -391,6 +392,19 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
 
   // ─── Browse / Scan ────────────────────────────────────────
 
+  const recordDefaultsBySession = (sessions: SessionPreview[]): Record<string, FlightRecordFields> => {
+    const defaults: Record<string, FlightRecordFields> = {};
+    sessions.forEach((session) => {
+      if (session.record_defaults) {
+        defaults[sessionKey(session.aircraft_serial, session.session_key)] = {
+          ...emptyRecord(),
+          ...session.record_defaults,
+        };
+      }
+    });
+    return defaults;
+  };
+
   const doScan = async (scanPath: string) => {
     setScanning(true);
     setScanResult(null);
@@ -413,7 +427,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
       setImportedKeys(new Set());
       setErrorKeys({});
       setSessionAircraftMap({});
-      setSessionRecords({});
+      setSessionRecords(recordDefaultsBySession(data.sessions));
       setSessionDates({});
     } catch (e: any) {
       setScanResult({ source_path: scanPath, folder_name: scanPath, model: null, sessions: [], error: '扫描失败: ' + e.message });
@@ -1103,6 +1117,12 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                           )}
                           {errMsg && <span className="text-xs text-red-500" title={errMsg}>✗ 失败</span>}
                           <span className="text-xs text-gray-400">{session.file_count} 个文件</span>
+                          {session.record_defaults && (
+                            <span className="text-xs text-emerald-600" title={session.record_source || 'FlightRecord XML'}>XML预填</span>
+                          )}
+                          {session.record_defaults_error && (
+                            <span className="text-xs text-red-500" title={session.record_defaults_error}>XML错误</span>
+                          )}
                           {effStatus === 'imported' && session.existing_flight_name && (
                             <span className="text-[10px] text-gray-400">当前: {session.existing_flight_name}</span>
                           )}
@@ -1119,6 +1139,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                           <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                               <DurationInput value={record.record_daily_duration_min} onChange={(v) => updateSessionRecord(key, { record_daily_duration_min: v })} />
+                              <RecordInput label="批次" value={record.record_batch_name} onChange={(v) => updateSessionRecord(key, { record_batch_name: v })} />
                               <RecordInput label="地点" value={record.record_location} onChange={(v) => updateSessionRecord(key, { record_location: v })} />
                               <RecordInput label="天气" value={record.record_weather} onChange={(v) => updateSessionRecord(key, { record_weather: v })} />
                               <RecordInput label="设备载荷（kg）" type="number" value={record.record_payload} onChange={(v) => updateSessionRecord(key, { record_payload: v })} />

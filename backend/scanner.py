@@ -6,9 +6,73 @@ pattern matching and session key extraction via format config JSONs.
 
 import os
 import re
+import xml.etree.ElementTree as ET
 from backend.format_configs import get_data_type_key
 
 ENCODINGS = ['gbk', 'gb2312', 'utf-8', 'latin-1']
+
+RECORD_TEXT_FIELDS = {
+    "record_batch_name",
+    "record_location",
+    "record_payload",
+    "record_weather",
+    "record_note",
+}
+RECORD_NUMERIC_FIELDS = {
+    "record_daily_duration_min",
+    "record_fuel_amount",
+    "record_takeoff_weight",
+    "record_altitude",
+    "record_wind_speed",
+}
+RECORD_FIELDS = RECORD_TEXT_FIELDS | RECORD_NUMERIC_FIELDS
+
+
+def _record_xml_key(value):
+    return re.sub(r"[\s_\-]+", "", str(value or "")).lower()
+
+
+RECORD_XML_ALIASES = {
+    _record_xml_key(alias): column
+    for column, aliases in {
+        "record_daily_duration_min": [
+            "record_daily_duration_min", "recordDailyDurationMin",
+            "daily_duration_min", "dailyDurationMin", "duration_min",
+            "flight_duration_min", "单日飞行时长", "飞行时长",
+        ],
+        "record_batch_name": [
+            "record_batch_name", "recordBatchName", "batch_name",
+            "batchName", "batch", "批次",
+        ],
+        "record_location": [
+            "record_location", "recordLocation", "location", "地点",
+        ],
+        "record_payload": [
+            "record_payload", "recordPayload", "payload", "设备载荷", "载荷",
+        ],
+        "record_weather": [
+            "record_weather", "recordWeather", "weather", "天气",
+        ],
+        "record_fuel_amount": [
+            "record_fuel_amount", "recordFuelAmount", "fuel_amount",
+            "fuelAmount", "fuel", "燃油量",
+        ],
+        "record_takeoff_weight": [
+            "record_takeoff_weight", "recordTakeoffWeight", "takeoff_weight",
+            "takeoffWeight", "起飞重量",
+        ],
+        "record_altitude": [
+            "record_altitude", "recordAltitude", "altitude", "海拔高度", "海拔",
+        ],
+        "record_wind_speed": [
+            "record_wind_speed", "recordWindSpeed", "wind_speed", "windSpeed", "风速",
+        ],
+        "record_note": [
+            "record_note", "recordNote", "note", "remark", "remarks", "备注",
+        ],
+    }.items()
+    for alias in aliases
+}
 
 
 def detect_encoding(filepath):
@@ -274,6 +338,86 @@ def _extract_aircraft_serial_from_path(filepath, source_path):
     return ''
 
 
+def _coerce_record_xml_value(column, raw_value):
+    text = str(raw_value or "").strip()
+    if column in RECORD_TEXT_FIELDS:
+        return text
+    if text == "":
+        return None
+    try:
+        return float(text.replace(",", ""))
+    except ValueError as exc:
+        raise ValueError(f"字段 {column} 的值不是有效数字: {text}") from exc
+
+
+def _parse_record_xml_file(filepath):
+    """Read FlightRecord_<session_key>.xml into flight record defaults."""
+    tree = ET.parse(filepath)
+    root = tree.getroot()
+    values = {}
+
+    def capture(name, raw_value):
+        column = RECORD_XML_ALIASES.get(_record_xml_key(name))
+        if not column:
+            return
+        values[column] = _coerce_record_xml_value(column, raw_value)
+
+    for name, raw_value in root.attrib.items():
+        capture(name, raw_value)
+
+    if _record_xml_key(root.tag) in RECORD_XML_ALIASES and (root.text or "").strip():
+        capture(root.tag, root.text)
+
+    for elem in root.iter():
+        if elem is root:
+            continue
+        for name, raw_value in elem.attrib.items():
+            capture(name, raw_value)
+        if len(list(elem)) == 0:
+            capture(elem.tag, elem.text)
+
+    return {key: value for key, value in values.items() if key in RECORD_FIELDS}
+
+
+def _find_record_xml_for_cluster(cluster_files, session_key):
+    candidate_keys = [session_key]
+    for info in cluster_files:
+        key = info.get('session_key')
+        if key and key not in candidate_keys:
+            candidate_keys.append(key)
+
+    candidate_names = {f"flightrecord_{key}.xml" for key in candidate_keys if key}
+    if not candidate_names:
+        return None
+
+    seen_dirs = set()
+    for info in cluster_files:
+        directory = os.path.dirname(info.get('filepath') or '')
+        if not directory or directory in seen_dirs:
+            continue
+        seen_dirs.add(directory)
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        by_lower = {name.lower(): name for name in names}
+        for wanted in sorted(candidate_names):
+            actual = by_lower.get(wanted)
+            if actual:
+                return os.path.join(directory, actual)
+    return None
+
+
+def _load_record_defaults_for_cluster(cluster_files, session_key):
+    xml_path = _find_record_xml_for_cluster(cluster_files, session_key)
+    if not xml_path:
+        return None, None, None
+    try:
+        return _parse_record_xml_file(xml_path), xml_path, None
+    except Exception as exc:
+        return None, xml_path, str(exc)
+
+
 def scan_files_recursive(source_path, config):
     """Unified recursive scanner: find all .txt files at any depth.
 
@@ -387,12 +531,24 @@ def scan_folder(source_path, config):
             for f in cluster_files:
                 data_types[f['data_type_key']] += 1
 
-            sessions.append({
+            record_defaults, record_source, record_error = _load_record_defaults_for_cluster(
+                cluster_files, session_key
+            )
+
+            session = {
                 'aircraft_serial': serial,
                 'session_key': session_key,
                 'data_types': dict(data_types),
                 'file_count': len(cluster_files),
-            })
+            }
+            if record_defaults:
+                session['record_defaults'] = record_defaults
+                session['record_source'] = record_source
+            elif record_error:
+                session['record_defaults_error'] = record_error
+                session['record_source'] = record_source
+
+            sessions.append(session)
 
     return {
         'source_path': source_path,

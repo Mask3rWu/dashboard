@@ -415,6 +415,9 @@ export interface SessionPreview {
   flight_date?: string | null;
   data_types: Record<string, number>;
   file_count: number;
+  record_defaults?: FlightRecordFields;
+  record_source?: string;
+  record_defaults_error?: string;
   import_status: 'new' | 'imported';
   existing_flight_id?: number;
   existing_flight_name?: string;
