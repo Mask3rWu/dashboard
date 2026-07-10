@@ -170,6 +170,58 @@ def list_users(
     return _request_get_json(url, token=token, timeout=timeout)
 
 
+def create_user(
+    base_url: str,
+    username: str,
+    password: str,
+    role: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/users"
+    return _request_json(
+        url,
+        {"username": username, "password": password, "role": role},
+        token=token,
+        timeout=timeout,
+    )
+
+
+def update_user(
+    base_url: str,
+    user_id: int,
+    username: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/users/{user_id}"
+    return _request_json(url, {"username": username}, token=token, timeout=timeout, method="PATCH")
+
+
+def reset_user_password(
+    base_url: str,
+    user_id: int,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/users/{user_id}/reset-password"
+    return _request_json(url, {}, token=token, timeout=timeout)
+
+
+def delete_user(
+    base_url: str,
+    user_id: int,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/users/{user_id}"
+    return _request_json(url, {}, token=token, timeout=timeout, method="DELETE")
+
+
 def change_password(
     base_url: str,
     old_password: str,

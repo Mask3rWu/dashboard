@@ -346,16 +346,37 @@ def get_user_by_username(conn: Connection, username: str) -> dict[str, Any] | No
     return row_to_dict(row)
 
 
+def get_user_by_id(conn: Connection, user_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        text(
+            """SELECT id, username, password_hash, role, created_at,
+                      password_changed_at, disabled_at
+               FROM users
+               WHERE id=:user_id"""
+        ),
+        {"user_id": user_id},
+    ).first()
+    return row_to_dict(row)
+
+
 def list_users(conn: Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         text(
             """SELECT id, username, password_hash, role, created_at,
                       password_changed_at, disabled_at
                FROM users
+               WHERE disabled_at IS NULL
                ORDER BY id ASC"""
         )
     ).fetchall()
     return [row_to_dict(row) for row in rows]
+
+
+def active_admin_count(conn: Connection) -> int:
+    row = conn.execute(
+        text("SELECT COUNT(*) AS count FROM users WHERE role='admin' AND disabled_at IS NULL")
+    ).first()
+    return int(row._mapping["count"]) if row else 0
 
 
 def get_user_by_session_token(conn: Connection, token: str | None) -> dict[str, Any] | None:
@@ -431,6 +452,30 @@ def update_user_password(conn: Connection, user_id: int, password_hash: str) -> 
                WHERE id=:user_id"""
         ),
         {"password_hash": password_hash, "changed_at": now, "user_id": user_id},
+    )
+    conn.execute(
+        text("UPDATE auth_sessions SET revoked_at=:revoked_at WHERE user_id=:user_id"),
+        {"revoked_at": now, "user_id": user_id},
+    )
+
+
+def update_username(conn: Connection, user_id: int, username: str) -> None:
+    conn.execute(
+        text("UPDATE users SET username=:username WHERE id=:user_id AND disabled_at IS NULL"),
+        {"username": username, "user_id": user_id},
+    )
+
+
+def disable_user(conn: Connection, user_id: int) -> None:
+    now = utcnow()
+    conn.execute(
+        text(
+            """UPDATE users
+               SET username=CONCAT(LEFT(username, 96), '#deleted#', id),
+                   disabled_at=:disabled_at
+               WHERE id=:user_id AND disabled_at IS NULL"""
+        ),
+        {"disabled_at": now, "user_id": user_id},
     )
     conn.execute(
         text("UPDATE auth_sessions SET revoked_at=:revoked_at WHERE user_id=:user_id"),

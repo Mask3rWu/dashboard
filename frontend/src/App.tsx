@@ -4,6 +4,7 @@ import FlightView from './pages/FlightView';
 import ComparePage from './pages/ComparePage';
 import ModelManager from './pages/ModelManager';
 import SyncPage from './pages/SyncPage';
+import UserManagementPage from './pages/UserManagementPage';
 import {
   checkHealth, listFlights, listModels, listAircraft,
   getRuntimeContext, getAppContext, login, logout, changePassword, setSessionToken, setServerToken,
@@ -12,7 +13,7 @@ import {
 } from './api';
 import { KeyRound, LogIn, LogOut, Server, UserCircle, Wifi, WifiOff } from 'lucide-react';
 
-type Tab = 'import' | 'models' | 'flight' | 'compare' | 'sync';
+type Tab = 'import' | 'models' | 'flight' | 'compare' | 'sync' | 'users';
 
 // ═══════════════════════════════════════════════════════════════
 // Error Boundary — prevents a single component error from
@@ -294,6 +295,8 @@ export default function App() {
   ]));
   const hasCapability = (cap: Capability) => mergedCapabilities.includes(cap);
   const serverOnline = !!runtimeContext?.server_reachable && !!runtimeContext?.server_user;
+  const canManageServerUsers =
+    serverOnline && (runtimeContext?.server_capabilities ?? []).includes('manage_users');
   const activeTab: Tab = tab;
 
   // ── Three-level selection: Model → Aircraft → Flight ──
@@ -415,6 +418,13 @@ export default function App() {
     doInit();
   }, []);
 
+  useEffect(() => {
+    if (tab === 'users' && !canManageServerUsers) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTab('flight');
+    }
+  }, [tab, canManageServerUsers]);
+
   // When model changes, load its aircraft
   useEffect(() => {
     if (selectedModelId) {
@@ -458,6 +468,7 @@ export default function App() {
     { key: 'flight', label: '飞行分析' },
     { key: 'compare', label: '飞行对比' },
     { key: 'sync', label: '同步队列' },
+    ...(canManageServerUsers ? [{ key: 'users' as const, label: '用户管理' }] : []),
   ];
 
   return (
@@ -578,6 +589,13 @@ export default function App() {
                 />
               </ErrorBoundary>
             </div>
+            {canManageServerUsers && (
+              <div className={activeTab === 'users' ? 'h-full' : 'invisible absolute inset-0 overflow-hidden'}>
+                <ErrorBoundary>
+                  <UserManagementPage currentUser={runtimeContext?.server_user ?? null} />
+                </ErrorBoundary>
+              </div>
+            )}
           </>
         )}
       </main>

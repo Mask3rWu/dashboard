@@ -83,6 +83,7 @@ export interface CurrentUser {
   role: 'admin' | 'user';
   created_at?: string;
   password_changed_at?: string | null;
+  disabled_at?: string | null;
 }
 
 export interface AppContext {
@@ -576,6 +577,24 @@ export const changePassword = (oldPassword: string, newPassword: string) =>
     method: 'POST',
     body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
   });
+
+// Server user management
+export const listUsers = () => request<{ users: CurrentUser[] }>('/users');
+export const createUser = (username: string, password: string, role: CurrentUser['role']) =>
+  request<CurrentUser>('/users', {
+    method: 'POST',
+    body: JSON.stringify({ username, password, role }),
+  });
+export const updateUser = (id: number, username: string) =>
+  request<CurrentUser>(`/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ username }),
+  });
+export const resetUserPassword = (id: number) =>
+  request<CurrentUser>(`/users/${id}/reset-password`, { method: 'POST' });
+export const deleteUser = (id: number) =>
+  request<{ ok: boolean }>(`/users/${id}`, { method: 'DELETE' });
+
 // Models
 export const listModels = () => request<{ models: AircraftModel[] }>('/models');
 export const createModel = (name: string) =>
