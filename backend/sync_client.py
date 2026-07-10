@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import mimetypes
 import os
 import uuid
@@ -10,7 +11,10 @@ import zipfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Callable
+
+
+ProgressCallback = Callable[[int, int | None], None]
 
 
 class SyncClientError(RuntimeError):
@@ -293,24 +297,76 @@ def push_bundle(
     *,
     token: str | None = None,
     timeout: float = 300.0,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     url = f"{normalize_base_url(base_url)}/sync/push"
-    body, boundary = _multipart_body("bundle", bundle_path)
+    boundary = f"----FlightAnalyzerSync{uuid.uuid4().hex}"
+    filename = os.path.basename(bundle_path) or "bundle.fapkg"
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="bundle"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
+    file_size = os.path.getsize(bundle_path)
+    total_size = len(prefix) + file_size + len(suffix)
+
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise SyncClientError(f"Unsupported sync server scheme: {parsed_url.scheme}")
+    path = parsed_url.path or "/"
+    if parsed_url.query:
+        path = f"{path}?{parsed_url.query}"
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Accept": "application/json",
+        "Content-Length": str(total_size),
         **_auth_headers(token),
     }
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    conn_class = http.client.HTTPSConnection if parsed_url.scheme == "https" else http.client.HTTPConnection
+    conn = conn_class(parsed_url.netloc, timeout=timeout)
+    sent = 0
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            parsed = _decode_response(resp.read())
-    except urllib.error.HTTPError as exc:
-        parsed = _decode_response(exc.read())
-        message = parsed.get("detail") if isinstance(parsed, dict) else None
-        raise SyncClientError(message or f"Server returned HTTP {exc.code}", status_code=exc.code, response=parsed) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        if progress_callback:
+            progress_callback(0, total_size)
+        conn.putrequest("POST", path)
+        for key, value in headers.items():
+            conn.putheader(key, value)
+        conn.endheaders()
+
+        conn.send(prefix)
+        sent += len(prefix)
+        if progress_callback:
+            progress_callback(sent, total_size)
+        with open(bundle_path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                conn.send(chunk)
+                sent += len(chunk)
+                if progress_callback:
+                    progress_callback(sent, total_size)
+        conn.send(suffix)
+        sent += len(suffix)
+        if progress_callback:
+            progress_callback(total_size, total_size)
+
+        resp = conn.getresponse()
+        raw = resp.read()
+        parsed = _decode_response(raw)
+        if resp.status >= 400:
+            message = parsed.get("detail") if isinstance(parsed, dict) else None
+            raise SyncClientError(
+                message or f"Server returned HTTP {resp.status}",
+                status_code=resp.status,
+                response=parsed,
+            )
+    except (TimeoutError, OSError, http.client.HTTPException) as exc:
         raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    finally:
+        conn.close()
     if not isinstance(parsed, dict):
         raise SyncClientError("Server returned a non-object JSON response", response=parsed)
     return parsed
@@ -328,6 +384,18 @@ def changes(
     return _request_get_json(url, token=token, timeout=timeout)
 
 
+def pull_preview(
+    base_url: str,
+    since: str | int | None = None,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    query = "" if since in (None, "") else f"?since={urllib.parse.quote(str(since))}"
+    url = f"{normalize_base_url(base_url)}/sync/preview{query}"
+    return _request_get_json(url, token=token, timeout=timeout)
+
+
 def download_bundle(
     base_url: str,
     since: str | int | None,
@@ -335,6 +403,7 @@ def download_bundle(
     *,
     token: str | None = None,
     timeout: float = 300.0,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     query = "" if since in (None, "") else f"?since={urllib.parse.quote(str(since))}"
     url = f"{normalize_base_url(base_url)}/sync/bundle{query}"
@@ -345,6 +414,11 @@ def download_bundle(
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_total = resp.headers.get("Content-Length")
+            total = int(raw_total) if raw_total and raw_total.isdigit() else None
+            received = 0
+            if progress_callback:
+                progress_callback(0, total)
             os.makedirs(os.path.dirname(os.path.abspath(destination_path)), exist_ok=True)
             with open(destination_path, "wb") as f:
                 while True:
@@ -352,6 +426,9 @@ def download_bundle(
                     if not chunk:
                         break
                     f.write(chunk)
+                    received += len(chunk)
+                    if progress_callback:
+                        progress_callback(received, total)
     except urllib.error.HTTPError as exc:
         parsed = _decode_response(exc.read())
         message = parsed.get("detail") if isinstance(parsed, dict) else None

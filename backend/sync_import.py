@@ -28,8 +28,7 @@ from backend import sync_repository
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _RECORD_COLUMNS = (
-    "record_daily_duration_min",
-    "record_batch_name",
+    "record_total_duration_min",
     "record_location",
     "record_payload",
     "record_weather",
@@ -37,6 +36,23 @@ _RECORD_COLUMNS = (
     "record_takeoff_weight",
     "record_altitude",
     "record_wind_speed",
+    "record_wind_direction",
+    "record_temperature",
+    "record_note",
+)
+
+_FLIGHT_METADATA_COLUMNS = (
+    "name",
+    "record_total_duration_min",
+    "record_location",
+    "record_payload",
+    "record_weather",
+    "record_fuel_amount",
+    "record_takeoff_weight",
+    "record_altitude",
+    "record_wind_speed",
+    "record_wind_direction",
+    "record_temperature",
     "record_note",
 )
 
@@ -235,6 +251,28 @@ def _flight_row_by_source(manifest: dict, source_flight_id: int) -> dict | None:
 
 def _record_values(row: dict) -> list[Any]:
     return [row.get(column) for column in _RECORD_COLUMNS]
+
+
+def _local_raw_hashes(conn, flight_id: int) -> set[str]:
+    rows = conn.execute(
+        "SELECT sha256 FROM flight_raw_files WHERE flight_id=? AND server_deleted_at IS NULL",
+        (flight_id,),
+    ).fetchall()
+    return {str(row["sha256"]) for row in rows if row["sha256"]}
+
+
+def _manifest_raw_hashes_by_flight(manifest: dict) -> dict[int, set[str]]:
+    grouped: dict[int, set[str]] = {}
+    for row in manifest.get("raw_files") or []:
+        flight_id = int(row.get("flight_id") or row.get("source_flight_id") or 0)
+        sha = row.get("sha256")
+        if flight_id and sha:
+            grouped.setdefault(flight_id, set()).add(str(sha))
+    return grouped
+
+
+def _metadata_values(row: dict) -> list[Any]:
+    return [row.get(column) for column in _FLIGHT_METADATA_COLUMNS]
 
 
 def preview_import(conn, package_path: str) -> dict:
@@ -981,7 +1019,31 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
     return aircraft_map
 
 
-def _upsert_pull_flights(conn, manifest: dict, aircraft_map: dict[int, int], report: dict) -> tuple[dict[int, int], set[int]]:
+def _pull_resolution(options: dict | None, server_id: int) -> str | None:
+    resolutions = (options or {}).get("flight_resolutions") or {}
+    value = resolutions.get(str(server_id)) or resolutions.get(server_id)
+    return value if value in {"local", "server"} else None
+
+
+def _record_keep_local(report: dict, entity_type: str, server_id: int, local_id: int, reason: str) -> None:
+    report.setdefault("skipped", []).append(
+        {
+            "entity_type": entity_type,
+            "server_id": server_id,
+            "local_id": local_id,
+            "reason": reason,
+            "resolution": "local",
+        }
+    )
+
+
+def _upsert_pull_flights(
+    conn,
+    manifest: dict,
+    aircraft_map: dict[int, int],
+    report: dict,
+    options: dict | None = None,
+) -> tuple[dict[int, int], set[int]]:
     flight_map: dict[int, int] = {}
     importable_source_ids: set[int] = set()
     source_node_id = manifest.get("source_node_id") or "server"
@@ -993,11 +1055,25 @@ def _upsert_pull_flights(conn, manifest: dict, aircraft_map: dict[int, int], rep
             if existing:
                 local_id = int(existing["id"])
                 if existing["sync_state"] == "dirty":
-                    conn.execute(
-                        "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
-                        (json.dumps({"phase": "pull", "reason": "server_deleted_dirty_local"}, ensure_ascii=False), local_id),
-                    )
-                    report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
+                    resolution = _pull_resolution(options, server_id)
+                    if resolution == "local":
+                        _record_keep_local(report, "flight", server_id, local_id, "server_deleted_dirty_local")
+                    elif resolution == "server":
+                        conn.execute(
+                            """UPDATE flights
+                               SET sync_state='server_deleted', server_deleted_at=?,
+                                   server_version=?, last_sync_at=datetime('now','localtime'),
+                                   sync_error_json=NULL
+                               WHERE id=?""",
+                            (deleted_at, row.get("version") or 1, local_id),
+                        )
+                        report["tombstones"]["flights"] += 1
+                    else:
+                        conn.execute(
+                            "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                            (json.dumps({"phase": "pull", "reason": "server_deleted_dirty_local"}, ensure_ascii=False), local_id),
+                        )
+                        report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
                 else:
                     conn.execute(
                         """UPDATE flights
@@ -1053,25 +1129,35 @@ def _upsert_pull_flights(conn, manifest: dict, aircraft_map: dict[int, int], rep
                 "conflict",
                 "local_only",
             }:
-                conn.execute(
-                    "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
-                    (
-                        json.dumps(
-                            {"phase": "pull", "reason": "local_unsynced_business_key_conflict", "server_id": server_id},
-                            ensure_ascii=False,
+                resolution = _pull_resolution(options, server_id)
+                if resolution == "local":
+                    _record_keep_local(report, "flight", server_id, local_id, "local_unsynced_business_key_conflict")
+                    continue
+                if resolution != "server":
+                    conn.execute(
+                        "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                        (
+                            json.dumps(
+                                {"phase": "pull", "reason": "local_unsynced_business_key_conflict", "server_id": server_id},
+                                ensure_ascii=False,
+                            ),
+                            local_id,
                         ),
-                        local_id,
-                    ),
-                )
-                report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
-                continue
+                    )
+                    report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
+                    continue
             if existing["sync_state"] == "dirty":
-                conn.execute(
-                    "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
-                    (json.dumps({"phase": "pull", "reason": "dirty_flight", "server_id": server_id}, ensure_ascii=False), local_id),
-                )
-                report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
-                continue
+                resolution = _pull_resolution(options, server_id)
+                if resolution == "local":
+                    _record_keep_local(report, "flight", server_id, local_id, "dirty_flight")
+                    continue
+                if resolution != "server":
+                    conn.execute(
+                        "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
+                        (json.dumps({"phase": "pull", "reason": "dirty_flight", "server_id": server_id}, ensure_ascii=False), local_id),
+                    )
+                    report["conflicts"].append({"entity_type": "flight", "server_id": server_id, "local_id": local_id})
+                    continue
             conn.execute(
                 f"""UPDATE flights
                     SET client_uid=COALESCE(client_uid, ?),
@@ -1246,7 +1332,363 @@ def _import_pull_parsed_rows(
     return total
 
 
-def import_pull_bundle(conn, package_path: str) -> dict:
+def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None) -> dict:
+    model_names = {
+        int(row.get("id") or 0): row.get("name") or f"server_model_{row.get('id')}"
+        for row in manifest.get("models") or []
+    }
+    aircraft_info = {
+        int(row.get("id") or 0): {
+            "name": row.get("name") or f"server_aircraft_{row.get('id')}",
+            "model_id": int(row.get("model_id") or 0),
+            "model_name": model_names.get(int(row.get("model_id") or 0), "-"),
+        }
+        for row in manifest.get("aircraft") or []
+    }
+    aircraft_map: dict[int, int] = {}
+    for row in manifest.get("aircraft") or []:
+        server_id = int(row.get("id") or 0)
+        existing = _find_local_by_server_id(conn, "aircraft", server_id)
+        if existing:
+            aircraft_map[server_id] = int(existing["id"])
+
+    model_items = []
+    aircraft_items = []
+    for row in manifest.get("models") or []:
+        server_id = int(row.get("id") or 0)
+        existing = _find_local_by_server_id(conn, "aircraft_models", server_id)
+        action = "create"
+        reason = None
+        local = None
+        if existing:
+            local = {
+                "id": int(existing["id"]),
+                "name": existing["name"],
+                "sync_state": existing["sync_state"],
+                "updated_at": existing["updated_at"],
+                "server_id": existing["server_id"],
+            }
+            if existing["sync_state"] == "dirty":
+                action = "conflict"
+                reason = "dirty_model"
+            else:
+                action = "update_metadata" if (row.get("name") or "") != (existing["name"] or "") else "existing"
+        transfer_kind = "metadata" if existing else "bundle"
+        model_items.append({
+            "entity_type": "model",
+            "server_id": server_id,
+            "server_version": row.get("version") or 1,
+            "name": row.get("name") or f"server_model_{server_id}",
+            "model_name": row.get("name") or f"server_model_{server_id}",
+            "aircraft_name": None,
+            "updated_at": row.get("updated_at"),
+            "deleted_at": row.get("deleted_at"),
+            "action": action,
+            "reason": reason,
+            "matched_by": "server_id" if existing else None,
+            "transfer_kind": transfer_kind,
+            "local": local,
+        })
+
+    for row in manifest.get("aircraft") or []:
+        server_id = int(row.get("id") or 0)
+        existing = _find_local_by_server_id(conn, "aircraft", server_id)
+        server_model_name = model_names.get(int(row.get("model_id") or 0), "-")
+        action = "create"
+        reason = None
+        local = None
+        if existing:
+            local = {
+                "id": int(existing["id"]),
+                "name": existing["name"],
+                "sync_state": existing["sync_state"],
+                "updated_at": existing["updated_at"],
+                "server_id": existing["server_id"],
+            }
+            if existing["sync_state"] == "dirty":
+                action = "conflict"
+                reason = "dirty_aircraft"
+            else:
+                action = "update_metadata" if (row.get("name") or "") != (existing["name"] or "") else "existing"
+        transfer_kind = "metadata" if existing else "bundle"
+        aircraft_items.append({
+            "entity_type": "aircraft",
+            "server_id": server_id,
+            "server_version": row.get("version") or 1,
+            "name": row.get("name") or f"server_aircraft_{server_id}",
+            "model_name": server_model_name,
+            "aircraft_name": row.get("name") or f"server_aircraft_{server_id}",
+            "updated_at": row.get("updated_at"),
+            "deleted_at": row.get("deleted_at"),
+            "action": action,
+            "reason": reason,
+            "matched_by": "server_id" if existing else None,
+            "transfer_kind": transfer_kind,
+            "local": local,
+        })
+
+    items = []
+    conflicts = []
+    raw_hashes_by_flight = _manifest_raw_hashes_by_flight(manifest)
+    for row in manifest.get("flights") or []:
+        server_id = int(row["id"])
+        deleted_at = row.get("deleted_at")
+        existing = _find_local_by_server_id(conn, "flights", server_id)
+        matched_by = "server_id" if existing else None
+        server_aircraft_id = int(row.get("aircraft_id") or 0)
+        server_aircraft = aircraft_info.get(server_aircraft_id, {})
+        local_aircraft_id = aircraft_map.get(server_aircraft_id)
+        if not existing and local_aircraft_id:
+            existing = conn.execute(
+                """SELECT * FROM flights
+                   WHERE aircraft_id=? AND flight_date IS ? AND session_key=?""",
+                (local_aircraft_id, row.get("flight_date"), row.get("session_key") or ""),
+            ).fetchone()
+            matched_by = "business_key" if existing else None
+
+        action = "create"
+        reason = None
+        local = None
+        if deleted_at:
+            action = "server_deleted"
+        if existing:
+            local = {
+                "id": int(existing["id"]),
+                "name": existing["name"],
+                "sync_state": existing["sync_state"],
+                "updated_at": existing["updated_at"],
+                "server_id": existing["server_id"],
+            }
+            if existing["server_id"] not in (None, server_id):
+                action = "conflict"
+                reason = "business_key_conflict"
+            elif deleted_at and existing["sync_state"] == "dirty":
+                action = "conflict"
+                reason = "server_deleted_dirty_local"
+            elif existing["server_id"] is None and existing["sync_state"] in {
+                "pending_upload",
+                "upload_failed",
+                "conflict",
+                "local_only",
+            }:
+                action = "conflict"
+                reason = "local_unsynced_business_key_conflict"
+            elif existing["sync_state"] == "dirty":
+                action = "conflict"
+                reason = "dirty_flight"
+            elif deleted_at:
+                action = "server_deleted"
+            else:
+                action = "update" if matched_by == "server_id" else "attach_existing"
+        transfer_kind = "bundle"
+        if (
+            existing
+            and action in {"update", "attach_existing"}
+            and not deleted_at
+            and raw_hashes_by_flight.get(server_id, set()).issubset(_local_raw_hashes(conn, int(existing["id"])))
+        ):
+            transfer_kind = "metadata"
+        item = {
+            "entity_type": "flight",
+            "server_id": server_id,
+            "server_version": row.get("version") or 1,
+            "name": row.get("name") or row.get("session_key") or f"server_flight_{server_id}",
+            "model_name": server_aircraft.get("model_name") or "-",
+            "aircraft_name": server_aircraft.get("name") or "-",
+            "session_key": row.get("session_key"),
+            "flight_date": row.get("flight_date"),
+            "updated_at": row.get("updated_at"),
+            "deleted_at": deleted_at,
+            "action": action,
+            "reason": reason,
+            "matched_by": matched_by,
+            "transfer_kind": transfer_kind,
+            "local": local,
+        }
+        items.append(item)
+        if action == "conflict":
+            conflicts.append(item)
+
+    return {
+        "ok": not any(item.get("action") == "conflict" for item in [*model_items, *aircraft_items, *items]),
+        "package_path": package_path,
+        "server_cursor": manifest.get("server_cursor"),
+        "warnings": [],
+        "summary": {
+            "models": len(manifest.get("models") or []),
+            "aircraft": len(manifest.get("aircraft") or []),
+            "flights": len(manifest.get("flights") or []),
+            "raw_files": len(manifest.get("raw_files") or []),
+            "conflicts": len(conflicts),
+            "create": sum(1 for item in items if item["action"] == "create"),
+            "update": sum(1 for item in items if item["action"] in {"update", "attach_existing"}),
+            "server_deleted": sum(1 for item in items if item["action"] == "server_deleted"),
+            "metadata_only": sum(1 for item in [*model_items, *aircraft_items, *items] if item.get("transfer_kind") == "metadata"),
+            "bundle_required": sum(1 for item in [*model_items, *aircraft_items, *items] if item.get("transfer_kind") != "metadata"),
+        },
+        "models": model_items,
+        "aircraft": aircraft_items,
+        "items": items,
+        "conflicts": [
+            *[item for item in model_items if item.get("action") == "conflict"],
+            *[item for item in aircraft_items if item.get("action") == "conflict"],
+            *conflicts,
+        ],
+    }
+
+
+def apply_pull_manifest_metadata(conn, manifest: dict, options: dict | None = None) -> dict:
+    preview = preview_pull_manifest(conn, manifest)
+    bundle_required = int((preview.get("summary") or {}).get("bundle_required") or 0)
+    if bundle_required:
+        raise ValueError("预览中仍包含需要同步包的内容")
+
+    report = {
+        "source_node_id": manifest.get("source_node_id"),
+        "server_cursor": manifest.get("server_cursor"),
+        "status": "success",
+        "created": {"models": 0, "aircraft": 0, "flights": 0},
+        "updated": {"models": 0, "aircraft": 0, "flights": 0},
+        "tombstones": {"models": 0, "aircraft": 0, "flights": 0},
+        "raw_files": {"attached": 0, "warnings": 0},
+        "parsed_rows": 0,
+        "conflicts": [],
+        "skipped": [],
+        "warnings": [],
+        "metadata_only": True,
+    }
+
+    model_rows_by_server_id = {int(row.get("id") or 0): row for row in manifest.get("models") or []}
+    aircraft_rows_by_server_id = {int(row.get("id") or 0): row for row in manifest.get("aircraft") or []}
+    for item in preview.get("models") or []:
+        if item.get("action") == "conflict":
+            report["conflicts"].append(item)
+            continue
+        local = item.get("local") or {}
+        local_id = int(local.get("id") or 0)
+        server_id = int(item.get("server_id") or 0)
+        row = model_rows_by_server_id.get(server_id)
+        if not local_id or not row:
+            continue
+        conn.execute(
+            """UPDATE aircraft_models
+               SET client_uid=COALESCE(client_uid, ?),
+                   server_id=?,
+                   source_node_id=?,
+                   sync_origin='server',
+                   sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
+                   server_version=?,
+                   last_sync_at=datetime('now','localtime'),
+                   sync_error_json=NULL,
+                   name=?,
+                   updated_at=COALESCE(?, updated_at),
+                   server_deleted_at=NULL
+               WHERE id=?""",
+            [
+                row.get("client_uid"),
+                server_id,
+                row.get("source_node_id") or manifest.get("source_node_id") or "server",
+                row.get("version") or 1,
+                row.get("name") or f"server_model_{server_id}",
+                row.get("updated_at"),
+                local_id,
+            ],
+        )
+        report["updated"]["models"] += 1
+
+    for item in preview.get("aircraft") or []:
+        if item.get("action") == "conflict":
+            report["conflicts"].append(item)
+            continue
+        local = item.get("local") or {}
+        local_id = int(local.get("id") or 0)
+        server_id = int(item.get("server_id") or 0)
+        row = aircraft_rows_by_server_id.get(server_id)
+        if not local_id or not row:
+            continue
+        conn.execute(
+            """UPDATE aircraft
+               SET client_uid=COALESCE(client_uid, ?),
+                   server_id=?,
+                   source_node_id=?,
+                   sync_origin='server',
+                   sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
+                   server_version=?,
+                   last_sync_at=datetime('now','localtime'),
+                   sync_error_json=NULL,
+                   name=?,
+                   updated_at=COALESCE(?, updated_at),
+                   server_deleted_at=NULL
+               WHERE id=?""",
+            [
+                row.get("client_uid"),
+                server_id,
+                row.get("source_node_id") or manifest.get("source_node_id") or "server",
+                row.get("version") or 1,
+                row.get("name") or f"server_aircraft_{server_id}",
+                row.get("updated_at"),
+                local_id,
+            ],
+        )
+        report["updated"]["aircraft"] += 1
+
+    rows_by_server_id = {int(row.get("id") or 0): row for row in manifest.get("flights") or []}
+    for item in preview.get("items") or []:
+        if item.get("action") == "conflict":
+            report["conflicts"].append(item)
+            continue
+        local = item.get("local") or {}
+        local_id = int(local.get("id") or 0)
+        server_id = int(item.get("server_id") or 0)
+        row = rows_by_server_id.get(server_id)
+        if not local_id or not row:
+            continue
+        assignments = ", ".join(f"{column}=?" for column in _FLIGHT_METADATA_COLUMNS)
+        conn.execute(
+            f"""UPDATE flights
+                SET client_uid=COALESCE(client_uid, ?),
+                    server_id=?,
+                    source_node_id=?,
+                    sync_origin='server',
+                    sync_state=CASE WHEN sync_state='synced' THEN 'synced' ELSE 'server_cache' END,
+                    server_version=?,
+                    last_sync_at=datetime('now','localtime'),
+                    sync_error_json=NULL,
+                    {assignments},
+                    updated_at=COALESCE(?, updated_at),
+                    server_deleted_at=NULL
+                WHERE id=?""",
+            [
+                row.get("client_uid"),
+                server_id,
+                row.get("source_node_id") or manifest.get("source_node_id") or "server",
+                row.get("version") or 1,
+                *_metadata_values(row),
+                row.get("updated_at"),
+                local_id,
+            ],
+        )
+        report["updated"]["flights"] += 1
+
+    if report["conflicts"]:
+        report["status"] = "conflict"
+    if manifest.get("server_cursor") and report["status"] != "conflict":
+        sync_repository.set_setting(conn, "last_pull_cursor", str(manifest.get("server_cursor")))
+        sync_repository.set_setting(conn, "last_successful_pull_at", sync_repository.now_text())
+    return report
+
+
+def preview_pull_bundle(conn, package_path: str) -> dict:
+    manifest, package_warnings = _load_manifest(package_path)
+    _validate_manifest(manifest, require_compatible=True)
+    if manifest.get("bundle_kind") != "pull_bundle":
+        raise ValueError("同步包不是服务器 pull_bundle")
+    result = preview_pull_manifest(conn, manifest, package_path)
+    result["warnings"] = [{"scope": "package", "message": w} for w in package_warnings]
+    return result
+
+
+def import_pull_bundle(conn, package_path: str, options: dict | None = None) -> dict:
     manifest, package_warnings = _load_manifest(package_path)
     _validate_manifest(manifest, require_compatible=True)
     if manifest.get("bundle_kind") != "pull_bundle":
@@ -1263,6 +1705,7 @@ def import_pull_bundle(conn, package_path: str) -> dict:
         "tombstones": {"models": 0, "aircraft": 0, "flights": 0},
         "conflicts": [],
         "warnings": [{"scope": "package", "message": w} for w in package_warnings],
+        "skipped": [],
         "raw_files": {"attached": 0, "warnings": 0},
         "parsed_rows": 0,
     }
@@ -1275,7 +1718,7 @@ def import_pull_bundle(conn, package_path: str) -> dict:
         finally:
             parsed.close()
         aircraft_map = _upsert_pull_aircraft(conn, manifest, model_map, report)
-        flight_map, importable_source_ids = _upsert_pull_flights(conn, manifest, aircraft_map, report)
+        flight_map, importable_source_ids = _upsert_pull_flights(conn, manifest, aircraft_map, report, options)
         _import_pull_raw_files(conn, tmp_dir, manifest, flight_map, report)
         report["parsed_rows"] = _import_pull_parsed_rows(
             conn,

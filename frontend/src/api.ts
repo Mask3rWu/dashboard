@@ -164,12 +164,18 @@ export interface SyncQueueItem {
 export interface SyncQueueResponse {
   summary: SyncQueueSummary;
   items: SyncQueueItem[];
+  base_items?: SyncPreviewItem[];
 }
 
 export interface SyncOperationRequest {
   flight_ids?: number[] | null;
   since?: string | null;
   server_token?: string | null;
+  operation_id?: string | null;
+  package_path?: string | null;
+  conflict_resolutions?: Record<string, string> | null;
+  pull_package_path?: string | null;
+  pull_conflict_resolutions?: Record<string, string> | null;
 }
 
 export interface SyncOperationResult {
@@ -188,6 +194,71 @@ export interface SyncOperationResult {
   writeback?: unknown;
   report?: unknown;
   abandoned?: number;
+}
+
+export interface SyncProgress {
+  operation_id: string;
+  status: 'running' | 'completed' | 'failed' | string;
+  phase: string;
+  message: string;
+  detail?: string | null;
+  percent: number;
+  current?: number | null;
+  total?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SyncPreviewItem {
+  entity_type?: 'model' | 'aircraft' | 'flight' | string;
+  id?: number;
+  server_id?: number | null;
+  server_name?: string | null;
+  server_version?: number | null;
+  name: string;
+  model_name?: string | null;
+  aircraft_name?: string | null;
+  sync_state?: string;
+  action: string;
+  reason?: string | null;
+  matched_by?: string | null;
+  transfer_kind?: 'metadata' | 'bundle' | string | null;
+  session_key?: string | null;
+  flight_date?: string | null;
+  updated_at?: string | null;
+  deleted_at?: string | null;
+  local?: {
+    id: number;
+    name: string;
+    sync_state: string;
+    updated_at?: string | null;
+    server_id?: number | null;
+  } | null;
+}
+
+export interface SyncPreviewResult {
+  mode: 'run' | 'push' | 'pull' | string;
+  upload?: {
+    ok: boolean;
+    status: string;
+    items: SyncPreviewItem[];
+    models?: SyncPreviewItem[];
+    aircraft?: SyncPreviewItem[];
+    skipped_dirty?: SyncPreviewItem[];
+    summary?: Record<string, number>;
+    preflight?: unknown;
+  } | null;
+  pull?: {
+    ok: boolean;
+    package_path?: string | null;
+    server_cursor?: string | number | null;
+    items: SyncPreviewItem[];
+    models?: SyncPreviewItem[];
+    aircraft?: SyncPreviewItem[];
+    conflicts: SyncPreviewItem[];
+    summary?: Record<string, number>;
+    warnings?: unknown[];
+  } | null;
 }
 
 export interface AircraftModel {
@@ -220,8 +291,7 @@ export interface Aircraft {
 }
 
 export interface FlightRecordFields {
-  record_daily_duration_min?: number | null;
-  record_batch_name?: string;
+  record_total_duration_min?: number | null;
   record_location?: string;
   record_payload?: string;
   record_weather?: string;

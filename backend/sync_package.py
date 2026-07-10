@@ -91,20 +91,23 @@ def _manifest(
     aircraft = _rows_by_ids(conn, "aircraft", ids["aircraft"])
     flights = _rows_by_ids(conn, "flights", ids["flights"])
 
-    placeholders = ",".join("?" for _ in ids["flights"])
-    raw_rows = conn.execute(
-        f"""SELECT frf.id, frf.client_uid, frf.server_id, frf.source_node_id,
-                  frf.sync_origin, frf.sync_state, frf.server_version,
-                  frf.last_sync_at, frf.sync_error_json,
-                  frf.flight_id, frf.original_name, frf.original_rel_path,
-                  frf.storage_rel_path, frf.sha256, frf.size_bytes,
-                  frf.data_type_key, frf.source_mtime, frf.created_at,
-                  frf.updated_at, frf.deleted_at, frf.server_deleted_at
-            FROM flight_raw_files frf
-            WHERE frf.flight_id IN ({placeholders})
-            ORDER BY frf.flight_id, frf.original_rel_path, frf.id""",
-        sorted(ids["flights"]),
-    ).fetchall()
+    if ids["flights"]:
+        placeholders = ",".join("?" for _ in ids["flights"])
+        raw_rows = conn.execute(
+            f"""SELECT frf.id, frf.client_uid, frf.server_id, frf.source_node_id,
+                      frf.sync_origin, frf.sync_state, frf.server_version,
+                      frf.last_sync_at, frf.sync_error_json,
+                      frf.flight_id, frf.original_name, frf.original_rel_path,
+                      frf.storage_rel_path, frf.sha256, frf.size_bytes,
+                      frf.data_type_key, frf.source_mtime, frf.created_at,
+                      frf.updated_at, frf.deleted_at, frf.server_deleted_at
+                FROM flight_raw_files frf
+                WHERE frf.flight_id IN ({placeholders})
+                ORDER BY frf.flight_id, frf.original_rel_path, frf.id""",
+            sorted(ids["flights"]),
+        ).fetchall()
+    else:
+        raw_rows = []
     raw_files = []
     for row in raw_rows:
         item = dict(row)
@@ -162,14 +165,13 @@ def _create_source_table(dst, table: str, rows: list[dict], source_fk_map: dict[
     )
 
 
-def write_parsed_sqlite(conn, flight_ids: set[int], out_path: str) -> None:
+def write_parsed_sqlite(conn, ids: dict[str, set[int]], out_path: str) -> None:
     """Write a cropped parsed-data cache with source IDs preserved."""
     if os.path.exists(out_path):
         os.remove(out_path)
     dst = sqlite3.connect(out_path)
     dst.row_factory = sqlite3.Row
     try:
-        ids = sync_repository.selected_ids(conn, sorted(flight_ids))
         _create_source_table(dst, "aircraft_models", _rows_by_ids(conn, "aircraft_models", ids["models"]))
         _create_source_table(
             dst,
@@ -214,11 +216,14 @@ def write_parsed_sqlite(conn, flight_ids: set[int], out_path: str) -> None:
                 out_cols.append(f"{_q(out_name)} {p['type'] or 'TEXT'}")
             dst.execute(f"CREATE TABLE {_q(source_table)} ({', '.join(out_cols)})")
 
-            placeholders = ",".join("?" for _ in ids["flights"])
-            data_rows = conn.execute(
-                f"SELECT * FROM {_q(source_table)} WHERE flight_id IN ({placeholders}) ORDER BY flight_id, id",
-                sorted(ids["flights"]),
-            ).fetchall()
+            if ids["flights"]:
+                placeholders = ",".join("?" for _ in ids["flights"])
+                data_rows = conn.execute(
+                    f"SELECT * FROM {_q(source_table)} WHERE flight_id IN ({placeholders}) ORDER BY flight_id, id",
+                    sorted(ids["flights"]),
+                ).fetchall()
+            else:
+                data_rows = []
             insert_cols = ["source_id"] + [
                 ("source_flight_id" if c == "flight_id" else c)
                 for c in source_cols
@@ -238,6 +243,8 @@ def export_package(
     conn,
     flight_ids: list[int],
     *,
+    model_ids: list[int] | None = None,
+    aircraft_ids: list[int] | None = None,
     bundle_kind: str = "manual_export",
     package_id: str | None = None,
     base_server_cursor: str | None = None,
@@ -246,7 +253,21 @@ def export_package(
     if bundle_kind not in {"manual_export", "push_batch", "pull_bundle"}:
         raise ValueError(f"Unsupported bundle_kind: {bundle_kind}")
     clean_flight_ids = sorted({int(fid) for fid in flight_ids})
-    ids = sync_repository.selected_ids(conn, clean_flight_ids)
+    ids = sync_repository.selected_ids(conn, clean_flight_ids) if clean_flight_ids else {
+        "flights": set(),
+        "aircraft": set(),
+        "models": set(),
+    }
+    for model_id in model_ids or []:
+        ids["models"].add(int(model_id))
+    for aircraft_id in aircraft_ids or []:
+        row = conn.execute("SELECT id, model_id FROM aircraft WHERE id=?", (int(aircraft_id),)).fetchone()
+        if not row:
+            raise ValueError(f"飞机不存在: {aircraft_id}")
+        ids["aircraft"].add(int(row["id"]))
+        ids["models"].add(int(row["model_id"]))
+    if not ids["models"] and not ids["aircraft"] and not ids["flights"]:
+        raise ValueError("至少选择一个待同步项目")
     source_node_id = sync_repository.get_setting(
         conn, "local_node_id", sync_repository.get_setting(conn, "node_id", "field-unknown")
     )
@@ -269,7 +290,7 @@ def export_package(
     parsed_path = os.path.join(tmp_dir, "parsed.sqlite")
     manifest_path = os.path.join(tmp_dir, "manifest.json")
     try:
-        write_parsed_sqlite(conn, ids["flights"], parsed_path)
+        write_parsed_sqlite(conn, ids, parsed_path)
         parsed_sha = _sha256_file(parsed_path)
         manifest["parsed_data"]["sha256"] = parsed_sha
         manifest["parsed_data"]["size_bytes"] = os.path.getsize(parsed_path)

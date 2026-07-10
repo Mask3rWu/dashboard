@@ -217,6 +217,14 @@ def _find_model(conn, model: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _find_model_by_name(conn, name: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        db.text("SELECT * FROM aircraft_models WHERE name=:name"),
+        {"name": _clean_text(name).strip()},
+    ).first()
+    return _row_dict(row)
+
+
 def _find_aircraft(conn, aircraft: dict[str, Any], server_model_id: int | None = None) -> dict[str, Any] | None:
     client_uid = aircraft.get("client_uid")
     if client_uid:
@@ -237,6 +245,14 @@ def _find_aircraft(conn, aircraft: dict[str, Any], server_model_id: int | None =
         if row:
             return _row_dict(row)
     return None
+
+
+def _find_aircraft_by_name(conn, server_model_id: int, name: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        db.text("SELECT * FROM aircraft WHERE model_id=:model_id AND name=:name"),
+        {"model_id": server_model_id, "name": _clean_text(name).strip()},
+    ).first()
+    return _row_dict(row)
 
 
 def _find_flight_by_client_uid(conn, client_uid: str | None) -> dict[str, Any] | None:
@@ -283,6 +299,13 @@ def _server_flight_raw_hashes(conn, flight_id: int) -> set[str]:
     return {str(row._mapping["sha256"]) for row in rows}
 
 
+def _manifest_server_version(row: dict[str, Any]) -> int | None:
+    value = row.get("server_version")
+    if value in (None, ""):
+        value = row.get("version")
+    return _as_int(value)
+
+
 def _manifest_raw_hashes_by_flight(manifest: dict[str, Any]) -> dict[int, set[str]]:
     grouped: dict[int, set[str]] = defaultdict(set)
     for raw in manifest.get("raw_files") or []:
@@ -323,7 +346,9 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
         action = "create"
         conflict_reason = None
         if existing:
-            action = "existing"
+            known_version = _manifest_server_version(model)
+            current_version = _as_int(existing.get("version")) or 1
+            target_name = _clean_text(model.get("name")).strip()
             signature = _model_signature_from_manifest(model)
             if (
                 signature
@@ -333,6 +358,18 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
             ):
                 action = "conflict"
                 conflict_reason = "model_name_config_mismatch"
+            elif known_version is not None and current_version > known_version:
+                action = "conflict"
+                conflict_reason = "server_changed_since_last_sync"
+            else:
+                name_owner = _find_model_by_name(conn, target_name) if target_name else None
+                if name_owner and int(name_owner["id"]) != int(existing["id"]):
+                    action = "conflict"
+                    conflict_reason = "model_name_conflict"
+                elif target_name and target_name != existing.get("name"):
+                    action = "update_metadata"
+                else:
+                    action = "existing"
         item = {
             "entity_type": "model",
             "source_id": source_id,
@@ -340,6 +377,7 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
             "name": model.get("name"),
             "action": action,
             "server_id": existing.get("id") if existing else None,
+            "server_name": existing.get("name") if existing else None,
             "server_version": existing.get("version") if existing else None,
             "reason": conflict_reason,
         }
@@ -355,6 +393,22 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
         server_model = model_by_source.get(source_model_id) if source_model_id is not None else None
         existing = _find_aircraft(conn, aircraft, _as_int(server_model.get("id")) if server_model else None)
         action = "existing" if existing else "create"
+        conflict_reason = None
+        if existing:
+            known_version = _manifest_server_version(aircraft)
+            current_version = _as_int(existing.get("version")) or 1
+            target_name = _clean_text(aircraft.get("name")).strip()
+            server_model_id = _as_int(server_model.get("id")) if server_model else None
+            if known_version is not None and current_version > known_version:
+                action = "conflict"
+                conflict_reason = "server_changed_since_last_sync"
+            elif server_model_id is not None:
+                name_owner = _find_aircraft_by_name(conn, server_model_id, target_name) if target_name else None
+                if name_owner and int(name_owner["id"]) != int(existing["id"]):
+                    action = "conflict"
+                    conflict_reason = "aircraft_name_conflict"
+                elif target_name and target_name != existing.get("name"):
+                    action = "update_metadata"
         item = {
             "entity_type": "aircraft",
             "source_id": source_id,
@@ -363,7 +417,9 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
             "source_model_id": source_model_id,
             "action": action,
             "server_id": existing.get("id") if existing else None,
+            "server_name": existing.get("name") if existing else None,
             "server_version": existing.get("version") if existing else None,
+            "reason": conflict_reason,
         }
         aircraft_plan.append(item)
         if source_id is not None and existing:
@@ -388,16 +444,21 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
         action = "create"
         reason = None
         if existing:
+            known_version = _manifest_server_version(flight)
+            current_version = _as_int(existing.get("version")) or 1
             package_hashes = raw_hashes_by_flight.get(source_id or -1, set())
             server_hashes = _server_flight_raw_hashes(conn, int(existing["id"]))
-            if matched_by == "business_key" and package_hashes and server_hashes and package_hashes != server_hashes:
+            if known_version is not None and current_version > known_version:
+                action = "conflict"
+                reason = "server_changed_since_last_sync"
+            elif matched_by == "business_key" and package_hashes and server_hashes and package_hashes != server_hashes:
                 action = "conflict"
                 reason = "business_key_raw_hash_mismatch"
             elif existing.get("deleted_at") is not None:
                 action = "restore"
                 reason = "server_deleted"
             else:
-                action = "existing"
+                action = "update_metadata"
 
         flight_plan.append(
             {
@@ -537,10 +598,55 @@ def _build_source_config(parsed: sqlite3.Connection, source_model_id: int) -> di
     }
 
 
-def _ensure_model(conn, parsed: sqlite3.Connection, source_model: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def _ensure_model(
+    conn,
+    parsed: sqlite3.Connection,
+    source_model: dict[str, Any],
+    package_id: str,
+    source_node_id: str,
+) -> tuple[dict[str, Any], bool]:
     existing = _find_model(conn, source_model)
     if existing:
         _ensure_model_registry(conn, parsed, int(source_model["source_id"]), int(existing["id"]))
+        target_name = _clean_text(source_model.get("name")).strip()
+        known_version = _manifest_server_version(source_model)
+        current_version = int(existing.get("version") or 1)
+        if known_version is not None and current_version > known_version:
+            return existing, False
+        if target_name and target_name != existing.get("name"):
+            version = current_version + 1
+            conn.execute(
+                db.text(
+                    """UPDATE aircraft_models
+                       SET name=:name,
+                           source_node_id=:source_node_id,
+                           version=:version,
+                           updated_at=:updated_at
+                       WHERE id=:id"""
+                ),
+                {
+                    "id": int(existing["id"]),
+                    "name": target_name,
+                    "source_node_id": source_model.get("source_node_id") or existing.get("source_node_id"),
+                    "version": version,
+                    "updated_at": source_model.get("updated_at") or db.utcnow(),
+                },
+            )
+            row = conn.execute(
+                db.text("SELECT * FROM aircraft_models WHERE id=:id"),
+                {"id": int(existing["id"])},
+            ).first()
+            updated = _row_dict(row) or existing
+            _insert_change_with_type(
+                conn,
+                "aircraft_model",
+                int(updated["id"]),
+                "update",
+                version,
+                package_id,
+                source_node_id,
+            )
+            return updated, False
         return existing, False
     created = db.create_model(conn, _build_source_config(parsed, int(source_model["source_id"])))
     row = conn.execute(
@@ -691,6 +797,37 @@ def _ensure_aircraft(
 ) -> tuple[dict[str, Any], bool]:
     existing = _find_aircraft(conn, aircraft, server_model_id)
     if existing:
+        target_name = _clean_text(aircraft.get("name")).strip()
+        known_version = _manifest_server_version(aircraft)
+        current_version = int(existing.get("version") or 1)
+        if known_version is not None and current_version > known_version:
+            return existing, False
+        if target_name and target_name != existing.get("name"):
+            version = current_version + 1
+            conn.execute(
+                db.text(
+                    """UPDATE aircraft
+                       SET name=:name,
+                           source_node_id=:source_node_id,
+                           version=:version,
+                           updated_at=:updated_at
+                       WHERE id=:id"""
+                ),
+                {
+                    "id": int(existing["id"]),
+                    "name": target_name,
+                    "source_node_id": aircraft.get("source_node_id") or source_node_id,
+                    "version": version,
+                    "updated_at": aircraft.get("updated_at") or db.utcnow(),
+                },
+            )
+            row = conn.execute(
+                db.text("SELECT * FROM aircraft WHERE id=:id"),
+                {"id": int(existing["id"])},
+            ).first()
+            updated = _row_dict(row) or existing
+            _insert_change_with_type(conn, "aircraft", int(updated["id"]), "update", version, package_id, source_node_id)
+            return updated, False
         return existing, False
     now = db.utcnow()
     conn.execute(
@@ -727,8 +864,7 @@ FLIGHT_COLUMNS = [
     "end_time",
     "duration_sec",
     "total_rows",
-    "record_daily_duration_min",
-    "record_batch_name",
+    "record_total_duration_min",
     "record_location",
     "record_payload",
     "record_weather",
@@ -736,10 +872,69 @@ FLIGHT_COLUMNS = [
     "record_takeoff_weight",
     "record_altitude",
     "record_wind_speed",
+    "record_wind_direction",
+    "record_temperature",
     "record_note",
     "created_at",
     "updated_at",
 ]
+
+
+def _flight_metadata_values(
+    flight: dict[str, Any],
+    server_aircraft_id: int,
+    source_node_id: str,
+) -> dict[str, Any]:
+    return {
+        "client_uid": flight.get("client_uid"),
+        "source_node_id": flight.get("source_node_id") or source_node_id,
+        "aircraft_id": server_aircraft_id,
+        "name": _clean_text(flight.get("name")),
+        "source_path": flight.get("source_path"),
+        "session_key": _clean_text(flight.get("session_key")),
+        "flight_date": flight.get("flight_date") or None,
+        "start_time": flight.get("start_time") or None,
+        "end_time": flight.get("end_time") or None,
+        "duration_sec": flight.get("duration_sec"),
+        "total_rows": _as_int(flight.get("total_rows")) or 0,
+        "record_total_duration_min": flight.get("record_total_duration_min"),
+        "record_location": _clean_text(flight.get("record_location")),
+        "record_payload": _clean_text(flight.get("record_payload")),
+        "record_weather": _clean_text(flight.get("record_weather")),
+        "record_fuel_amount": flight.get("record_fuel_amount"),
+        "record_takeoff_weight": flight.get("record_takeoff_weight"),
+        "record_altitude": flight.get("record_altitude"),
+        "record_wind_speed": flight.get("record_wind_speed"),
+        "record_wind_direction": _clean_text(flight.get("record_wind_direction")),
+        "record_temperature": flight.get("record_temperature"),
+        "record_note": _clean_text(flight.get("record_note")),
+    }
+
+
+def _values_differ(left: Any, right: Any) -> bool:
+    if left is None and right in (None, ""):
+        return False
+    if right is None and left in (None, ""):
+        return False
+    return str(left) != str(right)
+
+
+def _flight_metadata_changed(existing: dict[str, Any], values: dict[str, Any]) -> bool:
+    comparable = [
+        "name",
+        "record_total_duration_min",
+        "record_location",
+        "record_payload",
+        "record_weather",
+        "record_fuel_amount",
+        "record_takeoff_weight",
+        "record_altitude",
+        "record_wind_speed",
+        "record_wind_direction",
+        "record_temperature",
+        "record_note",
+    ]
+    return any(_values_differ(existing.get(column), values.get(column)) for column in comparable)
 
 
 def _ensure_flight(
@@ -758,32 +953,14 @@ def _ensure_flight(
             flight.get("session_key"),
         )
     if existing:
+        values = _flight_metadata_values(flight, server_aircraft_id, source_node_id)
         if existing.get("deleted_at") is not None:
             now = db.utcnow()
             version = int(existing.get("version") or 1) + 1
             values = {
+                **values,
                 "id": int(existing["id"]),
-                "client_uid": existing.get("client_uid") or flight.get("client_uid"),
-                "source_node_id": flight.get("source_node_id") or source_node_id,
-                "aircraft_id": server_aircraft_id,
-                "name": _clean_text(flight.get("name")),
-                "source_path": flight.get("source_path"),
-                "session_key": _clean_text(flight.get("session_key")),
-                "flight_date": flight.get("flight_date") or None,
-                "start_time": flight.get("start_time") or None,
-                "end_time": flight.get("end_time") or None,
-                "duration_sec": flight.get("duration_sec"),
-                "total_rows": _as_int(flight.get("total_rows")) or 0,
-                "record_daily_duration_min": flight.get("record_daily_duration_min"),
-                "record_batch_name": _clean_text(flight.get("record_batch_name")),
-                "record_location": _clean_text(flight.get("record_location")),
-                "record_payload": _clean_text(flight.get("record_payload")),
-                "record_weather": _clean_text(flight.get("record_weather")),
-                "record_fuel_amount": flight.get("record_fuel_amount"),
-                "record_takeoff_weight": flight.get("record_takeoff_weight"),
-                "record_altitude": flight.get("record_altitude"),
-                "record_wind_speed": flight.get("record_wind_speed"),
-                "record_note": _clean_text(flight.get("record_note")),
+                "client_uid": existing.get("client_uid") or values.get("client_uid"),
                 "version": version,
                 "updated_at": flight.get("updated_at") or now,
             }
@@ -801,8 +978,7 @@ def _ensure_flight(
                            end_time=:end_time,
                            duration_sec=:duration_sec,
                            total_rows=:total_rows,
-                           record_daily_duration_min=:record_daily_duration_min,
-                           record_batch_name=:record_batch_name,
+                           record_total_duration_min=:record_total_duration_min,
                            record_location=:record_location,
                            record_payload=:record_payload,
                            record_weather=:record_weather,
@@ -810,6 +986,8 @@ def _ensure_flight(
                            record_takeoff_weight=:record_takeoff_weight,
                            record_altitude=:record_altitude,
                            record_wind_speed=:record_wind_speed,
+                           record_wind_direction=:record_wind_direction,
+                           record_temperature=:record_temperature,
                            record_note=:record_note,
                            version=:version,
                            updated_at=:updated_at,
@@ -824,30 +1002,49 @@ def _ensure_flight(
             restored = _row_dict(row) or {}
             _insert_change_with_type(conn, "flight", int(restored["id"]), "restore", version, package_id, source_node_id)
             return restored, False, True
+        known_version = _manifest_server_version(flight)
+        current_version = int(existing.get("version") or 1)
+        if known_version is not None and current_version > known_version:
+            return existing, False, False
+        if _flight_metadata_changed(existing, values):
+            now = db.utcnow()
+            version = current_version + 1
+            conn.execute(
+                db.text(
+                    """UPDATE flights
+                       SET client_uid=COALESCE(client_uid, :client_uid),
+                           source_node_id=:source_node_id,
+                           name=:name,
+                           record_total_duration_min=:record_total_duration_min,
+                           record_location=:record_location,
+                           record_payload=:record_payload,
+                           record_weather=:record_weather,
+                           record_fuel_amount=:record_fuel_amount,
+                           record_takeoff_weight=:record_takeoff_weight,
+                           record_altitude=:record_altitude,
+                           record_wind_speed=:record_wind_speed,
+                           record_wind_direction=:record_wind_direction,
+                           record_temperature=:record_temperature,
+                           record_note=:record_note,
+                           version=:version,
+                           updated_at=:updated_at
+                       WHERE id=:id"""
+                ),
+                {
+                    **values,
+                    "id": int(existing["id"]),
+                    "version": version,
+                    "updated_at": flight.get("updated_at") or now,
+                },
+            )
+            row = conn.execute(db.text("SELECT * FROM flights WHERE id=:id"), {"id": int(existing["id"])}).first()
+            updated = _row_dict(row) or {}
+            _insert_change_with_type(conn, "flight", int(updated["id"]), "update", version, package_id, source_node_id)
+            return updated, False, False
         return existing, False, False
     now = db.utcnow()
     values = {
-        "client_uid": flight.get("client_uid"),
-        "source_node_id": flight.get("source_node_id") or source_node_id,
-        "aircraft_id": server_aircraft_id,
-        "name": _clean_text(flight.get("name")),
-        "source_path": flight.get("source_path"),
-        "session_key": _clean_text(flight.get("session_key")),
-        "flight_date": flight.get("flight_date") or None,
-        "start_time": flight.get("start_time") or None,
-        "end_time": flight.get("end_time") or None,
-        "duration_sec": flight.get("duration_sec"),
-        "total_rows": _as_int(flight.get("total_rows")) or 0,
-        "record_daily_duration_min": flight.get("record_daily_duration_min"),
-        "record_batch_name": _clean_text(flight.get("record_batch_name")),
-        "record_location": _clean_text(flight.get("record_location")),
-        "record_payload": _clean_text(flight.get("record_payload")),
-        "record_weather": _clean_text(flight.get("record_weather")),
-        "record_fuel_amount": flight.get("record_fuel_amount"),
-        "record_takeoff_weight": flight.get("record_takeoff_weight"),
-        "record_altitude": flight.get("record_altitude"),
-        "record_wind_speed": flight.get("record_wind_speed"),
-        "record_note": _clean_text(flight.get("record_note")),
+        **_flight_metadata_values(flight, server_aircraft_id, source_node_id),
         "created_at": flight.get("created_at") or flight.get("import_time") or now,
         "updated_at": flight.get("updated_at") or now,
     }
@@ -885,17 +1082,14 @@ def _server_flight_context(conn, flight_id: int) -> dict[str, Any]:
 def _server_storage_rel_path(conn, flight_id: int, raw: dict[str, Any]) -> str:
     flight = _server_flight_context(conn, flight_id)
     date = _date_prefix(flight.get("flight_date"))
-    model = f"{_safe_part(flight.get('model_name'), 'model')}__model_{flight['model_id']}"
     aircraft = f"{_safe_part(flight.get('aircraft_name'), 'aircraft')}__aircraft_{flight['aircraft_id']}"
-    flight_name = _safe_part(flight.get("name") or flight.get("session_key"), "flight")
-    flight_dir = f"{date}_{flight_name}__flight_{flight['id']}"
     original = str(raw.get("original_rel_path") or raw.get("original_name") or raw.get("sha256") or "raw_file").replace("\\", "/")
     parts = [_safe_part(part) for part in original.split("/") if part and part != "."]
     if not parts:
         parts = [_safe_part(raw.get("original_name") or "raw_file")]
     if not parts[-1].startswith(f"{date}_"):
         parts[-1] = f"{date}_{parts[-1]}"
-    return PurePosixPath(model, aircraft, flight_dir, *parts).as_posix()
+    return PurePosixPath(aircraft, *parts).as_posix()
 
 
 def _unique_server_storage_rel_path(conn, desired_rel: str, flight_id: int) -> str:
@@ -1141,7 +1335,7 @@ def _import_parsed_bundle(
 
     for source_model in model_rows:
         source_id = int(source_model["source_id"])
-        server_model, created = _ensure_model(conn, parsed, source_model)
+        server_model, created = _ensure_model(conn, parsed, source_model, package_id, source_node_id)
         model_map[source_id] = server_model
         if created:
             imported_counts["models"] += 1
@@ -1585,6 +1779,34 @@ def _select_rows_by_ids_for_model(conn, table: str, model_id: int) -> list[dict[
         {"model_id": model_id},
     ).fetchall()
     return [_row_dict(row) or {} for row in rows]
+
+
+def build_pull_preview(conn, since: int | str | None = None) -> dict[str, Any]:
+    """Return a lightweight pull preview without creating or downloading a bundle."""
+    ids = _changed_entity_ids(conn, since)
+    current_cursor = _max_cursor(conn)
+    model_rows = _select_rows_by_ids(conn, "aircraft_models", ids["models"])
+    aircraft_rows = _select_rows_by_ids(conn, "aircraft", ids["aircraft"])
+    flight_rows = _select_rows_by_ids(conn, "flights", ids["flights"])
+    raw_rows = _server_raw_manifest_rows(conn, ids["flights"])
+    return {
+        "ok": True,
+        "bundle_kind": "pull_preview",
+        "source_node_id": "server",
+        "source_environment": "server",
+        "base_server_cursor": str(since or ""),
+        "server_cursor": current_cursor,
+        "models": model_rows,
+        "aircraft": aircraft_rows,
+        "flights": flight_rows,
+        "raw_files": raw_rows,
+        "summary": {
+            "models": len(model_rows),
+            "aircraft": len(aircraft_rows),
+            "flights": len(flight_rows),
+            "raw_files": len(raw_rows),
+        },
+    }
 
 
 def build_pull_bundle(conn, since: int | str | None = None) -> dict[str, Any]:

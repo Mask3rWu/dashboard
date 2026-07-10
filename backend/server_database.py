@@ -113,8 +113,7 @@ SCHEMA_DDL = [
         end_time DATETIME(6) NULL,
         duration_sec DOUBLE NULL,
         total_rows BIGINT NOT NULL DEFAULT 0,
-        record_daily_duration_min DOUBLE NULL,
-        record_batch_name VARCHAR(255) NOT NULL DEFAULT '',
+        record_total_duration_min DOUBLE NULL,
         record_location VARCHAR(255) NOT NULL DEFAULT '',
         record_payload VARCHAR(255) NOT NULL DEFAULT '',
         record_weather VARCHAR(255) NOT NULL DEFAULT '',
@@ -122,6 +121,8 @@ SCHEMA_DDL = [
         record_takeoff_weight DOUBLE NULL,
         record_altitude DOUBLE NULL,
         record_wind_speed DOUBLE NULL,
+        record_wind_direction VARCHAR(255) NOT NULL DEFAULT '',
+        record_temperature DOUBLE NULL,
         record_note TEXT NOT NULL,
         version BIGINT NOT NULL DEFAULT 1,
         created_at DATETIME(6) NOT NULL,
@@ -273,10 +274,31 @@ def init_server_schema(engine: Engine | None = None) -> None:
     with engine.begin() as conn:
         for ddl in SCHEMA_DDL:
             conn.execute(text(ddl))
+        _ensure_flight_record_columns(conn)
         ensure_builtin_admin(conn)
         from .model_seeds import apply_builtin_model_seeds_to_server
 
         apply_builtin_model_seeds_to_server(conn)
+
+
+def _ensure_flight_record_columns(conn: "Connection") -> None:
+    """Bring an existing MySQL flights table to the current record schema."""
+    columns = {
+        row[0]
+        for row in conn.execute(text("SHOW COLUMNS FROM flights")).all()
+    }
+    if "record_daily_duration_min" in columns and "record_total_duration_min" not in columns:
+        conn.execute(text("ALTER TABLE flights CHANGE record_daily_duration_min record_total_duration_min DOUBLE NULL"))
+        columns.remove("record_daily_duration_min")
+        columns.add("record_total_duration_min")
+    if "record_total_duration_min" not in columns:
+        conn.execute(text("ALTER TABLE flights ADD COLUMN record_total_duration_min DOUBLE NULL"))
+    if "record_batch_name" in columns:
+        conn.execute(text("ALTER TABLE flights DROP COLUMN record_batch_name"))
+    if "record_wind_direction" not in columns:
+        conn.execute(text("ALTER TABLE flights ADD COLUMN record_wind_direction VARCHAR(255) NOT NULL DEFAULT ''"))
+    if "record_temperature" not in columns:
+        conn.execute(text("ALTER TABLE flights ADD COLUMN record_temperature DOUBLE NULL"))
 
 
 def ensure_server_data_dir() -> None:

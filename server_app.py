@@ -372,6 +372,16 @@ def sync_changes(
     return server_sync.list_changes(conn, since)
 
 
+@app.get("/api/sync/preview")
+def sync_preview(
+    since: str | None = Query(default=None),
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
+    db.require_capability(user, "sync_pull")
+    return server_sync.build_pull_preview(conn, since)
+
+
 @app.get("/api/sync/bundle")
 def sync_bundle(
     since: str | None = Query(default=None),

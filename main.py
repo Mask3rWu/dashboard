@@ -52,7 +52,14 @@ from backend.raw_storage import (
     refresh_raw_storage_paths,
 )
 from backend.sync_package import export_package
-from backend.sync_import import preview_import, import_package, import_pull_bundle, get_import_report
+from backend.sync_import import (
+    preview_import,
+    import_package,
+    import_pull_bundle,
+    preview_pull_manifest,
+    apply_pull_manifest_metadata,
+    get_import_report,
+)
 from backend import flight_repository, user_repository, sync_repository, sync_client
 from backend import runtime_context
 from backend import analysis
@@ -91,6 +98,90 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_SYNC_PROGRESS: dict[str, dict] = {}
+_SYNC_PROGRESS_LOCK = threading.Lock()
+
+
+def _progress_now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _progress_percent(start: float, end: float, local_percent: float) -> int:
+    value = float(start) + (float(end) - float(start)) * max(0.0, min(100.0, float(local_percent))) / 100.0
+    return int(round(max(0.0, min(100.0, value))))
+
+
+def _sync_progress_update(
+    operation_id: str | None,
+    *,
+    phase: str,
+    message: str,
+    percent: float | int | None = None,
+    status: str = "running",
+    current: int | None = None,
+    total: int | None = None,
+    detail: str | None = None,
+) -> None:
+    if not operation_id:
+        return
+    now = _progress_now()
+    with _SYNC_PROGRESS_LOCK:
+        existing = _SYNC_PROGRESS.get(operation_id, {})
+        _SYNC_PROGRESS[operation_id] = {
+            **existing,
+            "operation_id": operation_id,
+            "status": status,
+            "phase": phase,
+            "message": message,
+            "detail": detail,
+            "percent": int(max(0, min(100, round(percent if percent is not None else existing.get("percent", 0))))),
+            "current": current if current is not None else existing.get("current"),
+            "total": total if total is not None else existing.get("total"),
+            "created_at": existing.get("created_at") or now,
+            "updated_at": now,
+        }
+
+
+def _sync_progress_fail(operation_id: str | None, *, phase: str, message: str) -> None:
+    _sync_progress_update(
+        operation_id,
+        phase=phase,
+        message=message,
+        status="failed",
+        percent=100,
+    )
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "-"
+    units = ["B", "KB", "MB", "GB"]
+    amount = float(value)
+    unit = units[0]
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            break
+        amount /= 1024
+    if unit == "B":
+        return f"{int(amount)} {unit}"
+    return f"{amount:.1f} {unit}"
+
+
+def _byte_progress_callback(operation_id: str | None, start: float, end: float, phase: str, verb: str):
+    def update(done: int, total: int | None) -> None:
+        local_percent = 0 if not total else (done / total) * 100
+        _sync_progress_update(
+            operation_id,
+            phase=phase,
+            message=f"{verb} {_format_bytes(done)} / {_format_bytes(total)}",
+            percent=_progress_percent(start, end, local_percent),
+            current=done,
+            total=total,
+        )
+
+    return update
 
 
 @app.exception_handler(Exception)
@@ -335,17 +426,36 @@ class SyncExportRequest(BaseModel):
 class SyncPushBatchRequest(BaseModel):
     flight_ids: list[int] | None = None
     server_token: str | None = None
+    operation_id: str | None = None
+    progress_start: float = 0
+    progress_end: float = 100
+    progress_finalize: bool = True
 
 
 class SyncPullRequest(BaseModel):
     since: str | None = None
     server_token: str | None = None
+    operation_id: str | None = None
+    progress_start: float = 0
+    progress_end: float = 100
+    progress_finalize: bool = True
+    package_path: str | None = None
+    conflict_resolutions: dict[str, str] | None = None
 
 
 class SyncRunRequest(BaseModel):
     flight_ids: list[int] | None = None
     since: str | None = None
     server_token: str | None = None
+    operation_id: str | None = None
+    pull_package_path: str | None = None
+    pull_conflict_resolutions: dict[str, str] | None = None
+
+
+class SyncPreviewRequest(BaseModel):
+    mode: str = "run"
+    flight_ids: list[int] | None = None
+    since: str | None = None
 
 
 class SyncAbandonRequest(BaseModel):
@@ -1731,10 +1841,189 @@ def get_sync_queue():
             item = dict(row)
             item["sync_error"] = _json_or_none(item.get("sync_error_json"))
             items.append(item)
+        base_queue = sync_repository.list_upload_base_queue(conn)
+        base_items = []
+        for row in [*base_queue["models"], *base_queue["aircraft"]]:
+            item = dict(row)
+            item["sync_error"] = _json_or_none(item.get("sync_error_json"))
+            base_items.append(item)
         return {
             "summary": sync_repository.upload_queue_summary(conn),
             "items": items,
+            "base_items": base_items,
         }
+    finally:
+        conn.close()
+
+
+@app.get("/api/sync/progress/{operation_id}")
+def get_sync_progress(operation_id: str):
+    with _SYNC_PROGRESS_LOCK:
+        item = _SYNC_PROGRESS.get(operation_id)
+        if not item:
+            raise HTTPException(404, "Sync progress not found")
+        return dict(item)
+
+
+def _sync_preview_upload(conn, req: SyncPreviewRequest, request: Request) -> dict:
+    model_ids: list[int] = []
+    aircraft_ids: list[int] = []
+    selected_models: list[dict] = []
+    selected_aircraft: list[dict] = []
+    if req.flight_ids is None:
+        flight_ids = [
+            int(item["id"])
+            for item in sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+        ]
+        base_queue = sync_repository.list_upload_base_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+        selected_models = base_queue["models"]
+        selected_aircraft = base_queue["aircraft"]
+        model_ids = [int(item["id"]) for item in selected_models]
+        aircraft_ids = [int(item["id"]) for item in selected_aircraft]
+    else:
+        flight_ids = req.flight_ids
+    if not flight_ids and not model_ids and not aircraft_ids:
+        return {
+            "ok": True,
+            "status": "empty",
+            "selected_flights": [],
+            "selected_models": [],
+            "selected_aircraft": [],
+            "skipped_dirty": [],
+            "preflight": None,
+            "items": [],
+            "models": [],
+            "aircraft": [],
+            "summary": {"total": 0, "create": 0, "existing": 0, "conflict": 0},
+        }
+    selected = sync_repository.validate_uploadable_flights(conn, flight_ids) if flight_ids else []
+    selected_ids = [int(item["id"]) for item in selected]
+    if not selected_ids and not model_ids and not aircraft_ids:
+        return {
+            "ok": False,
+            "status": "empty",
+            "selected_flights": [],
+            "selected_models": [],
+            "selected_aircraft": [],
+            "skipped_dirty": [],
+            "preflight": None,
+            "items": [],
+            "models": [],
+            "aircraft": [],
+            "summary": {"total": 0, "create": 0, "existing": 0, "conflict": 0},
+        }
+    if not runtime_context.get_sync_enabled(conn):
+        raise sync_client.SyncClientError("SYNC_ENABLED is false")
+    server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+    bundle = export_package(
+        conn,
+        selected_ids,
+        model_ids=model_ids,
+        aircraft_ids=aircraft_ids,
+        bundle_kind="push_batch",
+    )
+    manifest = sync_client.read_bundle_manifest(bundle["path"])
+    preflight = sync_client.preflight(server_base_url, manifest, token=_server_token(req, request))
+    model_plan_by_source = {
+        int(item["source_id"]): item
+        for item in (preflight.get("models") or [])
+        if item.get("source_id") is not None
+    }
+    aircraft_plan_by_source = {
+        int(item["source_id"]): item
+        for item in (preflight.get("aircraft") or [])
+        if item.get("source_id") is not None
+    }
+    plan_by_source = {
+        int(item["source_id"]): item
+        for item in (preflight.get("flights") or [])
+        if item.get("source_id") is not None
+    }
+    model_items = []
+    for item in selected_models:
+        plan = model_plan_by_source.get(int(item["id"]), {})
+        model_items.append({
+            **item,
+            "action": plan.get("action") or "unknown",
+            "reason": plan.get("reason"),
+            "matched_by": plan.get("matched_by"),
+            "server_id": plan.get("server_id"),
+            "server_name": plan.get("server_name"),
+            "server_version": plan.get("server_version"),
+        })
+    aircraft_items = []
+    for item in selected_aircraft:
+        plan = aircraft_plan_by_source.get(int(item["id"]), {})
+        aircraft_items.append({
+            **item,
+            "action": plan.get("action") or "unknown",
+            "reason": plan.get("reason"),
+            "matched_by": plan.get("matched_by"),
+            "server_id": plan.get("server_id"),
+            "server_name": plan.get("server_name"),
+            "server_version": plan.get("server_version"),
+        })
+    items = []
+    for item in selected:
+        plan = plan_by_source.get(int(item["id"]), {})
+        items.append(
+            {
+                **item,
+                "action": plan.get("action") or "unknown",
+                "reason": plan.get("reason"),
+                "matched_by": plan.get("matched_by"),
+                "server_id": plan.get("server_id"),
+                "server_version": plan.get("server_version"),
+            }
+        )
+    summary = preflight.get("summary", {}).get("flights") or {}
+    return {
+        "ok": not bool(preflight.get("conflicts")),
+        "status": preflight.get("status") or "ready",
+        "selected_flights": selected,
+        "selected_models": selected_models,
+        "selected_aircraft": selected_aircraft,
+        "skipped_dirty": [],
+        "bundle": bundle,
+        "preflight": preflight,
+        "items": items,
+        "models": model_items,
+        "aircraft": aircraft_items,
+        "summary": summary,
+    }
+
+
+def _sync_preview_pull(conn, req: SyncPreviewRequest, request: Request) -> dict:
+    if not runtime_context.get_sync_enabled(conn):
+        raise sync_client.SyncClientError("SYNC_ENABLED is false")
+    server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
+    since = req.since
+    if since is None:
+        since = sync_repository.get_setting(conn, "last_pull_cursor", "")
+    manifest = sync_client.pull_preview(
+        server_base_url,
+        since,
+        token=_server_token(req, request),
+    )
+    return preview_pull_manifest(conn, manifest)
+
+
+@app.post("/api/sync/preview")
+def post_sync_preview(req: SyncPreviewRequest, request: Request):
+    if req.mode not in {"run", "push", "pull"}:
+        raise HTTPException(400, "Unsupported sync preview mode")
+    conn = get_db()
+    try:
+        result = {"mode": req.mode, "upload": None, "pull": None}
+        if req.mode in {"run", "push"}:
+            result["upload"] = _sync_preview_upload(conn, req, request)
+        if req.mode in {"run", "pull"}:
+            result["pull"] = _sync_preview_pull(conn, req, request)
+        return result
+    except sync_client.SyncClientError as e:
+        raise HTTPException(502, e.to_error_json("preview"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     finally:
         conn.close()
 
@@ -1757,15 +2046,26 @@ def post_sync_push_batch(req: SyncPushBatchRequest):
     """Generate the internal push_batch bundle for selected queued flights."""
     conn = get_db()
     try:
+        model_ids: list[int] = []
+        aircraft_ids: list[int] = []
         if req.flight_ids is None:
             flight_ids = [
                 int(item["id"])
                 for item in sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
             ]
+            base_queue = sync_repository.list_upload_base_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+            model_ids = [int(item["id"]) for item in base_queue["models"]]
+            aircraft_ids = [int(item["id"]) for item in base_queue["aircraft"]]
         else:
             flight_ids = req.flight_ids
-        selected = sync_repository.validate_uploadable_flights(conn, flight_ids)
-        result = export_package(conn, [int(item["id"]) for item in selected], bundle_kind="push_batch")
+        selected = sync_repository.validate_uploadable_flights(conn, flight_ids) if flight_ids else []
+        result = export_package(
+            conn,
+            [int(item["id"]) for item in selected],
+            model_ids=model_ids,
+            aircraft_ids=aircraft_ids,
+            bundle_kind="push_batch",
+        )
         return {
             **result,
             "status": "bundle_generated",
@@ -1785,32 +2085,68 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
     conn = get_db()
     run_id = None
     selected_ids: list[int] = []
+    selected_model_ids: list[int] = []
+    selected_aircraft_ids: list[int] = []
+    progress_id = req.operation_id
+    progress_start = req.progress_start
+    progress_end = req.progress_end
     try:
+        _sync_progress_update(
+            progress_id,
+            phase="准备上传",
+            message="正在检查本地上传队列",
+            percent=_progress_percent(progress_start, progress_end, 3),
+        )
         if req.flight_ids is None:
             flight_ids = [
                 int(item["id"])
                 for item in sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
             ]
+            base_queue = sync_repository.list_upload_base_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+            selected_model_ids = [int(item["id"]) for item in base_queue["models"]]
+            selected_aircraft_ids = [int(item["id"]) for item in base_queue["aircraft"]]
         else:
             flight_ids = req.flight_ids
-        selected = sync_repository.validate_uploadable_flights(conn, flight_ids)
-        skipped_dirty = [item for item in selected if item.get("sync_state") == "dirty"]
-        selected = [item for item in selected if item.get("sync_state") != "dirty"]
+        selected = sync_repository.validate_uploadable_flights(conn, flight_ids) if flight_ids else []
         selected_ids = [int(item["id"]) for item in selected]
-        if not selected_ids:
-            raise ValueError("dirty 元数据推送需要服务器更新协议支持，当前阶段不会自动标记为已同步")
+        selected_total = len(selected_ids) + len(selected_model_ids) + len(selected_aircraft_ids)
+        if selected_total == 0:
+            raise ValueError("没有可上传的同步项目")
+        _sync_progress_update(
+            progress_id,
+            phase="准备上传",
+            message=f"已选择 {selected_total} 个同步项目，正在生成同步包",
+            percent=_progress_percent(progress_start, progress_end, 10),
+            current=0,
+            total=selected_total,
+        )
         if not runtime_context.get_sync_enabled(conn):
             raise sync_client.SyncClientError("SYNC_ENABLED is false")
         server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
         run_id = sync_repository.create_sync_run(conn, "push")
-        bundle = export_package(conn, selected_ids, bundle_kind="push_batch")
+        bundle = export_package(
+            conn,
+            selected_ids,
+            model_ids=selected_model_ids,
+            aircraft_ids=selected_aircraft_ids,
+            bundle_kind="push_batch",
+        )
         conn.commit()
+        _sync_progress_update(
+            progress_id,
+            phase="服务器预检",
+            message="同步包已生成，正在提交服务器预检",
+            percent=_progress_percent(progress_start, progress_end, 25),
+            current=0,
+            total=selected_total,
+        )
 
         manifest = sync_client.read_bundle_manifest(bundle["path"])
         token = _server_token(req, request)
         preflight = sync_client.preflight(server_base_url, manifest, token=token)
         if preflight.get("status") == "conflict" or preflight.get("conflicts"):
             sync_repository.mark_conflict(conn, selected_ids, preflight)
+            sync_repository.mark_base_conflict(conn, preflight)
             summary = {
                 "status": "conflict",
                 "selected_flight_ids": selected_ids,
@@ -1825,24 +2161,62 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
                 error={"phase": "preflight", "report": preflight},
             )
             conn.commit()
+            _sync_progress_update(
+                progress_id,
+                phase="服务器预检",
+                message="服务器预检发现冲突，需要人工处理",
+                percent=_progress_percent(progress_start, progress_end, 100),
+                status="failed" if req.progress_finalize else "running",
+                current=0,
+                total=selected_total,
+            )
             return {
                 "ok": False,
                 "status": "conflict",
                 "run_id": run_id,
                 "selected_flights": selected,
-                "skipped_dirty": skipped_dirty,
+                "skipped_dirty": [],
                 "bundle": bundle,
                 "preflight": preflight,
                 "summary": sync_repository.upload_queue_summary(conn),
             }
 
-        server_report = sync_client.push_bundle(server_base_url, bundle["path"], token=token)
+        _sync_progress_update(
+            progress_id,
+            phase="上传同步包",
+            message="服务器预检通过，开始上传同步包",
+            percent=_progress_percent(progress_start, progress_end, 35),
+            current=0,
+            total=selected_total,
+        )
+        server_report = sync_client.push_bundle(
+            server_base_url,
+            bundle["path"],
+            token=token,
+            progress_callback=_byte_progress_callback(
+                progress_id,
+                _progress_percent(progress_start, progress_end, 35),
+                _progress_percent(progress_start, progress_end, 72),
+                "上传同步包",
+                "已上传",
+            ),
+        )
+        _sync_progress_update(
+            progress_id,
+            phase="服务器导入",
+            message="同步包已上传，等待服务器导入并返回结果",
+            percent=_progress_percent(progress_start, progress_end, 78),
+            current=len(selected_ids),
+            total=selected_total,
+        )
         if not server_report.get("ok"):
             error = {"phase": "push", "report": server_report}
             if server_report.get("status") == "conflict" or server_report.get("conflicts"):
                 sync_repository.mark_conflict(conn, selected_ids, server_report)
+                sync_repository.mark_base_conflict(conn, server_report)
             else:
                 sync_repository.mark_upload_failed(conn, selected_ids, error)
+                sync_repository.mark_base_upload_failed(conn, selected_model_ids, selected_aircraft_ids, error)
             sync_repository.finish_sync_run(
                 conn,
                 run_id,
@@ -1851,18 +2225,35 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
                 error=error,
             )
             conn.commit()
+            _sync_progress_update(
+                progress_id,
+                phase="服务器导入",
+                message="服务器未能完成导入，已标记本地上传失败",
+                percent=_progress_percent(progress_start, progress_end, 100),
+                status="failed" if req.progress_finalize else "running",
+                current=selected_total,
+                total=selected_total,
+            )
             return {
                 "ok": False,
                 "status": server_report.get("status") or "failed",
                 "run_id": run_id,
                 "selected_flights": selected,
-                "skipped_dirty": skipped_dirty,
+                "skipped_dirty": [],
                 "bundle": bundle,
                 "preflight": preflight,
                 "server_report": server_report,
                 "summary": sync_repository.upload_queue_summary(conn),
             }
 
+        _sync_progress_update(
+            progress_id,
+            phase="写回本地",
+            message="服务器已接收数据，正在写回本地同步标记",
+            percent=_progress_percent(progress_start, progress_end, 88),
+            current=len(selected_ids),
+            total=selected_total,
+        )
         writeback = sync_repository.apply_push_report(conn, server_report, selected_ids)
         status = "success" if not writeback["missing_flight_ids"] else "partial"
         run_status = "success" if status == "success" else "failed"
@@ -1876,12 +2267,21 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
         }
         sync_repository.finish_sync_run(conn, run_id, run_status, summary=response_summary)
         conn.commit()
+        _sync_progress_update(
+            progress_id,
+            phase="上传完成",
+            message=f"上传完成：{selected_total - len(writeback['missing_flight_ids'])}/{selected_total} 个同步项目已同步",
+            percent=_progress_percent(progress_start, progress_end, 100),
+            status="completed" if req.progress_finalize else "running",
+            current=selected_total,
+            total=selected_total,
+        )
         return {
             "ok": status == "success",
             "status": status,
             "run_id": run_id,
             "selected_flights": selected,
-            "skipped_dirty": skipped_dirty,
+            "skipped_dirty": [],
             "bundle": bundle,
             "preflight": preflight,
             "server_report": server_report,
@@ -1892,14 +2292,18 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
         error = e.to_error_json("push")
         if selected_ids:
             sync_repository.mark_upload_failed(conn, selected_ids, error)
+        if selected_model_ids or selected_aircraft_ids:
+            sync_repository.mark_base_upload_failed(conn, selected_model_ids, selected_aircraft_ids, error)
         if run_id is not None:
             sync_repository.finish_sync_run(conn, run_id, "failed", error=error)
         conn.commit()
+        _sync_progress_fail(progress_id, phase="上传失败", message=str(e))
         raise HTTPException(502, error)
     except ValueError as e:
         if run_id is not None:
             sync_repository.finish_sync_run(conn, run_id, "failed", error={"phase": "local", "message": str(e)})
             conn.commit()
+        _sync_progress_fail(progress_id, phase="上传失败", message=str(e))
         raise HTTPException(400, str(e))
     finally:
         conn.close()
@@ -1911,17 +2315,27 @@ def post_sync_run(req: SyncRunRequest, request: Request):
     steps = []
     push_result = None
     pull_result = None
+    progress_id = req.operation_id
+    _sync_progress_update(
+        progress_id,
+        phase="准备同步",
+        message="正在检查本地上传队列",
+        percent=2,
+    )
 
     conn = get_db()
     try:
+        base_count = 0
         if req.flight_ids is None:
             queue_rows = sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
             push_ids = [
                 int(item["id"])
                 for item in queue_rows
-                if item.get("sync_state") in {"local_only", "pending_upload", "upload_failed"}
+                if item.get("sync_state") in {"local_only", "pending_upload", "dirty", "upload_failed"}
             ]
-            dirty_count = sum(1 for item in queue_rows if item.get("sync_state") == "dirty")
+            base_queue = sync_repository.list_upload_base_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
+            base_count = len(base_queue["models"]) + len(base_queue["aircraft"])
+            dirty_count = 0
         else:
             clean_ids = sorted({int(fid) for fid in req.flight_ids})
             if clean_ids:
@@ -1933,22 +2347,44 @@ def post_sync_run(req: SyncRunRequest, request: Request):
                 push_ids = [
                     int(row["id"])
                     for row in rows
-                    if row["sync_state"] in {"local_only", "pending_upload", "upload_failed"}
+                    if row["sync_state"] in {"local_only", "pending_upload", "dirty", "upload_failed"}
                 ]
-                dirty_count = sum(1 for row in rows if row["sync_state"] == "dirty")
+                dirty_count = 0
             else:
                 push_ids = []
                 dirty_count = 0
     finally:
         conn.close()
 
-    if push_ids:
+    if push_ids or base_count:
+        _sync_progress_update(
+            progress_id,
+            phase="上传阶段",
+            message=f"发现 {len(push_ids) + base_count} 个待上传同步项目，开始上传",
+            percent=6,
+            current=0,
+            total=len(push_ids) + base_count,
+        )
         push_result = post_sync_push(
-            SyncPushBatchRequest(flight_ids=push_ids, server_token=req.server_token),
+            SyncPushBatchRequest(
+                flight_ids=None if req.flight_ids is None else push_ids,
+                server_token=req.server_token,
+                operation_id=progress_id,
+                progress_start=6,
+                progress_end=58,
+                progress_finalize=False,
+            ),
             request,
         )
         steps.append({"name": "push", "status": push_result.get("status", "unknown")})
         if not push_result.get("ok"):
+            _sync_progress_update(
+                progress_id,
+                phase="同步失败",
+                message=f"上传阶段未完成：{push_result.get('status') or 'failed'}",
+                percent=100,
+                status="failed",
+            )
             return {
                 "ok": False,
                 "status": push_result.get("status") or "push_failed",
@@ -1962,12 +2398,44 @@ def post_sync_run(req: SyncRunRequest, request: Request):
         if dirty_count:
             detail = f"跳过 {dirty_count} 个 dirty 项，当前阶段需人工处理后上传"
         steps.append({"name": "push", "status": "skipped", "detail": detail})
+        _sync_progress_update(
+            progress_id,
+            phase="上传阶段",
+            message=detail,
+            percent=20,
+        )
 
-    pull_result = post_sync_pull(SyncPullRequest(since=req.since, server_token=req.server_token), request)
+    _sync_progress_update(
+        progress_id,
+        phase="拉取阶段",
+        message="开始从服务器拉取最新数据",
+        percent=60,
+    )
+    pull_result = post_sync_pull(
+        SyncPullRequest(
+            since=req.since,
+            server_token=req.server_token,
+            operation_id=progress_id,
+            progress_start=60,
+            progress_end=98,
+            progress_finalize=False,
+            package_path=req.pull_package_path,
+            conflict_resolutions=req.pull_conflict_resolutions,
+        ),
+        request,
+    )
     steps.append({"name": "pull", "status": pull_result.get("status", "unknown")})
+    ok = bool(pull_result.get("ok"))
+    _sync_progress_update(
+        progress_id,
+        phase="同步完成" if ok else "同步失败",
+        message="同步一次已完成" if ok else f"拉取阶段未完成：{pull_result.get('status') or 'failed'}",
+        percent=100,
+        status="completed" if ok else "failed",
+    )
     return {
-        "ok": bool(pull_result.get("ok")),
-        "status": "success" if pull_result.get("ok") else (pull_result.get("status") or "pull_failed"),
+        "ok": ok,
+        "status": "success" if ok else (pull_result.get("status") or "pull_failed"),
         "steps": steps,
         "push": push_result,
         "pull": pull_result,
@@ -2014,7 +2482,16 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
     conn = get_db()
     run_id = None
     bundle_path = None
+    progress_id = req.operation_id
+    progress_start = req.progress_start
+    progress_end = req.progress_end
     try:
+        _sync_progress_update(
+            progress_id,
+            phase="准备拉取",
+            message="正在读取本地拉取游标",
+            percent=_progress_percent(progress_start, progress_end, 5),
+        )
         if not runtime_context.get_sync_enabled(conn):
             raise sync_client.SyncClientError("SYNC_ENABLED is false")
         server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
@@ -2024,28 +2501,137 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
         run_id = sync_repository.create_sync_run(conn, "pull")
         conn.commit()
 
+        if not req.package_path:
+            _sync_progress_update(
+                progress_id,
+                phase="检查同步清单",
+                message="正在判断是否只需要更新架次信息",
+                percent=_progress_percent(progress_start, progress_end, 12),
+            )
+            preview_manifest = sync_client.pull_preview(
+                server_base_url,
+                since,
+                token=_server_token(req, request),
+            )
+            preview = preview_pull_manifest(conn, preview_manifest)
+            preview_summary = preview.get("summary") or {}
+            if int(preview_summary.get("bundle_required") or 0) == 0:
+                _sync_progress_update(
+                    progress_id,
+                    phase="更新本地信息",
+                    message=f"无需下载同步包，正在更新 {preview_summary.get('metadata_only') or 0} 个架次信息",
+                    percent=_progress_percent(progress_start, progress_end, 55),
+                    current=0,
+                    total=int(preview_summary.get("metadata_only") or 0),
+                )
+                report = apply_pull_manifest_metadata(
+                    conn,
+                    preview_manifest,
+                    {"flight_resolutions": req.conflict_resolutions or {}},
+                )
+                ok = report.get("status") in {"success", "partial"}
+                summary = {
+                    "since": since,
+                    "server_cursor": preview_manifest.get("server_cursor"),
+                    "bundle_path": None,
+                    "manifest_counts": {
+                        "models": len(preview_manifest.get("models") or []),
+                        "aircraft": len(preview_manifest.get("aircraft") or []),
+                        "flights": len(preview_manifest.get("flights") or []),
+                        "raw_files": len(preview_manifest.get("raw_files") or []),
+                    },
+                    "report": report,
+                }
+                sync_repository.finish_sync_run(
+                    conn,
+                    run_id,
+                    "success" if ok else "failed",
+                    summary=summary,
+                    error=None if ok else {"phase": "metadata", "report": report},
+                )
+                conn.commit()
+                _sync_progress_update(
+                    progress_id,
+                    phase="拉取完成",
+                    message=f"本地信息已更新：{report.get('updated', {}).get('flights', 0)} 个架次",
+                    percent=_progress_percent(progress_start, progress_end, 100),
+                    status="completed" if req.progress_finalize else "running",
+                    current=int(preview_summary.get("metadata_only") or 0),
+                    total=int(preview_summary.get("metadata_only") or 0),
+                )
+                return {
+                    "ok": ok,
+                    "status": report.get("status"),
+                    "run_id": run_id,
+                    "bundle": {
+                        "path": None,
+                        "package_id": preview_manifest.get("package_id"),
+                        "server_cursor": preview_manifest.get("server_cursor"),
+                    },
+                    "report": report,
+                    "summary": sync_repository.upload_queue_summary(conn),
+                }
+
         cache_dir = os.path.join(DATA_DIR, "sync_cache")
         os.makedirs(cache_dir, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bundle_path = os.path.join(cache_dir, f"server_pull_{stamp}.fapkg")
-        manifest = sync_client.download_bundle(
-            server_base_url,
-            since,
-            bundle_path,
-            token=_server_token(req, request),
+        if req.package_path:
+            cache_root = os.path.abspath(cache_dir)
+            bundle_path = os.path.abspath(req.package_path)
+            if os.path.commonpath([bundle_path, cache_root]) != cache_root:
+                raise ValueError("同步预览包路径不在 sync_cache 目录内")
+            manifest = sync_client.read_bundle_manifest(bundle_path)
+            _sync_progress_update(
+                progress_id,
+                phase="读取预览包",
+                message="正在使用预览时下载的同步包",
+                percent=_progress_percent(progress_start, progress_end, 60),
+            )
+        else:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            bundle_path = os.path.join(cache_dir, f"server_pull_{stamp}.fapkg")
+            _sync_progress_update(
+                progress_id,
+                phase="下载同步包",
+                message="正在从服务器下载同步包",
+                percent=_progress_percent(progress_start, progress_end, 15),
+            )
+            manifest = sync_client.download_bundle(
+                server_base_url,
+                since,
+                bundle_path,
+                token=_server_token(req, request),
+                progress_callback=_byte_progress_callback(
+                    progress_id,
+                    _progress_percent(progress_start, progress_end, 15),
+                    _progress_percent(progress_start, progress_end, 60),
+                    "下载同步包",
+                    "已下载",
+                ),
+            )
+        manifest_counts = {
+            "models": len(manifest.get("models") or []),
+            "aircraft": len(manifest.get("aircraft") or []),
+            "flights": len(manifest.get("flights") or []),
+            "raw_files": len(manifest.get("raw_files") or []),
+        }
+        _sync_progress_update(
+            progress_id,
+            phase="导入本地",
+            message=(
+                f"同步包已下载，正在导入 {manifest_counts['flights']} 个架次、"
+                f"{manifest_counts['raw_files']} 个原始文件"
+            ),
+            percent=_progress_percent(progress_start, progress_end, 72),
+            current=0,
+            total=manifest_counts["flights"],
         )
-        report = import_pull_bundle(conn, bundle_path)
+        report = import_pull_bundle(conn, bundle_path, {"flight_resolutions": req.conflict_resolutions or {}})
         ok = report.get("status") in {"success", "partial"}
         summary = {
             "since": since,
             "server_cursor": manifest.get("server_cursor"),
             "bundle_path": bundle_path,
-            "manifest_counts": {
-                "models": len(manifest.get("models") or []),
-                "aircraft": len(manifest.get("aircraft") or []),
-                "flights": len(manifest.get("flights") or []),
-                "raw_files": len(manifest.get("raw_files") or []),
-            },
+            "manifest_counts": manifest_counts,
             "report": report,
         }
         sync_repository.finish_sync_run(
@@ -2056,6 +2642,15 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
             error=None if ok else {"phase": "import", "report": report},
         )
         conn.commit()
+        _sync_progress_update(
+            progress_id,
+            phase="拉取完成",
+            message=f"拉取完成：导入状态 {report.get('status')}",
+            percent=_progress_percent(progress_start, progress_end, 100),
+            status="completed" if req.progress_finalize else "running",
+            current=manifest_counts["flights"],
+            total=manifest_counts["flights"],
+        )
         return {
             "ok": ok,
             "status": report.get("status"),
@@ -2073,11 +2668,13 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
         if run_id is not None:
             sync_repository.finish_sync_run(conn, run_id, "failed", error=error)
             conn.commit()
+        _sync_progress_fail(progress_id, phase="拉取失败", message=str(e))
         raise HTTPException(502, error)
     except ValueError as e:
         if run_id is not None:
             sync_repository.finish_sync_run(conn, run_id, "failed", error={"phase": "local", "message": str(e)})
             conn.commit()
+        _sync_progress_fail(progress_id, phase="拉取失败", message=str(e))
         raise HTTPException(400, str(e))
     finally:
         conn.close()
