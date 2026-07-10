@@ -80,14 +80,9 @@ def _prefix_filename(filename: str, date_prefix: str) -> str:
     return f"{date_prefix}_{safe}"
 
 
-def _flight_base_rel(flight: dict) -> str:
-    date = _date_prefix(flight.get("flight_date"))
-    model = f"{_safe_part(flight.get('model_name'), 'model')}__model_{flight['model_id']}"
+def _aircraft_base_rel(flight: dict) -> str:
     aircraft = f"{_safe_part(flight.get('aircraft_name'), 'aircraft')}__aircraft_{flight['aircraft_id']}"
-    flight_name = _safe_part(flight.get("name") or flight.get("flight_name") or flight.get("session_key"), "flight")
-    flight_id = flight.get("flight_id") or flight["id"]
-    flight_dir = f"{date}_{flight_name}__flight_{flight_id}"
-    return _rel_to_posix(PurePosixPath(model, aircraft, flight_dir))
+    return _rel_to_posix(PurePosixPath(aircraft))
 
 
 def _raw_file_rel_path(flight: dict, original_name: str, original_rel_path: str) -> str:
@@ -96,7 +91,7 @@ def _raw_file_rel_path(flight: dict, original_name: str, original_rel_path: str)
     if not parts:
         parts = [_safe_part(original_name, "raw_file")]
     parts[-1] = _prefix_filename(parts[-1], date)
-    return _rel_to_posix(PurePosixPath(_flight_base_rel(flight), *parts))
+    return _rel_to_posix(PurePosixPath(_aircraft_base_rel(flight), *parts))
 
 
 def _abs_raw_path(storage_rel_path: str) -> str:
@@ -105,6 +100,20 @@ def _abs_raw_path(storage_rel_path: str) -> str:
     if os.path.commonpath([root, abs_path]) != root:
         raise ValueError("raw file path escapes raw storage root")
     return abs_path
+
+
+def _cleanup_empty_raw_dirs(start_dir: str) -> None:
+    """Remove empty raw-storage directories left behind after path refreshes."""
+    root = os.path.abspath(RAW_ROOT)
+    current = os.path.abspath(start_dir)
+    if os.path.commonpath([root, current]) != root:
+        return
+    while current != root:
+        try:
+            os.rmdir(current)
+        except OSError:
+            break
+        current = os.path.dirname(current)
 
 
 def _unique_storage_rel_path(conn, desired_rel: str, flight_id: int, raw_file_id: int | None = None) -> str:
@@ -270,7 +279,7 @@ def get_raw_directory_for_flight(conn, flight_id: int) -> dict:
     return {
         "flight_id": flight_id,
         "file_count": len(get_raw_files_for_flight(conn, flight_id)),
-        "path": _abs_raw_path(_flight_base_rel(flight)),
+        "path": _abs_raw_path(_aircraft_base_rel(flight)),
         "warnings": refresh_raw_storage_paths(conn, flight_id=flight_id),
     }
 
@@ -282,7 +291,7 @@ def refresh_raw_storage_paths(
     aircraft_id: int | None = None,
     flight_id: int | None = None,
 ) -> list[dict]:
-    """Move raw files to paths implied by current model/aircraft/flight names."""
+    """Move raw files to paths implied by the current aircraft name."""
     where = []
     params = []
     if model_id is not None:
@@ -317,7 +326,9 @@ def refresh_raw_storage_paths(
                 if actual_sha != row["sha256"] or actual_size != int(row["size_bytes"]):
                     desired = _unique_storage_rel_path(conn, desired, int(row["flight_id"]), int(row["id"]))
                     dst = _abs_raw_path(desired)
+            old_parent = os.path.dirname(src)
             shutil.move(src, dst)
+            _cleanup_empty_raw_dirs(old_parent)
             conn.execute(
                 "UPDATE flight_raw_files SET storage_rel_path=? WHERE id=?",
                 (desired, row["id"]),

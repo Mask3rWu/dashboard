@@ -46,7 +46,7 @@ function syncStateClass(state?: string | null) {
 
 function emptyRecord(): FlightRecordFields {
   return {
-    record_daily_duration_min: null,
+    record_total_duration_min: null,
     record_location: '',
     record_payload: '',
     record_weather: '',
@@ -54,13 +54,15 @@ function emptyRecord(): FlightRecordFields {
     record_takeoff_weight: null,
     record_altitude: null,
     record_wind_speed: null,
+    record_wind_direction: '',
+    record_temperature: null,
     record_note: '',
   };
 }
 
 function recordFromFlight(f: Flight): FlightRecordFields {
   return {
-    record_daily_duration_min: f.record_daily_duration_min ?? null,
+    record_total_duration_min: f.record_total_duration_min ?? null,
     record_location: f.record_location ?? '',
     record_payload: f.record_payload ?? '',
     record_weather: f.record_weather ?? '',
@@ -68,6 +70,8 @@ function recordFromFlight(f: Flight): FlightRecordFields {
     record_takeoff_weight: f.record_takeoff_weight ?? null,
     record_altitude: f.record_altitude ?? null,
     record_wind_speed: f.record_wind_speed ?? null,
+    record_wind_direction: f.record_wind_direction ?? '',
+    record_temperature: f.record_temperature ?? null,
     record_note: f.record_note ?? '',
   };
 }
@@ -96,7 +100,7 @@ function recordSummary(f: Flight) {
   const parts = [
     f.record_location ? `地点 ${f.record_location}` : '',
     f.record_weather ? `天气 ${f.record_weather}` : '',
-    f.record_daily_duration_min != null ? `记录 ${formatDurationMinutes(f.record_daily_duration_min)}` : '',
+    f.record_total_duration_min != null ? `总时长 ${formatDurationMinutes(f.record_total_duration_min)}` : '',
     f.record_payload ? `载荷 ${formatKgValue(f.record_payload)}` : '',
     f.record_takeoff_weight != null ? `起飞 ${f.record_takeoff_weight}kg` : '',
   ].filter(Boolean);
@@ -157,7 +161,7 @@ function DurationField({
 
   return (
     <label className="space-y-1">
-      <span className="block text-[10px] text-gray-500">当日飞行时长</span>
+      <span className="block text-[10px] text-gray-500">总时长</span>
       <div className="flex items-center gap-1">
         <input
           type="number"
@@ -975,8 +979,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                         {f.duration_sec != null && (
                                           <span className="text-xs text-gray-400">解析 {Math.round(f.duration_sec / 60)}分钟</span>
                                         )}
-                                        {f.record_daily_duration_min != null && (
-                                          <span className="text-xs text-gray-500">记录 {formatDurationMinutes(f.record_daily_duration_min)}</span>
+                                        {f.record_total_duration_min != null && (
+                                          <span className="text-xs text-gray-500">总时长 {formatDurationMinutes(f.record_total_duration_min)}</span>
                                         )}
                                         <span className="text-xs text-gray-400">
                                           原始文件 {f.raw_file_count ?? 0}
@@ -1038,8 +1042,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                     </div>
                                     {editingRecordFlightId === f.id && (
                                       <div className="mt-3 rounded border border-blue-100 bg-blue-50/40 p-3 space-y-3">
-                                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                                          <DurationField value={recordForm.record_daily_duration_min} onChange={(v) => updateRecordForm({ record_daily_duration_min: v })} />
+                                        <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+                                          <DurationField value={recordForm.record_total_duration_min} onChange={(v) => updateRecordForm({ record_total_duration_min: v })} />
                                           <RecordField label="地点" value={recordForm.record_location} onChange={(v) => updateRecordForm({ record_location: v })} />
                                           <RecordField label="天气" value={recordForm.record_weather} onChange={(v) => updateRecordForm({ record_weather: v })} />
                                           <RecordField label="设备载荷（kg）" type="number" value={recordForm.record_payload} onChange={(v) => updateRecordForm({ record_payload: v })} />
@@ -1047,6 +1051,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                           <RecordField label="起飞重量（kg）" type="number" value={recordForm.record_takeoff_weight} onChange={(v) => updateRecordForm({ record_takeoff_weight: parseNumberInput(v) })} />
                                           <RecordField label="海拔高度（m）" type="number" value={recordForm.record_altitude} onChange={(v) => updateRecordForm({ record_altitude: parseNumberInput(v) })} />
                                           <RecordField label="风速（m/s）" type="number" value={recordForm.record_wind_speed} onChange={(v) => updateRecordForm({ record_wind_speed: parseNumberInput(v) })} />
+                                          <RecordField label="风向" value={recordForm.record_wind_direction} onChange={(v) => updateRecordForm({ record_wind_direction: v })} />
+                                          <RecordField label="温度（°C）" type="number" value={recordForm.record_temperature} onChange={(v) => updateRecordForm({ record_temperature: parseNumberInput(v) })} />
                                         </div>
                                         <RecordTextarea label="备注" value={recordForm.record_note} onChange={(v) => updateRecordForm({ record_note: v })} />
                                         <div className="flex items-center gap-2 justify-end">

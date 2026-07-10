@@ -4,8 +4,7 @@ from __future__ import annotations
 
 
 RECORD_COLUMNS = (
-    "record_daily_duration_min",
-    "record_batch_name",
+    "record_total_duration_min",
     "record_location",
     "record_payload",
     "record_weather",
@@ -13,6 +12,8 @@ RECORD_COLUMNS = (
     "record_takeoff_weight",
     "record_altitude",
     "record_wind_speed",
+    "record_wind_direction",
+    "record_temperature",
     "record_note",
 )
 
@@ -85,7 +86,6 @@ def list_flights(conn, filters: dict | None = None) -> list[dict]:
         where.append("f.flight_date <= ?")
         params.append(filters["date_to"])
     for column, key in (
-        ("f.record_batch_name", "batch_name"),
         ("f.record_location", "location"),
         ("f.record_weather", "weather"),
         ("f.record_payload", "payload"),
@@ -176,11 +176,11 @@ def export_tree_rows(conn):
     return conn.execute(
         """SELECT f.id as flight_id, f.name as flight_name, f.session_key,
                   f.flight_date, f.start_time, f.duration_sec,
-                  f.record_batch_name, f.record_location, f.record_weather,
+                  f.record_location, f.record_weather,
                   a.id as aircraft_id, a.name as aircraft_name,
                   am.id as model_id, am.name as model_name
            FROM flights f
            JOIN aircraft a ON a.id = f.aircraft_id
            JOIN aircraft_models am ON am.id = a.model_id
-           ORDER BY am.name, a.name, COALESCE(f.record_batch_name, ''), f.flight_date, f.session_key, f.id"""
+           ORDER BY am.name, a.name, f.flight_date, f.session_key, f.id"""
     ).fetchall()

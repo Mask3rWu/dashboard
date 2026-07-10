@@ -151,8 +151,7 @@ function DirStructureBanner({ sourcePath, scanResult }: { sourcePath: string; sc
 
 function emptyRecord(): FlightRecordFields {
   return {
-    record_daily_duration_min: null,
-    record_batch_name: '',
+    record_total_duration_min: null,
     record_location: '',
     record_payload: '',
     record_weather: '',
@@ -160,6 +159,8 @@ function emptyRecord(): FlightRecordFields {
     record_takeoff_weight: null,
     record_altitude: null,
     record_wind_speed: null,
+    record_wind_direction: '',
+    record_temperature: null,
     record_note: '',
   };
 }
@@ -218,7 +219,7 @@ function DurationInput({
 
   return (
     <label className="space-y-1">
-      <span className="block text-[11px] text-gray-500">单日飞行时长</span>
+      <span className="block text-[11px] text-gray-500">总时长</span>
       <div className="flex items-center gap-1">
         <input
           type="number"
@@ -378,14 +379,14 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
   };
 
   // When a scan finds no matching model, seed the new-model form: default name
-  // from the scan, and pre-select every non-raw discovered type. is_raw types
-  // (raw byte dumps like HandlePacket/AllReceivedData/SendCommand) default to
-  // deselected but remain available for the user to opt in.
+  // from the scan, and pre-select every non-raw, non-alert discovered type.
+  // Raw byte dumps and alerts default to deselected but remain available for
+  // the user to opt in.
   useEffect(() => {
     if (scanResult && !scanResult.model && scanResult.discovered_types) {
       setNewModelName(scanResult.suggested_name ?? '');
       setNewModelTypes(
-        new Set(scanResult.discovered_types.filter((t) => !t.is_raw).map((t) => t.data_type_key)),
+        new Set(scanResult.discovered_types.filter((t) => !t.is_raw && !t.is_alert).map((t) => t.data_type_key)),
       );
     }
   }, [scanResult]);
@@ -639,9 +640,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
   };
 
   const visibleExportFlightIds = exportTree.flatMap((model) =>
-    model.aircraft.flatMap((aircraft) =>
-      aircraft.batches.flatMap((batch) => batch.flights.map((flight) => flight.id)),
-    ),
+    model.aircraft.flatMap((aircraft) => aircraft.flights.map((flight) => flight.id)),
   );
 
   const loadExportTree = useCallback(async (q = exportFilter) => {
@@ -1137,9 +1136,8 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                         {renderBadges(session.data_types)}
                         {!isImported && (
                           <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                              <DurationInput value={record.record_daily_duration_min} onChange={(v) => updateSessionRecord(key, { record_daily_duration_min: v })} />
-                              <RecordInput label="批次" value={record.record_batch_name} onChange={(v) => updateSessionRecord(key, { record_batch_name: v })} />
+                            <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+                              <DurationInput value={record.record_total_duration_min} onChange={(v) => updateSessionRecord(key, { record_total_duration_min: v })} />
                               <RecordInput label="地点" value={record.record_location} onChange={(v) => updateSessionRecord(key, { record_location: v })} />
                               <RecordInput label="天气" value={record.record_weather} onChange={(v) => updateSessionRecord(key, { record_weather: v })} />
                               <RecordInput label="设备载荷（kg）" type="number" value={record.record_payload} onChange={(v) => updateSessionRecord(key, { record_payload: v })} />
@@ -1147,6 +1145,8 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                               <RecordInput label="起飞重量（kg）" type="number" value={record.record_takeoff_weight} onChange={(v) => updateSessionRecord(key, { record_takeoff_weight: parseNumberInput(v) })} />
                               <RecordInput label="海拔高度（m）" type="number" value={record.record_altitude} onChange={(v) => updateSessionRecord(key, { record_altitude: parseNumberInput(v) })} />
                               <RecordInput label="风速（m/s）" type="number" value={record.record_wind_speed} onChange={(v) => updateSessionRecord(key, { record_wind_speed: parseNumberInput(v) })} />
+                              <RecordInput label="风向" value={record.record_wind_direction} onChange={(v) => updateSessionRecord(key, { record_wind_direction: v })} />
+                              <RecordInput label="温度（°C）" type="number" value={record.record_temperature} onChange={(v) => updateSessionRecord(key, { record_temperature: parseNumberInput(v) })} />
                             </div>
                             <RecordTextarea label="备注" value={record.record_note} onChange={(v) => updateSessionRecord(key, { record_note: v })} />
                           </div>
@@ -1322,10 +1322,8 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                     {model.aircraft.map((aircraft) => (
                       <div key={aircraft.id} className="ml-3 border-l border-gray-200 pl-3 space-y-2">
                         <div className="text-xs font-medium text-blue-700">{aircraft.name}</div>
-                        {aircraft.batches.map((batch) => (
-                          <div key={batch.name} className="ml-3 space-y-1">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
-                              {batch.flights.map((flight) => (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+                              {aircraft.flights.map((flight) => (
                                 <label
                                   key={flight.id}
                                   className="flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-xs hover:bg-gray-50 cursor-pointer"
@@ -1341,9 +1339,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                                   {flight.record_location && <span className="text-gray-400">{flight.record_location}</span>}
                                 </label>
                               ))}
-                            </div>
-                          </div>
-                        ))}
+                        </div>
                       </div>
                     ))}
                   </div>

@@ -12,18 +12,19 @@ from backend.format_configs import get_data_type_key
 ENCODINGS = ['gbk', 'gb2312', 'utf-8', 'latin-1']
 
 RECORD_TEXT_FIELDS = {
-    "record_batch_name",
     "record_location",
     "record_payload",
     "record_weather",
+    "record_wind_direction",
     "record_note",
 }
 RECORD_NUMERIC_FIELDS = {
-    "record_daily_duration_min",
+    "record_total_duration_min",
     "record_fuel_amount",
     "record_takeoff_weight",
     "record_altitude",
     "record_wind_speed",
+    "record_temperature",
 }
 RECORD_FIELDS = RECORD_TEXT_FIELDS | RECORD_NUMERIC_FIELDS
 
@@ -35,14 +36,14 @@ def _record_xml_key(value):
 RECORD_XML_ALIASES = {
     _record_xml_key(alias): column
     for column, aliases in {
-        "record_daily_duration_min": [
+        "record_total_duration_min": [
+            "record_total_duration_min", "recordTotalDurationMin",
+            "total_duration_min", "totalDurationMin",
+            "总时长",
+            # Backward-compatible import aliases for existing record XML.
             "record_daily_duration_min", "recordDailyDurationMin",
             "daily_duration_min", "dailyDurationMin", "duration_min",
             "flight_duration_min", "单日飞行时长", "飞行时长",
-        ],
-        "record_batch_name": [
-            "record_batch_name", "recordBatchName", "batch_name",
-            "batchName", "batch", "批次",
         ],
         "record_location": [
             "record_location", "recordLocation", "location", "地点",
@@ -66,6 +67,12 @@ RECORD_XML_ALIASES = {
         ],
         "record_wind_speed": [
             "record_wind_speed", "recordWindSpeed", "wind_speed", "windSpeed", "风速",
+        ],
+        "record_wind_direction": [
+            "record_wind_direction", "recordWindDirection", "wind_direction", "windDirection", "风向",
+        ],
+        "record_temperature": [
+            "record_temperature", "recordTemperature", "temperature", "温度",
         ],
         "record_note": [
             "record_note", "recordNote", "note", "remark", "remarks", "备注",

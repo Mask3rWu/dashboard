@@ -134,8 +134,7 @@ class ImportSessionRequest(BaseModel):
     aircraft_id: int       # required — aircraft.id
     session_key: str = ''  # empty = import all sessions for this aircraft
     flight_date: str | None = None
-    record_daily_duration_min: float | None = None
-    record_batch_name: str | None = ''
+    record_total_duration_min: float | None = None
     record_location: str | None = ''
     record_payload: str | None = ''
     record_weather: str | None = ''
@@ -143,6 +142,8 @@ class ImportSessionRequest(BaseModel):
     record_takeoff_weight: float | None = None
     record_altitude: float | None = None
     record_wind_speed: float | None = None
+    record_wind_direction: str | None = ''
+    record_temperature: float | None = None
     record_note: str | None = ''
 
 
@@ -151,8 +152,7 @@ class UpdateFlightRequest(BaseModel):
 
 
 class FlightRecordRequest(BaseModel):
-    record_daily_duration_min: float | None = None
-    record_batch_name: str | None = None
+    record_total_duration_min: float | None = None
     record_location: str | None = None
     record_payload: str | None = None
     record_weather: str | None = None
@@ -160,6 +160,8 @@ class FlightRecordRequest(BaseModel):
     record_takeoff_weight: float | None = None
     record_altitude: float | None = None
     record_wind_speed: float | None = None
+    record_wind_direction: str | None = None
+    record_temperature: float | None = None
     record_note: str | None = None
 
 
@@ -229,18 +231,19 @@ class CompareRequest(BaseModel):
 
 
 RECORD_TEXT_FIELDS = {
-    "record_batch_name",
     "record_location",
     "record_payload",
     "record_weather",
+    "record_wind_direction",
     "record_note",
 }
 RECORD_NUMERIC_FIELDS = {
-    "record_daily_duration_min",
+    "record_total_duration_min",
     "record_fuel_amount",
     "record_takeoff_weight",
     "record_altitude",
     "record_wind_speed",
+    "record_temperature",
 }
 RECORD_FIELDS = RECORD_TEXT_FIELDS | RECORD_NUMERIC_FIELDS
 
@@ -1332,7 +1335,6 @@ def list_flights(
     aircraft_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    batch_name: str | None = None,
     location: str | None = None,
     weather: str | None = None,
     payload: str | None = None,
@@ -1346,7 +1348,6 @@ def list_flights(
             "aircraft_id": aircraft_id,
             "date_from": date_from,
             "date_to": date_to,
-            "batch_name": batch_name,
             "location": location,
             "weather": weather,
             "payload": payload,
@@ -1494,7 +1495,7 @@ def open_flight_raw_folder(flight_id: int):
 
 @app.get("/api/sync/export-tree")
 def get_sync_export_tree(q: str | None = None):
-    """Return model -> aircraft -> batch -> flight selection tree."""
+    """Return model -> aircraft -> flight selection tree."""
     keyword = (q or "").strip().lower()
     conn = get_db()
     try:
@@ -1504,7 +1505,7 @@ def get_sync_export_tree(q: str | None = None):
             haystack = " ".join(
                 str(item.get(k) or "")
                 for k in (
-                    "model_name", "aircraft_name", "record_batch_name",
+                    "model_name", "aircraft_name",
                     "flight_name", "session_key", "flight_date",
                     "record_location", "record_weather",
                 )
@@ -1518,14 +1519,9 @@ def get_sync_export_tree(q: str | None = None):
             )
             aircraft = model["aircraft"].setdefault(
                 item["aircraft_id"],
-                {"id": item["aircraft_id"], "name": item["aircraft_name"], "batches": {}},
+                {"id": item["aircraft_id"], "name": item["aircraft_name"], "flights": []},
             )
-            batch_name = item["record_batch_name"] or "未填写批次"
-            batch = aircraft["batches"].setdefault(
-                batch_name,
-                {"name": batch_name, "flights": []},
-            )
-            batch["flights"].append(
+            aircraft["flights"].append(
                 {
                     "id": item["flight_id"],
                     "name": item["flight_name"],
@@ -1546,15 +1542,14 @@ def get_sync_export_tree(q: str | None = None):
                     {
                         "id": aircraft["id"],
                         "name": aircraft["name"],
-                        "batches": list(aircraft["batches"].values()),
+                        "flights": aircraft["flights"],
                     }
                 )
             tree.append({"id": model["id"], "name": model["name"], "aircraft": aircraft_list})
         flight_count = sum(
-            len(batch["flights"])
+            len(aircraft["flights"])
             for model in tree
             for aircraft in model["aircraft"]
-            for batch in aircraft["batches"]
         )
         return {"tree": tree, "flight_count": flight_count}
     finally:

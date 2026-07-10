@@ -70,7 +70,7 @@ Flight Analyzer 是用于飞行数据导入、管理与分析的软件。当前�
 <?xml version="1.0" encoding="UTF-8"?>
 <FlightRecord>
   <BatchName>第一批</BatchName>
-  <DailyDurationMin>75</DailyDurationMin>
+  <TotalDurationMin>75</TotalDurationMin>
   <Location>试飞场A区</Location>
   <Weather>晴</Weather>
   <Payload>2.5</Payload>
@@ -84,8 +84,7 @@ Flight Analyzer 是用于飞行数据导入、管理与分析的软件。当前�
 
 字段对应关系：
 
-- `BatchName` / `record_batch_name`：批次。
-- `DailyDurationMin` / `record_daily_duration_min`：单日飞行时长，单位分钟。
+- `TotalDurationMin` / `record_total_duration_min`：总时长，单位分钟。
 - `Location` / `record_location`：地点。
 - `Weather` / `record_weather`：天气。
 - `Payload` / `record_payload`：设备载荷，按表单单位填写。

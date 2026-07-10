@@ -151,7 +151,6 @@ export interface SyncQueueItem {
   total_rows?: number | null;
   import_time?: string | null;
   updated_at?: string | null;
-  record_batch_name?: string | null;
   record_location?: string | null;
   record_weather?: string | null;
   record_payload?: string | null;
@@ -230,6 +229,8 @@ export interface FlightRecordFields {
   record_takeoff_weight?: number | null;
   record_altitude?: number | null;
   record_wind_speed?: number | null;
+  record_wind_direction?: string;
+  record_temperature?: number | null;
   record_note?: string;
 }
 
@@ -304,15 +305,10 @@ export interface SyncExportFlightNode {
   record_weather?: string;
 }
 
-export interface SyncExportBatchNode {
-  name: string;
-  flights: SyncExportFlightNode[];
-}
-
 export interface SyncExportAircraftNode {
   id: number;
   name: string;
-  batches: SyncExportBatchNode[];
+  flights: SyncExportFlightNode[];
 }
 
 export interface SyncExportModelNode {
@@ -669,7 +665,6 @@ export interface FlightListFilters {
   aircraft_id?: number | null;
   date_from?: string;
   date_to?: string;
-  batch_name?: string;
   location?: string;
   weather?: string;
   payload?: string;
@@ -711,6 +706,10 @@ export const importSyncPackage = (payload: SyncImportRequest) =>
     body: JSON.stringify(payload),
   });
 export const getSyncQueue = () => request<SyncQueueResponse>('/sync/queue');
+export const getSyncProgress = (operationId: string) =>
+  request<SyncProgress>(`/sync/progress/${encodeURIComponent(operationId)}`);
+export const previewSync = (payload: { mode: 'run' | 'push' | 'pull'; flight_ids?: number[] | null; since?: string | null }) =>
+  request<SyncPreviewResult>('/sync/preview', { method: 'POST', body: JSON.stringify(payload) });
 export const runSync = (payload: SyncOperationRequest = {}) =>
   request<SyncOperationResult>('/sync/run', { method: 'POST', body: JSON.stringify(payload) });
 export const pushSync = (payload: SyncOperationRequest = {}) =>

@@ -29,7 +29,7 @@ DATA_DIR = os.path.abspath(os.path.expanduser(os.environ.get('DATA_DIR') or _def
 DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").strip().lower() or "sqlite"
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
 # Current medium-term schema starts from v2 and rebuilds incompatible old DBs.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 4
 CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',
@@ -52,10 +52,11 @@ REQUIRED_COLUMNS = {
     'flights': {
         'id', 'aircraft_id', 'name', 'source_path', 'session_key',
         'flight_date', 'start_time', 'end_time', 'duration_sec',
-        'total_rows', 'import_time', 'record_daily_duration_min',
-        'record_batch_name', 'record_location', 'record_payload',
+        'total_rows', 'import_time', 'record_total_duration_min',
+        'record_location', 'record_payload',
         'record_weather', 'record_fuel_amount', 'record_takeoff_weight',
-        'record_altitude', 'record_wind_speed', 'record_note',
+        'record_altitude', 'record_wind_speed', 'record_wind_direction',
+        'record_temperature', 'record_note',
         'raw_import_warnings',
     } | SYNC_COLUMNS,
     'data_table_registry': {
@@ -328,8 +329,7 @@ CREATE TABLE IF NOT EXISTS flights (
     duration_sec    REAL,
     total_rows      INTEGER DEFAULT 0,
     import_time     TEXT DEFAULT (datetime('now','localtime')),
-    record_daily_duration_min REAL,
-    record_batch_name TEXT DEFAULT '',
+    record_total_duration_min REAL,
     record_location TEXT DEFAULT '',
     record_payload TEXT DEFAULT '',
     record_weather TEXT DEFAULT '',
@@ -337,6 +337,8 @@ CREATE TABLE IF NOT EXISTS flights (
     record_takeoff_weight REAL,
     record_altitude REAL,
     record_wind_speed REAL,
+    record_wind_direction TEXT DEFAULT '',
+    record_temperature REAL,
     record_note TEXT DEFAULT '',
     raw_import_warnings TEXT DEFAULT '',
     updated_at      TEXT DEFAULT (datetime('now','localtime')),
