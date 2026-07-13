@@ -253,7 +253,8 @@ def resolve_model_for_scan(conn, source_path):
             model_id, model_name, is_new,
             match_confidence (None for new), config (generated config dict),
             matching_models (list of {id, name, score}),
-            suggested_name, discovered_types (new only)
+            suggested_name, discovered_types (also provided for a manual
+            new-model override when an existing model is recommended)
     """
     from backend.format_configs import (
         generate_config_from_scan, load_all_model_configs_with_ids,
@@ -284,6 +285,22 @@ def resolve_model_for_scan(conn, source_path):
 
     all_scores.sort(key=lambda x: x['score'], reverse=True)
 
+    # Keep the generated format metadata even when an existing model is the
+    # recommended match. The UI needs it when the user explicitly decides that
+    # a high-similarity folder is nevertheless a new aircraft model.
+    folder_name = os.path.basename(source_path.rstrip('/\\'))
+    discovered = [
+        {
+            'data_type_key': key,
+            'display_label': tdef.get('display_label', key),
+            'is_alert': bool(tdef.get('is_alert', False)),
+            'is_raw': bool(tdef.get('is_raw', False)),
+            'column_count': len(tdef.get('columns', [])),
+        }
+        for key, tdef in generated['data_types'].items()
+    ]
+    suggested_name = f"机型-{folder_name}"
+
     # Step 4a — match found: resolve to the existing model (no write)
     if best_model and best_score >= MATCH_THRESHOLD:
         model_id, model_name = best_model
@@ -297,23 +314,13 @@ def resolve_model_for_scan(conn, source_path):
             'match_confidence': round(best_score, 3),
             'config': stored_config,
             'matching_models': all_scores[:5],
+            'suggested_name': suggested_name,
+            'discovered_types': discovered,
         }
 
     # Step 4b — no match: report as a new-format candidate (no write).
     # Surface the discovered types so the UI can let the user pick which to
     # keep; is_raw=True types default to deselected.
-    folder_name = os.path.basename(source_path.rstrip('/\\'))
-    discovered = [
-        {
-            'data_type_key': key,
-            'display_label': tdef.get('display_label', key),
-            'is_alert': bool(tdef.get('is_alert', False)),
-            'is_raw': bool(tdef.get('is_raw', False)),
-            'column_count': len(tdef.get('columns', [])),
-        }
-        for key, tdef in generated['data_types'].items()
-    ]
-
     return {
         'model_id': None,
         'model_name': None,
@@ -321,7 +328,7 @@ def resolve_model_for_scan(conn, source_path):
         'match_confidence': None,
         'config': generated,
         'matching_models': all_scores[:5],
-        'suggested_name': f"机型-{folder_name}",
+        'suggested_name': suggested_name,
         'discovered_types': discovered,
     }
 
@@ -627,7 +634,7 @@ def scan_folder_sessions(source_path, conn=None):
             conn.close()
         return result
 
-    # Step 1 — resolve model: auto-generate config, compare, auto-create if no match
+    # Step 1 — resolve model: auto-generate a config and compare it to saved models.
     model_info = resolve_model_for_scan(conn, source_path)
 
     if model_info is None:
@@ -694,6 +701,8 @@ def scan_folder_sessions(source_path, conn=None):
         'suggested_model_id': model_info['model_id'],
         'suggested_model_name': model_info['model_name'],
         'matching_models': model_info.get('matching_models', []),
+        'suggested_name': model_info.get('suggested_name'),
+        'discovered_types': model_info.get('discovered_types', []),
         'sessions': scan_result.get('sessions', []),
         'error': scan_result.get('error'),
     }

@@ -327,10 +327,11 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
   const [showCreateAircraft, setShowCreateAircraft] = useState<Record<string, boolean>>({});
   const [newAircraftSerial, setNewAircraftSerial] = useState('');
 
-  // New-format model creation (when no existing model matches the folder)
+  // New-format model creation, including a manual override of a recommended match.
   const [newModelName, setNewModelName] = useState('');
   const [newModelTypes, setNewModelTypes] = useState<Set<string>>(new Set());
   const [creatingModel, setCreatingModel] = useState(false);
+  const [showNewModelForm, setShowNewModelForm] = useState(false);
 
   function sessionKey(serial: string, skey: string) { return `${serial}__${skey}`; }
 
@@ -378,16 +379,19 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
     } catch {}
   };
 
-  // When a scan finds no matching model, seed the new-model form: default name
-  // from the scan, and pre-select every non-raw, non-alert discovered type.
+  // Seed the new-model form from the scan, and pre-select every non-raw,
+  // non-alert discovered type.
   // Raw byte dumps and alerts default to deselected but remain available for
   // the user to opt in.
   useEffect(() => {
-    if (scanResult && !scanResult.model && scanResult.discovered_types) {
+    if (scanResult?.discovered_types) {
       setNewModelName(scanResult.suggested_name ?? '');
       setNewModelTypes(
         new Set(scanResult.discovered_types.filter((t) => !t.is_raw && !t.is_alert).map((t) => t.data_type_key)),
       );
+      setShowNewModelForm(!scanResult.model);
+    } else {
+      setShowNewModelForm(false);
     }
   }, [scanResult]);
 
@@ -412,11 +416,6 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
     await loadContext();
     try {
       const data = await scanFolder(scanPath);
-      // Reload model list first if a new model was auto-created,
-      // so the model is available before the dropdown renders
-      if (data.model?.is_new) {
-        await loadContext();
-      }
       setScanResult(data);
       if (data.model) {
         setSelectedModelId(data.model.id);
@@ -533,18 +532,13 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
 
   // ─── Create model / aircraft ──────────────────────────────
 
-  // Manual override: create a fresh model even when auto-match exists
-  const handleCreateModelFromScan = async () => {
-    if (!path.trim()) return;
-    const modelName = `新机型-${Date.now().toString(36)}`;
-    try {
-      const result = await createModelFromScan(modelName, path.trim());
-      setSelectedModelId(result.id);
-      await loadContext();
-      await loadAircraftForModel(result.id);
-    } catch (e: any) {
-      alert('创建机型失败: ' + e.message);
-    }
+  const openNewModelForm = () => {
+    if (!scanResult?.discovered_types) return;
+    setNewModelName(scanResult.suggested_name ?? '');
+    setNewModelTypes(
+      new Set(scanResult.discovered_types.filter((t) => !t.is_raw && !t.is_alert).map((t) => t.data_type_key)),
+    );
+    setShowNewModelForm(true);
   };
 
   // New-format flow: create a model from the scan with the user's chosen name
@@ -562,6 +556,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
       await loadContext();
       await loadAircraftForModel(result.id);
       await refreshScan();
+      setShowNewModelForm(false);
     } catch (e: any) {
       alert('创建机型失败: ' + e.message);
     } finally {
@@ -902,7 +897,7 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                   return null;
                 })()}
                 <button
-                  onClick={handleCreateModelFromScan}
+                  onClick={openNewModelForm}
                   className="px-2 py-1 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded border border-dashed border-blue-300 hover:border-blue-400"
                 >
                   + 新建机型
@@ -924,13 +919,14 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
             </div>
           )}
 
-          {/* New format: no model matched → prompt the user to create one,
-              choosing which discovered data types to keep. */}
-          {!scanResult.model && scanResult.discovered_types && (
+          {/* New format, or a manual override of the recommended model. */}
+          {showNewModelForm && scanResult.discovered_types && (
             <div className="mb-4 p-4 bg-amber-50 rounded-lg border border-amber-200 space-y-3">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-amber-800">发现新格式</span>
-                <span className="text-xs text-amber-600">未匹配到已有机型，创建新机型后即可导入</span>
+                <span className="text-sm font-medium text-amber-800">{scanResult.model ? '新建机型' : '发现新格式'}</span>
+                <span className="text-xs text-amber-600">
+                  {scanResult.model ? '不使用当前推荐机型，按扫描结果创建新机型' : '未匹配到已有机型，创建新机型后即可导入'}
+                </span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-xs text-gray-500">机型名称</span>
@@ -991,6 +987,15 @@ export default function ImportPage({ onImported, canDeleteFlights, isLoggedIn, s
                 >
                   {creatingModel ? '创建中…' : '创建机型并继续'}
                 </button>
+                {scanResult.model && (
+                  <button
+                    onClick={() => setShowNewModelForm(false)}
+                    disabled={creatingModel}
+                    className="px-3 py-1.5 text-sm bg-white text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    取消
+                  </button>
+                )}
                 {newModelTypes.size === 0 && (
                   <span className="text-xs text-red-500">至少选择一个数据类型</span>
                 )}
