@@ -13,13 +13,6 @@ from . import permission_repository
 from .database import DATA_DIR
 
 
-def _env_bool(name: str) -> bool | None:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _normalize_base_url(value: str | None) -> str:
     text = (value or "").strip()
     return text.rstrip("/")
@@ -45,16 +38,6 @@ def get_server_base_url(conn) -> str:
     return _normalize_base_url(permission_repository.get_setting(conn, "server_base_url"))
 
 
-def get_sync_enabled(conn) -> bool:
-    env_value = _env_bool("SYNC_ENABLED")
-    if env_value is not None:
-        return env_value
-    value = permission_repository.get_setting(conn, "sync_enabled")
-    if value is None:
-        return True
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def update_runtime_config(conn, updates: dict) -> None:
     if "data_dir" in updates and updates["data_dir"] is not None:
         requested = os.path.abspath(os.path.expanduser(str(updates["data_dir"])))
@@ -65,14 +48,8 @@ def update_runtime_config(conn, updates: dict) -> None:
         permission_repository.set_setting(
             conn, "server_base_url", _normalize_base_url(str(updates["server_base_url"]))
         )
-    if "sync_enabled" in updates and updates["sync_enabled"] is not None:
-        permission_repository.set_setting(conn, "sync_enabled", "true" if updates["sync_enabled"] else "false")
-
-
-def _check_server(base_url: str, sync_enabled: bool) -> dict:
+def _check_server(base_url: str) -> dict:
     checked_at = datetime.now().isoformat(timespec="seconds")
-    if not sync_enabled:
-        return {"server_reachable": False, "server_status": "disabled", "last_server_check_at": checked_at}
     if not base_url:
         return {"server_reachable": False, "server_status": "not_configured", "last_server_check_at": checked_at}
 
@@ -124,8 +101,8 @@ def _sync_summary(conn) -> dict:
     }
 
 
-def _server_auth_context(base_url: str, sync_enabled: bool, token: str | None) -> dict:
-    if not sync_enabled or not base_url or not token:
+def _server_auth_context(base_url: str, token: str | None) -> dict:
+    if not base_url or not token:
         return {"server_user": None, "server_capabilities": []}
     try:
         payload = sync_client.auth_me(base_url, token=token, timeout=2)
@@ -140,12 +117,10 @@ def _server_auth_context(base_url: str, sync_enabled: bool, token: str | None) -
 def runtime_context(conn, server_token: str | None = None) -> dict:
     local_node_id = get_local_node_id(conn)
     server_base_url = get_server_base_url(conn)
-    sync_enabled = get_sync_enabled(conn)
-    server = _check_server(server_base_url, sync_enabled)
-    server_auth = _server_auth_context(server_base_url, sync_enabled, server_token)
+    server = _check_server(server_base_url)
+    server_auth = _server_auth_context(server_base_url, server_token)
     return {
         "data_dir": DATA_DIR,
-        "sync_enabled": sync_enabled,
         "server_base_url": server_base_url,
         **server,
         "local_node_id": local_node_id,

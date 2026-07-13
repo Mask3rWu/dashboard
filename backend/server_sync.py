@@ -26,6 +26,7 @@ WINDOWS_RESERVED_NAMES = {
     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 }
+DYNAMIC_INSERT_BATCH_SIZE = 1000
 
 
 def _safe_zip_path(path: str) -> str:
@@ -1242,24 +1243,27 @@ def _insert_dynamic_rows(
         ]
         source_columns = ["source_flight_id", "time_str", "time_sec"] + columns[3:]
         query = f"SELECT {', '.join(_q_sqlite(c) for c in source_columns)} FROM {source_table_q}"
-        for row in parsed.execute(query).fetchall():
-            source_flight_id = _as_int(row["source_flight_id"])
-            server_flight_id = flight_map.get(source_flight_id or -1)
-            if server_flight_id is None:
-                continue
-            values = {"flight_id": server_flight_id}
-            for col in columns[1:]:
-                values[col] = row[col]
-            placeholders = ", ".join(f":{col}" for col in columns)
-            conn.execute(
-                db.text(
-                    f"INSERT INTO {server_table_q} "
-                    f"({', '.join(db.quote_identifier(c) for c in columns)}) "
-                    f"VALUES ({placeholders})"
-                ),
-                values,
-            )
-            inserted += 1
+        placeholders = ", ".join(f":{col}" for col in columns)
+        insert_stmt = db.text(
+            f"INSERT INTO {server_table_q} "
+            f"({', '.join(db.quote_identifier(c) for c in columns)}) "
+            f"VALUES ({placeholders})"
+        )
+        cursor = parsed.execute(query)
+        while rows := cursor.fetchmany(DYNAMIC_INSERT_BATCH_SIZE):
+            batch = []
+            for row in rows:
+                source_flight_id = _as_int(row["source_flight_id"])
+                server_flight_id = flight_map.get(source_flight_id or -1)
+                if server_flight_id is None:
+                    continue
+                values = {"flight_id": server_flight_id}
+                for col in columns[1:]:
+                    values[col] = row[col]
+                batch.append(values)
+            if batch:
+                conn.execute(insert_stmt, batch)
+                inserted += len(batch)
     return inserted
 
 
@@ -1518,7 +1522,12 @@ def list_changes(conn, since: int | str | None = None) -> dict[str, Any]:
     }
 
 
-def _changed_entity_ids(conn, since: int | str | None) -> dict[str, set[int]]:
+def _changed_entity_ids(
+    conn,
+    since: int | str | None,
+    *,
+    exclude_source_node_id: str | None = None,
+) -> dict[str, set[int]]:
     since_cursor = _as_int(since) or 0
     ids = {"models": set(), "aircraft": set(), "flights": set()}
     if since_cursor <= 0:
@@ -1527,17 +1536,28 @@ def _changed_entity_ids(conn, since: int | str | None) -> dict[str, set[int]]:
             ("aircraft", "aircraft"),
             ("flights", "flights"),
         ):
-            rows = conn.execute(db.text(f"SELECT id FROM {table}")).fetchall()
+            if exclude_source_node_id:
+                rows = conn.execute(
+                    db.text(f"SELECT id FROM {table} WHERE source_node_id IS NULL OR source_node_id != :exclude_source_node_id"),
+                    {"exclude_source_node_id": exclude_source_node_id},
+                ).fetchall()
+            else:
+                rows = conn.execute(db.text(f"SELECT id FROM {table}")).fetchall()
             ids[key].update(int(row._mapping["id"]) for row in rows)
         return ids
 
+    source_filter = ""
+    params: dict[str, Any] = {"since": since_cursor}
+    if exclude_source_node_id:
+        source_filter = " AND (changed_by_node_id IS NULL OR changed_by_node_id != :exclude_source_node_id)"
+        params["exclude_source_node_id"] = exclude_source_node_id
     rows = conn.execute(
         db.text(
             """SELECT entity_type, entity_id
                FROM sync_changes
-               WHERE `cursor` > :since"""
+               WHERE `cursor` > :since""" + source_filter
         ),
-        {"since": since_cursor},
+        params,
     ).fetchall()
     for row in rows:
         entity_type = str(row._mapping["entity_type"])
@@ -1781,9 +1801,14 @@ def _select_rows_by_ids_for_model(conn, table: str, model_id: int) -> list[dict[
     return [_row_dict(row) or {} for row in rows]
 
 
-def build_pull_preview(conn, since: int | str | None = None) -> dict[str, Any]:
+def build_pull_preview(
+    conn,
+    since: int | str | None = None,
+    *,
+    exclude_source_node_id: str | None = None,
+) -> dict[str, Any]:
     """Return a lightweight pull preview without creating or downloading a bundle."""
-    ids = _changed_entity_ids(conn, since)
+    ids = _changed_entity_ids(conn, since, exclude_source_node_id=exclude_source_node_id)
     current_cursor = _max_cursor(conn)
     model_rows = _select_rows_by_ids(conn, "aircraft_models", ids["models"])
     aircraft_rows = _select_rows_by_ids(conn, "aircraft", ids["aircraft"])
@@ -1809,9 +1834,14 @@ def build_pull_preview(conn, since: int | str | None = None) -> dict[str, Any]:
     }
 
 
-def build_pull_bundle(conn, since: int | str | None = None) -> dict[str, Any]:
+def build_pull_bundle(
+    conn,
+    since: int | str | None = None,
+    *,
+    exclude_source_node_id: str | None = None,
+) -> dict[str, Any]:
     """Create a pull_bundle zip from server state and return its path."""
-    ids = _changed_entity_ids(conn, since)
+    ids = _changed_entity_ids(conn, since, exclude_source_node_id=exclude_source_node_id)
     current_cursor = _max_cursor(conn)
     package_id = f"pkg-{uuid.uuid4().hex}"
     source_node_id = "server"

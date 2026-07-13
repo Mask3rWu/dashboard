@@ -389,9 +389,15 @@ def pull_preview(
     since: str | int | None = None,
     *,
     token: str | None = None,
+    exclude_source_node_id: str | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    query = "" if since in (None, "") else f"?since={urllib.parse.quote(str(since))}"
+    params = {}
+    if since not in (None, ""):
+        params["since"] = str(since)
+    if exclude_source_node_id:
+        params["exclude_source_node_id"] = exclude_source_node_id
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
     url = f"{normalize_base_url(base_url)}/sync/preview{query}"
     return _request_get_json(url, token=token, timeout=timeout)
 
@@ -402,10 +408,16 @@ def download_bundle(
     destination_path: str,
     *,
     token: str | None = None,
+    exclude_source_node_id: str | None = None,
     timeout: float = 300.0,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    query = "" if since in (None, "") else f"?since={urllib.parse.quote(str(since))}"
+    params = {}
+    if since not in (None, ""):
+        params["since"] = str(since)
+    if exclude_source_node_id:
+        params["exclude_source_node_id"] = exclude_source_node_id
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
     url = f"{normalize_base_url(base_url)}/sync/bundle{query}"
     headers = {
         "Accept": "application/octet-stream",

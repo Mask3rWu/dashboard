@@ -23,7 +23,6 @@ Copy-Item .\flight_analyzer.ini.example .\flight_analyzer.ini
 ```ini
 [local]
 server_base_url = http://127.0.0.1:9000/api
-sync_enabled = true
 ```
 
 ## 2. 在统一服务器上安装 MySQL 并建库
@@ -80,7 +79,6 @@ Invoke-RestMethod http://服务器IP:9000/api/health
 ```ini
 [local]
 server_base_url = http://服务器IP:9000/api
-sync_enabled = true
 ```
 
 然后正常启动本地软件：
@@ -108,7 +106,6 @@ python main.py
 ```ini
 [local]
 server_base_url = http://127.0.0.1:9000/api
-sync_enabled = true
 
 [server]
 host = 127.0.0.1
@@ -145,7 +142,8 @@ $env:SERVER_BASE_URL = "http://10.0.0.12:9000/api"
 1. `FLIGHT_ANALYZER_CONFIG` 指定的路径。
 2. 打包后 exe 所在目录的 `flight_analyzer.ini`。
 3. 当前工作目录的 `flight_analyzer.ini`。
-4. 项目根目录的 `flight_analyzer.ini`。
+4. 打包时嵌入的 `flight_analyzer.ini`。
+5. 项目根目录的 `flight_analyzer.ini`。
 
 ## 7. 打包前内置服务器机型
 

@@ -391,7 +391,6 @@ class AppContextUpdate(BaseModel):
 class RuntimeConfigUpdate(BaseModel):
     data_dir: str | None = None
     server_base_url: str | None = None
-    sync_enabled: bool | None = None
 
 
 class ServerLoginRequest(BaseModel):
@@ -441,6 +440,7 @@ class SyncPullRequest(BaseModel):
     progress_finalize: bool = True
     package_path: str | None = None
     conflict_resolutions: dict[str, str] | None = None
+    exclude_source_node_id: str | None = None
 
 
 class SyncRunRequest(BaseModel):
@@ -551,7 +551,7 @@ def login(req: LoginRequest, request: Request):
         username = req.username.strip()
         server_base_url = runtime_context.get_server_base_url(conn)
         online_error = None
-        if runtime_context.get_sync_enabled(conn) and server_base_url:
+        if server_base_url:
             try:
                 server_auth = sync_client.login(server_base_url, username, req.password, timeout=5)
                 server_user = server_auth.get("user") if isinstance(server_auth.get("user"), dict) else None
@@ -637,7 +637,7 @@ def change_password(req: ChangePasswordRequest, request: Request):
         user = require_capability(conn, request, "change_own_password")
         server_token = _server_header_token(request)
         server_base_url = runtime_context.get_server_base_url(conn)
-        if server_token and runtime_context.get_sync_enabled(conn) and server_base_url:
+        if server_token and server_base_url:
             try:
                 sync_client.change_password(server_base_url, req.old_password, req.new_password, token=server_token, timeout=5)
             except sync_client.SyncClientError as exc:
@@ -653,8 +653,6 @@ def change_password(req: ChangePasswordRequest, request: Request):
 
 
 def _server_users_base_url(conn) -> str:
-    if not runtime_context.get_sync_enabled(conn):
-        raise HTTPException(400, "同步未启用，无法连接中心服务器")
     server_base_url = runtime_context.get_server_base_url(conn)
     if not server_base_url:
         raise HTTPException(400, "未配置中心服务器地址")
@@ -1520,8 +1518,6 @@ def patch_runtime_config(req: RuntimeConfigUpdate, request: Request):
 def server_login(req: ServerLoginRequest):
     conn = get_db()
     try:
-        if not runtime_context.get_sync_enabled(conn):
-            raise HTTPException(400, "SYNC_ENABLED is false")
         server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
         return sync_client.login(server_base_url, req.username.strip(), req.password)
     except sync_client.SyncClientError as e:
@@ -1744,7 +1740,7 @@ def _require_capability_or_server(conn, request: Request, capability: str) -> No
         local_denied = exc
 
     token = _server_header_token(request)
-    if token and runtime_context.get_sync_enabled(conn):
+    if token:
         server_base_url = runtime_context.get_server_base_url(conn)
         if server_base_url:
             try:
@@ -1764,8 +1760,6 @@ def _server_delete(
     entity_type: str,
     server_id: int,
 ) -> dict:
-    if not runtime_context.get_sync_enabled(conn):
-        raise HTTPException(400, "SYNC_ENABLED is false")
     server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
     try:
         return sync_client.delete_entity(
@@ -1923,8 +1917,6 @@ def _sync_preview_upload(conn, req: SyncPreviewRequest, request: Request) -> dic
             "aircraft": [],
             "summary": {"total": 0, "create": 0, "existing": 0, "conflict": 0},
         }
-    if not runtime_context.get_sync_enabled(conn):
-        raise sync_client.SyncClientError("SYNC_ENABLED is false")
     server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
     bundle = export_package(
         conn,
@@ -2005,8 +1997,6 @@ def _sync_preview_upload(conn, req: SyncPreviewRequest, request: Request) -> dic
 
 
 def _sync_preview_pull(conn, req: SyncPreviewRequest, request: Request) -> dict:
-    if not runtime_context.get_sync_enabled(conn):
-        raise sync_client.SyncClientError("SYNC_ENABLED is false")
     server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
     since = req.since
     if since is None:
@@ -2131,8 +2121,6 @@ def post_sync_push(req: SyncPushBatchRequest, request: Request):
             current=0,
             total=selected_total,
         )
-        if not runtime_context.get_sync_enabled(conn):
-            raise sync_client.SyncClientError("SYNC_ENABLED is false")
         server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
         run_id = sync_repository.create_sync_run(conn, "push")
         bundle = export_package(
@@ -2327,6 +2315,7 @@ def post_sync_run(req: SyncRunRequest, request: Request):
     push_result = None
     pull_result = None
     progress_id = req.operation_id
+    local_node_id = None
     _sync_progress_update(
         progress_id,
         phase="准备同步",
@@ -2336,6 +2325,8 @@ def post_sync_run(req: SyncRunRequest, request: Request):
 
     conn = get_db()
     try:
+        local_node_id = runtime_context.get_local_node_id(conn)
+        conn.commit()
         base_count = 0
         if req.flight_ids is None:
             queue_rows = sync_repository.list_upload_queue(conn, sync_repository.UPLOAD_QUEUE_STATES)
@@ -2430,7 +2421,9 @@ def post_sync_run(req: SyncRunRequest, request: Request):
             progress_start=60,
             progress_end=98,
             progress_finalize=False,
-            package_path=req.pull_package_path,
+            # The preview bundle is a snapshot from before the push. Re-query after
+            # upload so this run advances its cursor without re-importing its own data.
+            exclude_source_node_id=local_node_id if push_result and push_result.get("ok") else None,
             conflict_resolutions=req.pull_conflict_resolutions,
         ),
         request,
@@ -2474,8 +2467,6 @@ def get_sync_changes(request: Request, since: str | None = Query(default=None), 
     """Proxy server change summaries through the local backend."""
     conn = get_db()
     try:
-        if not runtime_context.get_sync_enabled(conn):
-            raise sync_client.SyncClientError("SYNC_ENABLED is false")
         server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
         cursor = since
         if cursor is None:
@@ -2503,8 +2494,6 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
             message="正在读取本地拉取游标",
             percent=_progress_percent(progress_start, progress_end, 5),
         )
-        if not runtime_context.get_sync_enabled(conn):
-            raise sync_client.SyncClientError("SYNC_ENABLED is false")
         server_base_url = sync_client.normalize_base_url(runtime_context.get_server_base_url(conn))
         since = req.since
         if since is None:
@@ -2523,6 +2512,7 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
                 server_base_url,
                 since,
                 token=_server_token(req, request),
+                exclude_source_node_id=req.exclude_source_node_id,
             )
             preview = preview_pull_manifest(conn, preview_manifest)
             preview_summary = preview.get("summary") or {}
@@ -2611,6 +2601,7 @@ def post_sync_pull(req: SyncPullRequest, request: Request):
                 since,
                 bundle_path,
                 token=_server_token(req, request),
+                exclude_source_node_id=req.exclude_source_node_id,
                 progress_callback=_byte_progress_callback(
                     progress_id,
                     _progress_percent(progress_start, progress_end, 15),

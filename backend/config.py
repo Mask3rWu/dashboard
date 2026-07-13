@@ -14,6 +14,7 @@ CONFIG_FILENAME = "flight_analyzer.ini"
 
 def _candidate_paths(explicit_path: str | os.PathLike[str] | None = None) -> list[Path]:
     paths: list[Path] = []
+    bundled_path: Path | None = None
     if explicit_path:
         paths.append(Path(explicit_path))
 
@@ -23,8 +24,13 @@ def _candidate_paths(explicit_path: str | os.PathLike[str] | None = None) -> lis
 
     if getattr(sys, "frozen", False):
         paths.append(Path(sys.executable).resolve().parent / CONFIG_FILENAME)
+        bundle_dir = getattr(sys, "_MEIPASS", None)
+        if bundle_dir:
+            bundled_path = Path(bundle_dir) / CONFIG_FILENAME
 
     paths.append(Path.cwd() / CONFIG_FILENAME)
+    if bundled_path:
+        paths.append(bundled_path)
     paths.append(Path(__file__).resolve().parent.parent / CONFIG_FILENAME)
 
     seen: set[Path] = set()
@@ -81,7 +87,6 @@ def load_app_config(path: str | os.PathLike[str] | None = None) -> Path | None:
     if parser.has_section("local"):
         _setenv_if_present("DATA_DIR", parser.get("local", "data_dir", fallback=""))
         _setenv_if_present("SERVER_BASE_URL", parser.get("local", "server_base_url", fallback=""))
-        _setenv_if_present("SYNC_ENABLED", parser.get("local", "sync_enabled", fallback=""))
 
     if parser.has_section("server"):
         _setenv_if_present("SERVER_HOST", parser.get("server", "host", fallback=""))

@@ -96,10 +96,9 @@ export interface AppContext {
 
 export interface RuntimeContext {
   data_dir: string;
-  sync_enabled: boolean;
   server_base_url: string;
   server_reachable: boolean;
-  server_status: 'online' | 'offline' | 'disabled' | 'not_configured' | string;
+  server_status: 'online' | 'offline' | 'not_configured' | string;
   local_node_id: string;
   last_server_check_at: string;
   server_user: CurrentUser | null;
@@ -625,7 +624,7 @@ export const getAppContext = () => request<AppContext>('/app/context');
 export const updateAppContext = (updates: { environment?: 'research' | 'field'; node_id?: string }) =>
   request<AppContext>('/app/context', { method: 'PATCH', body: JSON.stringify(updates) });
 export const getRuntimeContext = () => request<RuntimeContext>('/runtime/context');
-export const updateRuntimeConfig = (updates: { data_dir?: string; server_base_url?: string; sync_enabled?: boolean }) =>
+export const updateRuntimeConfig = (updates: { data_dir?: string; server_base_url?: string }) =>
   request<RuntimeContext>('/runtime/config', { method: 'PATCH', body: JSON.stringify(updates) });
 export const serverLogin = (username: string, password: string) =>
   request<ServerAuthPayload>('/server-auth/login', {

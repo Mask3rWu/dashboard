@@ -191,13 +191,6 @@ def _apply_builtin_model_seeds(conn):
     return apply_builtin_model_seeds(conn)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
-
-
 def _upsert_setting(conn, key: str, value: str) -> None:
     conn.execute(
         """INSERT INTO app_settings (key, value, updated_at)
@@ -226,8 +219,7 @@ def _seed_runtime_settings(conn) -> None:
 
     if os.environ.get('SERVER_BASE_URL') is not None or _get_setting(conn, 'server_base_url') is None:
         _upsert_setting(conn, 'server_base_url', os.environ.get('SERVER_BASE_URL', '').strip())
-    if os.environ.get('SYNC_ENABLED') is not None or _get_setting(conn, 'sync_enabled') is None:
-        _upsert_setting(conn, 'sync_enabled', 'true' if _env_bool('SYNC_ENABLED', True) else 'false')
+    conn.execute("DELETE FROM app_settings WHERE key='sync_enabled'")
 
 
 # ── Schema fragments ──

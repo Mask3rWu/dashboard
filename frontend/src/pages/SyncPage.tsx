@@ -51,7 +51,7 @@ function stringifyDetail(value: unknown) {
 }
 
 function serverReady(runtime: RuntimeContext | null) {
-  return !!runtime?.sync_enabled && !!runtime.server_base_url && !!runtime.server_reachable;
+  return !!runtime?.server_base_url && !!runtime.server_reachable;
 }
 
 function operationMessage(result: SyncOperationResult) {
@@ -269,13 +269,11 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
     .filter((item) => selectedIds.has(item.id) && item.sync_state !== 'conflict')
     .map((item) => item.id);
   const ready = serverReady(runtime);
-  const serverDisabledReason = !runtime?.sync_enabled
-    ? '同步未启用'
-    : !runtime?.server_base_url
-      ? '未配置服务器地址'
-      : !runtime?.server_reachable
-        ? '服务器不可达'
-        : '';
+  const serverUnavailableReason = !runtime?.server_base_url
+    ? '未配置服务器地址'
+    : !runtime?.server_reachable
+      ? '服务器不可达'
+      : '';
 
   const refreshAll = async () => {
     await loadQueue();
@@ -360,7 +358,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
       await execute('run', (operation_id) => runSync({
         operation_id,
         flight_ids: pendingFlightIds,
-        pull_package_path: pullPackagePath,
         pull_conflict_resolutions: pullResolutions,
       }));
     } else if (pendingAction === 'pull') {
@@ -429,7 +426,6 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             </div>
             <div className="mt-2 grid grid-cols-2 xl:grid-cols-4 gap-x-6 gap-y-1 text-xs text-gray-500">
               <div className="truncate">服务器：<span className="text-gray-800">{runtime?.server_base_url || '未配置'}</span></div>
-              <div>同步：<span className="text-gray-800">{runtime?.sync_enabled ? '启用' : '关闭'}</span></div>
               <div>登录用户：<span className="text-gray-800">{runtime?.server_user?.username || '未登录服务器'}</span></div>
               <div>本机节点：<span className="text-gray-800 font-mono">{runtime?.local_node_id || '-'}</span></div>
               <div>待上传：<span className="text-amber-700 font-medium">{runtime?.sync_summary.pending_upload ?? 0}</span></div>
@@ -444,7 +440,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             <button
               type="button"
               disabled={!ready || !runtime?.server_user || !!busy}
-              title={!runtime?.server_user ? '请先登录服务器' : serverDisabledReason || '执行 push 后 pull'}
+              title={!runtime?.server_user ? '请先登录服务器' : serverUnavailableReason || '执行 push 后 pull'}
               onClick={() => openPreview('run')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
             >
@@ -454,7 +450,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             <button
               type="button"
               disabled={!ready || !runtime?.server_user || !!busy}
-              title={!runtime?.server_user ? '请先登录服务器' : serverDisabledReason || '仅上传本地待同步数据'}
+              title={!runtime?.server_user ? '请先登录服务器' : serverUnavailableReason || '仅上传本地待同步数据'}
               onClick={() => openPreview('push')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50"
             >
@@ -464,7 +460,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
             <button
               type="button"
               disabled={!ready || !runtime?.server_user || !!busy}
-              title={!runtime?.server_user ? '请先登录服务器' : serverDisabledReason || '把服务器数据导入当前本地缓存'}
+              title={!runtime?.server_user ? '请先登录服务器' : serverUnavailableReason || '把服务器数据导入当前本地缓存'}
               onClick={() => openPreview('pull')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-slate-700 text-white hover:bg-slate-600 disabled:opacity-50"
             >
@@ -501,7 +497,7 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
         {!ready && (
           <div className="mt-3 flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
             <XCircle className="w-3.5 h-3.5" />
-            {serverDisabledReason}，登录和服务器同步操作不可用。本地导入、查看和分析不受影响。
+            {serverUnavailableReason}，登录和服务器同步操作不可用。本地导入、查看和分析不受影响。
           </div>
         )}
       </section>

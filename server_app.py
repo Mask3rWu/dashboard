@@ -350,7 +350,11 @@ def sync_push(
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(bundle.file, f)
         try:
-            return server_sync.import_push_bundle(conn, tmp_path, imported_by=int(user["id"]))
+            result = server_sync.import_push_bundle(conn, tmp_path, imported_by=int(user["id"]))
+            # The local client starts its pull immediately after receiving this
+            # response. Commit before returning so that pull sees this push.
+            conn.commit()
+            return result
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except json.JSONDecodeError as exc:
@@ -375,21 +379,23 @@ def sync_changes(
 @app.get("/api/sync/preview")
 def sync_preview(
     since: str | None = Query(default=None),
+    exclude_source_node_id: str | None = Query(default=None),
     user=Depends(require_user),
     conn=Depends(connection),
 ):
     db.require_capability(user, "sync_pull")
-    return server_sync.build_pull_preview(conn, since)
+    return server_sync.build_pull_preview(conn, since, exclude_source_node_id=exclude_source_node_id)
 
 
 @app.get("/api/sync/bundle")
 def sync_bundle(
     since: str | None = Query(default=None),
+    exclude_source_node_id: str | None = Query(default=None),
     user=Depends(require_user),
     conn=Depends(connection),
 ):
     db.require_capability(user, "sync_pull")
-    result = server_sync.build_pull_bundle(conn, since)
+    result = server_sync.build_pull_bundle(conn, since, exclude_source_node_id=exclude_source_node_id)
     return FileResponse(
         result["path"],
         media_type="application/octet-stream",
