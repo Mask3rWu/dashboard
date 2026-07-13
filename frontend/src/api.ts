@@ -75,7 +75,8 @@ export type Capability =
   | 'change_own_password'
   | 'delete_models'
   | 'delete_aircraft'
-  | 'delete_flights';
+  | 'delete_flights'
+  | 'update_columns';
 
 export interface CurrentUser {
   id: number;
@@ -512,8 +513,8 @@ export interface ScanResult {
   } | null;
   suggested_model_id?: number;
   suggested_model_name?: string;
-  // New-format folder: no model matched, so the UI prompts the user to create
-  // one (choosing a name and which discovered data types to keep).
+  // Available both for unmatched folders and when the user overrides a
+  // recommended high-similarity model to create a new one.
   suggested_name?: string;
   discovered_types?: DiscoveredType[];
   matching_models?: { id: number; name: string; score: number }[];

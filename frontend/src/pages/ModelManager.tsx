@@ -265,6 +265,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const canDeleteModels = capabilities.includes('delete_models');
   const canDeleteAircraft = capabilities.includes('delete_aircraft');
   const canDeleteFlights = capabilities.includes('delete_flights');
+  const canEditColumns = capabilities.includes('update_columns');
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1155,7 +1156,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       />
                       原字段
                     </label>
-                    {columnGroups.length > 0 && (
+                    {canEditColumns && columnGroups.length > 0 && (
                     !isEditingColumns ? (
                       <button
                         onClick={startBatchEditColumns}
@@ -1211,13 +1212,15 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                           ) : (
                             <>
                               <span>{group.label}</span>
-                              <button
-                                onClick={() => { setEditingGroupLabel(group.data_type_key); setEditGroupLabelValue(group.label); }}
-                                className="text-gray-300 hover:text-blue-500 text-[10px] ml-2"
-                                title="编辑组名称"
-                              >
-                                <Pencil className="w-3 h-3 inline" />
-                              </button>
+                              {canEditColumns && (
+                                <button
+                                  onClick={() => { setEditingGroupLabel(group.data_type_key); setEditGroupLabelValue(group.label); }}
+                                  className="text-gray-300 hover:text-blue-500 text-[10px] ml-2"
+                                  title="编辑组名称"
+                                >
+                                  <Pencil className="w-3 h-3 inline" />
+                                </button>
+                              )}
                             </>
                           )}
                         </div>

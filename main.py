@@ -1276,6 +1276,7 @@ def get_model_columns(model_id: int):
 @app.patch("/api/models/{model_id}/columns")
 def update_model_column(
     model_id: int,
+    request: Request,
     data_type_key: str = Query(...),
     column_name: str = Query(...),
     req: UpdateColumnRequest | None = None,
@@ -1289,6 +1290,7 @@ def update_model_column(
 
     conn = get_db()
     try:
+        _require_capability_or_server(conn, request, "update_columns")
         result = update_column_metadata(
             conn, model_id, data_type_key, column_name,
             display_label=req.display_label,
@@ -1306,7 +1308,10 @@ def update_model_column(
 
 @app.patch("/api/models/{model_id}/data-types/{data_type_key}")
 def update_data_type_label(
-    model_id: int, data_type_key: str, req: UpdateDataTypeLabelRequest
+    model_id: int,
+    data_type_key: str,
+    req: UpdateDataTypeLabelRequest,
+    request: Request,
 ):
     """Update the display_label for a data type group in data_table_registry."""
     if not req.display_label.strip():
@@ -1314,6 +1319,7 @@ def update_data_type_label(
 
     conn = get_db()
     try:
+        _require_capability_or_server(conn, request, "update_columns")
         row = conn.execute(
             "SELECT id FROM data_table_registry WHERE model_id=? AND data_type_key=?",
             (model_id, data_type_key)
@@ -1724,6 +1730,11 @@ def _require_local_delete_capability(conn, request: Request, entity_type: str) -
         "aircraft": "delete_aircraft",
         "flight": "delete_flights",
     }[entity_type]
+    _require_capability_or_server(conn, request, capability)
+
+
+def _require_capability_or_server(conn, request: Request, capability: str) -> None:
+    """Allow a local session or a currently authenticated server user."""
     try:
         require_capability(conn, request, capability)
         return

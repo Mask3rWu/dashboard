@@ -17,6 +17,7 @@ ALL_CAPABILITIES = {
     "delete_models",
     "delete_aircraft",
     "delete_flights",
+    "update_columns",
 }
 
 
@@ -72,9 +73,15 @@ def get_capabilities(context: dict, user: dict | None) -> list[str]:
     if not user:
         return []
 
-    caps = {"change_own_password", "delete_aircraft", "delete_flights"}
+    caps = {"change_own_password"}
     if user.get("role") == "admin":
-        caps.update({"manage_users", "delete_models"})
+        caps.update({
+            "manage_users",
+            "delete_models",
+            "delete_aircraft",
+            "delete_flights",
+            "update_columns",
+        })
     return sorted(caps)
 
 

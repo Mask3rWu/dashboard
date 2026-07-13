@@ -34,6 +34,7 @@ SERVER_CAPABILITIES = {
     "delete_models",
     "delete_aircraft",
     "delete_flights",
+    "update_columns",
     "resolve_conflicts",
     "sync_push",
     "sync_pull",
