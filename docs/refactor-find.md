@@ -25,7 +25,7 @@
 风险最高的区域依次为：
 
 1. `main.py` 与同步模块职责过度集中。
-2. Repository 层不完整，SQL 泄漏到接口层和业务流程。
+2. SQL 和复杂业务流程泄漏到 HTTP 接口层，入口边界不清晰。
 3. 扫描、格式识别和解析模块之间存在循环依赖。
 4. 前端页面同时承担数据请求、业务状态和大量 UI 展示。
 5. 本地端与服务器端存在平行实现，业务契约容易漂移。
@@ -37,22 +37,22 @@
 
 | 文件 | 约行数 | 当前主要职责 |
 | --- | ---: | --- |
-| `main.py` | 3292 | 本地 FastAPI、本地业务接口、同步编排、静态资源、uvicorn、pywebview |
+| `main.py` | 3321 | 本地 FastAPI、本地业务接口、同步编排、静态资源、uvicorn、pywebview |
 | `backend/server_sync.py` | 2066 | 服务端同步预检、冲突判断、包导入、SQL、文件复制、拉取包生成、删除 |
+| `frontend/src/pages/ModelManager.tsx` | 1774 | 机型、飞机、航班、原始文件、列配置和记录编辑 |
 | `backend/sync_import.py` | 1744 | 本地同步包预览、映射、冲突处理、数据库写入、原始文件导入 |
 | `frontend/src/pages/FlightView.tsx` | 1593 | 航班树、图表、筛选、统计、相关性、异常、编辑和删除 |
-| `frontend/src/pages/ImportPage.tsx` | 1590 | 文件扫描、数据导入、航班管理、同步包导入导出、模型创建 |
-| `frontend/src/pages/ModelManager.tsx` | 1331 | 机型、飞机、航班、原始文件、列配置和记录编辑 |
+| `frontend/src/pages/ImportPage.tsx` | 1081 | 文件扫描、数据导入、航班管理和模型创建 |
 | `backend/format_configs.py` | 934 | 格式配置持久化、格式探测、配置生成、动态表和列注册 |
 | `frontend/src/pages/SyncPage.tsx` | 892 | 同步队列、预览、执行、进度、错误和冲突展示 |
-| `frontend/src/api.ts` | 867 | Token、HTTP 请求、全部 DTO 类型和全部业务 API |
+| `frontend/src/api.ts` | 876 | Token、HTTP 请求、全部 DTO 类型和全部业务 API |
 | `backend/scanner.py` | 758 | 文件读取、编码探测、文件聚类、模型识别、目录扫描和数据库查询 |
 | `backend/server_database.py` | 715 | MySQL schema、连接、认证、CRUD 和动态表创建 |
 | `backend/analysis.py` | 664 | 数据表查询、时间对齐、过滤、统计、相关性、异常和对比 |
 | `frontend/src/App.tsx` | 605 | 应用初始化、认证、导航、全局状态和页面组合 |
 | `server_app.py` | 467 | 服务端 FastAPI、请求模型、鉴权依赖和业务接口 |
 
-这些文件的问题并非单纯代码量较大，而是每个文件内部包含多条可以独立变化的业务流程。
+以上行数基于当前工作区快照，仅用于辅助判断职责集中程度。问题并非单纯代码量较大，而是每个文件内部包含多条可以独立变化的业务流程。
 
 例如，`main.py` 中同时包含：
 
@@ -178,19 +178,19 @@ parser ──────────→ scanner
 - 冲突类型和冲突判定规则。
 - 同步操作的结果模型和错误类型。
 
-### 4.4 数据库与 Repository
+### 4.4 数据访问边界
 
-当前代码已经出现 `flight_repository.py`、`sync_repository.py`、`user_repository.py` 等 repository，但还没有形成完整持久化边界。
+当前代码已经出现 `flight_repository.py`、`sync_repository.py`、`user_repository.py` 等 repository，但数据访问职责仍然分散。
 
 主要表现为：
 
-- `main.py` 仍存在大量直接 SQL。
-- `server_sync.py`、`sync_import.py`、`analysis.py`、`format_configs.py` 等模块直接操作连接对象。
-- 事务边界依赖调用者约定，缺少统一的 Unit of Work 或应用服务边界。
+- `main.py` 仍存在大量直接 SQL，HTTP 接口了解具体表结构。
 - `database.py` 和 `server_database.py` 同时承担 schema、连接、查询和业务辅助函数。
-- Repository 无法真正隔离 SQLite 和 MySQL 的方言及数据模型差异。
+- 普通实体 CRUD、同步状态查询等稳定操作只完成了部分 repository 化。
+- `server_sync.py`、`sync_import.py`、`analysis.py`、`format_configs.py` 等数据处理模块直接操作连接对象。
+- 事务边界主要依赖调用者约定，复杂流程的控制位置不够清晰。
 
-因此，当前 repository 更接近零散 SQL helper，而不是业务层依赖的稳定接口。
+直接操作连接对象并不一定都是问题。同步导入、动态表维护和分析查询与数据库结构紧密相关，可以继续在对应功能模块内部管理 SQL。当前更重要的边界是：HTTP Router 不直接编写 SQL；稳定且重复的实体访问逐步进入 repository；复杂数据处理逻辑留在所属功能模块中。
 
 ### 4.5 前端模块依赖
 
@@ -217,7 +217,7 @@ App.tsx
 
 - `api.ts` 有约 115 个导出和 61 个接口函数，任何领域接口变化都会集中影响该文件。
 - 页面组件直接负责请求、加载状态、错误、业务操作和 UI。
-- `ImportPage` 包含约 43 组状态，`ModelManager` 约 39 组，`FlightView` 约 30 组。
+- `ModelManager`、`FlightView`、`ImportPage` 等页面仍包含数十组状态，多个独立工作流共享同一组件生命周期。
 - 航班列表、重命名和删除逻辑在多个页面重复。
 - 飞行记录的默认值、数字解析和表单控件在 `ImportPage` 与 `ModelManager` 中重复。
 - 同步状态显示存在公共实现，但 `ModelManager` 仍保留自己的重复版本。
@@ -233,9 +233,9 @@ App.tsx
 
 FastAPI 路由直接调用数据库、文件系统和同步实现。接口层无法独立测试，业务逻辑也无法脱离 HTTP 入口复用。
 
-### 5.3 Repository 边界不完整
+### 5.3 数据访问职责分散
 
-业务模块仍然了解表结构、SQL、连接对象和数据库方言，导致数据库实现与业务流程强耦合。
+入口文件、repository 和功能模块都包含数据访问代码。问题重点不是所有 SQL 都必须进入 repository，而是接口层仍然了解表结构，稳定 CRUD 与复杂数据处理没有形成明确分工。
 
 ### 5.4 导入流水线存在循环依赖
 
@@ -263,16 +263,14 @@ FastAPI 路由直接调用数据库、文件系统和同步实现。接口层无
 
 ## 6. 调整后的前端重构方向
 
-### 6.1 保留明确的页面入口
+### 6.1 保留页面入口并按需拆分
 
-前端重构后继续保留 `pages/`。主要页面与入口文件保持一一对应，确保可以直接定位页面：
+前端继续保留 `pages/`，主要页面与入口文件保持一一对应。当前阶段不必为了目录完整而预先建立 `app/providers`、每个 feature 的独立类型目录等结构，优先处理已经出现实际复杂度的页面和 API：
 
 ```text
 frontend/src/
-├── app/
-│   ├── App.tsx
-│   ├── navigation.ts
-│   └── providers/
+├── App.tsx
+├── main.tsx
 ├── pages/
 │   ├── ImportPage.tsx
 │   ├── ModelManagerPage.tsx
@@ -287,70 +285,63 @@ frontend/src/
 │   ├── analysis/
 │   ├── sync/
 │   └── users/
-└── shared/
-    ├── api/
-    ├── components/
-    ├── hooks/
-    ├── types/
-    └── utils/
+├── api/
+│   ├── client.ts
+│   ├── auth.ts
+│   ├── models.ts
+│   ├── flights.ts
+│   ├── analysis.ts
+│   ├── sync.ts
+│   └── users.ts
+├── components/
+└── utils/
 ```
 
-`pages` 中的文件作为稳定页面入口，主要负责：
+`pages/` 中的文件作为稳定页面入口，主要负责页面级布局、顶层参数和 feature 组合。具体业务内容只在已经能够识别出独立职责时下沉到 `features/`，不要求每个 feature 都同时拥有 `api.ts`、`types.ts`、`hooks/` 和 `components/`。
 
-- 接收路由或应用顶层参数。
-- 组合 feature 组件。
-- 控制页面级布局。
-- 处理少量真正属于整个页面的状态。
-
-具体业务内容下沉到 `features`。例如：
+例如 `ImportPage` 可以按实际界面职责逐步拆分：
 
 ```text
 pages/ImportPage.tsx
     ↓
 features/import/
-├── components/
-│   ├── FolderScanner.tsx
-│   ├── SessionImportList.tsx
-│   └── ImportRecordForm.tsx
-├── hooks/
-│   ├── useFolderScan.ts
-│   └── useSessionImport.ts
-├── api.ts
-└── types.ts
+├── FolderScanner.tsx
+├── SessionImportList.tsx
+├── ImportRecordForm.tsx
+└── useSessionImport.ts
 ```
-
-这样既保留明确的页面定位，又避免 `pages` 中继续出现超过千行的组件。
 
 ### 6.2 前端各目录职责
 
-- `app/`：应用初始化、导航、全局 Provider 和认证上下文。
+- `App.tsx`：应用初始化、认证状态、导航和必要的全局状态组合。
 - `pages/`：页面入口和页面级布局。
-- `features/`：按业务能力组织组件、状态、hooks、API 和类型。
-- `shared/components/`：无业务归属或跨 feature 复用的 UI。
-- `shared/api/`：基础 HTTP Client、Token 注入和统一错误处理。
-- `shared/types/`：真正跨多个 feature 使用的基础类型。
+- `features/`：从复杂页面中提取出的业务组件和业务状态。
+- `api/`：共享 HTTP Client，以及按业务域拆分的请求函数和相关类型。
+- `components/`：跨页面复用且没有单一业务归属的 UI 组件。
+- `utils/`：无业务状态的通用工具；没有实际复用时不提前创建文件。
 
 ### 6.3 前端拆分方向
 
-- `ImportPage` 拆分为目录扫描、会话导入、同步包导入导出等 feature 组件。
-- `ModelManagerPage` 拆分为机型、飞机、航班、列配置和记录编辑组件。
-- `FlightViewPage` 拆分为航班导航、图表、筛选、统计、相关性和异常分析组件。
-- `SyncPage` 拆分为队列、预览、执行进度、冲突详情等组件。
-- 航班列表、飞行记录表单和同步状态展示形成复用组件。
-- 单体 `api.ts` 按 feature 拆分，保留一个共享 HTTP Client。
-- `App.tsx` 只保留应用启动、导航和全局上下文组合。
+- 优先拆分 `ModelManagerPage`、`FlightViewPage`、`ImportPage` 和 `SyncPage` 中职责明确的区域。
+- 航班列表、飞行记录表单和同步状态展示在出现稳定复用关系后形成公共组件。
+- 单体 `api.ts` 按认证、机型、航班、分析、同步和用户拆分，保留一个共享 HTTP Client。
+- `App.tsx` 保留在 `src/` 根目录；只有真正出现多个全局 Provider 后，再考虑增加 `app/` 目录。
+- 拆分过程中保持页面 Props 和现有 API 调用行为不变，避免同时引入新的状态管理框架。
 
 ## 7. 调整后的后端重构方向
 
-### 7.1 建立独立接口层
+### 7.1 采用轻量的接口层和功能分组
 
-后端需要设置单独的 `api/` 接口层，并与具体功能实现分离：
+后端当前最需要的是把 HTTP 接口、同步子系统和导入流水线从扁平目录中分离出来，而不是立即建立完整的 `application/domain/infrastructure/bootstrap` 分层。
+
+建议目标结构如下：
 
 ```text
 backend/
 ├── api/
 │   ├── desktop/
 │   │   ├── app.py
+│   │   ├── schemas.py
 │   │   └── routers/
 │   │       ├── auth.py
 │   │       ├── models.py
@@ -359,151 +350,122 @@ backend/
 │   │       ├── analysis.py
 │   │       ├── sync.py
 │   │       └── runtime.py
-│   ├── server/
-│   │   ├── app.py
-│   │   └── routers/
-│   │       ├── auth.py
-│   │       ├── users.py
-│   │       ├── models.py
-│   │       └── sync.py
-│   ├── schemas/
-│   │   ├── auth.py
-│   │   ├── flights.py
-│   │   ├── models.py
-│   │   └── sync.py
-│   ├── dependencies.py
-│   └── error_handlers.py
-├── application/
-│   ├── auth_service.py
-│   ├── model_service.py
-│   ├── flight_service.py
-│   ├── import_service.py
-│   ├── analysis_service.py
-│   └── sync_service.py
-├── domain/
-│   ├── models/
-│   ├── import_pipeline/
-│   ├── sync/
-│   ├── policies/
-│   └── errors.py
-├── infrastructure/
-│   ├── database/
-│   │   ├── sqlite/
-│   │   └── mysql/
-│   ├── repositories/
-│   ├── storage/
-│   └── remote/
-├── bootstrap/
-│   ├── desktop.py
+│   └── server/
+│       ├── app.py
+│       ├── schemas.py
+│       └── routers/
+│           ├── auth.py
+│           ├── users.py
+│           ├── models.py
+│           └── sync.py
+├── import_pipeline/
+│   ├── file_reader.py
+│   ├── scanner.py
+│   ├── format_configs.py
+│   ├── parser.py
+│   └── importer.py
+├── sync/
+│   ├── protocol.py
+│   ├── package.py
+│   ├── local_import.py
+│   ├── client.py
+│   ├── repository.py
 │   └── server.py
+├── repositories/
+│   ├── flights.py
+│   ├── users.py
+│   ├── permissions.py
+│   └── raw_files.py
+├── analysis.py
+├── auth.py
+├── permissions.py
+├── database.py
+├── server_database.py
+├── raw_storage.py
+├── runtime_context.py
 └── config.py
+
+main.py
+server_app.py
+server_main.py
 ```
 
-### 7.2 后端各层职责
+该结构只建立当前已经存在的边界：接口、导入、同步和稳定数据访问。`analysis.py`、数据库模块、认证和存储等单文件职责暂时保留在 `backend/` 根目录，等它们自身出现多个明确子职责后再建立子目录。
+
+### 7.2 各目录职责
 
 #### API 接口层
 
-`api/` 只负责：
+`api/` 负责：
 
-- FastAPI App 和 Router。
-- Pydantic 请求、响应模型。
-- HTTP 参数解析。
-- 认证依赖和依赖注入。
-- 业务错误到 HTTP 状态码的转换。
-- 调用 application 层用例。
+- 创建本地端和服务端 FastAPI App。
+- 定义 Router 和 Pydantic 请求响应模型。
+- 解析 HTTP 参数、认证信息和错误状态。
+- 调用现有功能模块或 repository。
 
-接口层不应包含：
+Router 中不应继续新增直接 SQL、文件复制、ZIP 处理和长流程编排。迁移第一阶段允许 Router 直接调用现有函数，不要求先为每个功能创建 service 和依赖注入接口。
 
-- SQL 或数据库表结构。
-- 数据库事务编排。
-- ZIP 和文件复制。
-- 同步冲突判断。
-- 数据格式识别和解析。
-- 具体业务状态变更规则。
+#### 功能模块
 
-#### Application 应用层
+`import_pipeline/` 和 `sync/` 按业务能力组织现有模块。功能模块可以：
 
-`application/` 负责完整业务用例，例如：
+- 接收数据库连接并控制必要的事务。
+- 在模块内部执行与功能紧密相关的 SQL。
+- 处理文件、ZIP、动态表和远程请求。
+- 提供可供 Router、脚本或其他功能模块调用的函数。
 
-- 创建、更新或删除机型。
-- 导入一个飞行会话。
-- 扫描并预览一个数据目录。
-- 执行一次上传、拉取或完整同步。
-- 查询航班分析数据。
+如果某个 Router 拆出后仍包含明显的多步骤编排，可以只在对应功能目录中增加 `service.py` 或 `workflow.py`，不要求所有功能统一建立应用服务层。
 
-该层负责用例编排和事务边界，但不直接依赖 FastAPI，也不直接编写 SQL。
+#### Repository
 
-#### Domain 领域层
+`repositories/` 只承载机型、飞机、航班、用户、权限和原始文件等稳定且重复的实体访问。当前阶段不要求：
 
-`domain/` 负责与框架和数据库无关的规则，例如：
+- 为 SQLite 和 MySQL 定义统一抽象接口。
+- 将分析查询、动态表操作和同步批量导入全部包装成 repository。
+- 引入 Unit of Work 或依赖注入容器。
 
-- 实体和值对象。
-- 同步 manifest 和协议版本。
-- 实体映射与冲突规则。
-- 导入格式和会话模型。
-- 权限策略。
-- 领域错误类型。
+#### 启动入口
 
-#### Infrastructure 基础设施层
+- `main.py` 保留桌面窗口、静态资源挂载、uvicorn 启动和打包相关逻辑。
+- `server_app.py` 保留服务端兼容入口，可以只重新导出 `backend.api.server.app` 中的 App。
+- `server_main.py` 继续作为协作服务器进程入口。
 
-`infrastructure/` 负责具体技术实现，例如：
-
-- SQLite 和 MySQL 连接及 schema。
-- Repository 实现。
-- 原始文件和同步包存储。
-- ZIP、SHA256 和安全路径校验。
-- 服务器 HTTP Client。
-
-#### Bootstrap 启动层
-
-`bootstrap/` 负责组装依赖和启动进程：
-
-- 创建本地或服务端 FastAPI App。
-- 初始化数据库和 repository。
-- 注入 application service。
-- 启动 uvicorn。
-- 启动 pywebview。
+这样可以保持现有启动脚本和 PyInstaller 的入口不变，降低目录迁移对打包的影响。
 
 ### 7.3 后端依赖方向
 
-目标依赖方向为：
+目标依赖关系保持简单：
 
 ```text
-bootstrap
-    ↓
-api
-    ↓
-application
-    ↓
-domain
-
-infrastructure
-    └── 实现 application/domain 定义的持久化与外部服务接口
+main.py / server_app.py
+            ↓
+        backend.api
+            ↓
+  功能模块 / repositories
+            ↓
+ 数据库、存储、配置等基础模块
 ```
 
-禁止出现以下反向依赖：
+需要约束的是：
 
-- Domain 依赖 FastAPI。
-- Domain 依赖 SQLite、MySQL 或 SQLAlchemy。
-- Application 依赖具体 Router。
-- API 直接依赖具体数据库表和 SQL。
-- SQLite Repository 依赖 MySQL Repository，或反向依赖。
+- 功能模块不反向依赖具体 Router 或 FastAPI App。
+- `main.py` 和 `server_app.py` 不再承载具体业务实现。
+- Router 不直接了解数据库表结构。
+- 本地 SQLite 和服务端 MySQL 的实现保持独立，不为了形式统一强行抽象。
+- 新目录迁移时避免通过大量兼容 re-export 长期维持两套入口；兼容模块只用于分阶段迁移。
 
 ### 7.4 接口层目标形态
 
-接口层路由应尽量保持为参数转换和用例调用：
+Router 应保持为参数转换和功能调用，但不强制引入 Service 类：
 
 ```python
 @router.post("/flights/import", response_model=ImportSessionResponse)
-def import_flight(
-    request: ImportSessionRequest,
-    service: ImportService = Depends(get_import_service),
-):
-    result = service.import_session(request.to_command())
-    return ImportSessionResponse.from_result(result)
+def import_flight(request: ImportSessionRequest):
+    result = import_session(request.model_dump())
+    return ImportSessionResponse.model_validate(result)
 ```
 
-路由函数中不应出现 `conn.execute()`、文件复制或同步冲突处理。
+当 `import_session` 内部流程足够复杂时，它可以是 `import_pipeline/service.py` 中的函数或类；这个选择由实际复杂度决定，而不是由目录模板决定。
 
 ## 8. 重构后的主要边界
 
@@ -511,36 +473,30 @@ def import_flight(
 
 - `pages/` 始终保留并与主要页面一一对应。
 - 页面文件负责组合，不负责实现所有子功能。
-- 页面内部复杂度通过 `features/` 拆分，而不是取消页面入口。
+- `features/` 只接收已经识别出的复杂业务区域，不预先填充空目录。
 
 ### 8.2 HTTP 接口边界
 
 - 本地桌面 API 与服务器 API 分别拥有明确的 App 和 Router。
-- 请求响应模型集中在接口层。
-- 接口层只依赖 application service。
+- 请求响应模型分别与本地端、服务端接口放置，避免错误共享相似但不同的契约。
+- Router 不包含 SQL、文件复制、格式识别和同步冲突判断。
 
-### 8.3 应用用例边界
+### 8.3 数据访问边界
 
-- 一个 service 方法对应一个完整业务操作。
-- 事务由应用用例控制，而不是由 Router 或底层 helper 隐式控制。
-- HTTP、CLI 或未来后台任务可以复用同一 application service。
+- 稳定、重复的实体 CRUD 进入 repository。
+- 分析、同步和动态表模块可以在功能边界内部保留 SQL。
+- 事务由执行完整写入流程的功能函数控制，不强制引入 Unit of Work。
+- SQLite 与 MySQL 不要求实现同一套 repository 接口。
 
-### 8.4 数据访问边界
+### 8.4 同步协议边界
 
-- 所有 SQL 进入 repository 或数据库基础设施模块。
-- Application 依赖 repository 接口，而不是具体连接对象。
-- SQLite 与 MySQL 作为同一业务能力的不同实现存在。
+- Manifest、协议版本、安全路径校验、哈希计算和共享错误类型进入 `sync/protocol.py`。
+- 本地端负责把同步结果应用到 SQLite，服务端负责应用到 MySQL。
+- 两端共享协议含义，但不强求共享具体数据库写入代码。
 
-### 8.5 同步协议边界
+### 8.5 导入流水线边界
 
-- Manifest、协议版本、安全校验和冲突规则形成共享核心。
-- 本地端负责把同步结果应用到本地 SQLite。
-- 服务器端负责把同步结果应用到 MySQL。
-- 两端不重复实现协议含义。
-
-### 8.6 导入流水线边界
-
-导入流程应拆分为单向依赖：
+导入流程形成单向依赖：
 
 ```text
 文件读取
@@ -549,25 +505,30 @@ def import_flight(
     ↓
 会话发现
     ↓
-导入计划
+数据解析与导入编排
     ↓
-数据解析
-    ↓
-Repository / Raw Storage
+数据库 / Raw Storage
 ```
 
-扫描模块不再反向导入 parser，格式配置模块也不再反向依赖 scanner。
+通用的文件读取、编码探测、表头判断和行解析进入 `file_reader.py`。扫描模块不再反向导入 parser，格式配置模块也不再反向依赖 scanner。
 
-## 9. 后续规划阶段需要重点处理的内容
+### 8.6 启动与兼容边界
 
-下一阶段制定详细重构计划时，应重点确定：
+- 根目录入口文件名和现有命令保持不变。
+- API 路径、请求响应结构、数据库 schema 和同步协议在目录迁移阶段保持不变。
+- PyInstaller 继续以根目录 `main.py` 为入口。
+- 旧模块路径只在迁移期间提供必要的兼容导入，完成调用方迁移后删除。
 
-- 如何为现有 API、同步协议和导入行为建立测试基线。
-- `main.py` 的接口层、应用层和桌面启动逻辑如何分批迁出。
-- 同步协议共享核心与本地、服务端适配器的具体边界。
-- 导入流水线如何解除循环依赖并保持现有行为。
-- SQLite 与 MySQL repository 接口如何定义。
-- 前端各主要页面优先拆分哪些 feature 和复用组件。
-- 如何在重构期间保持现有启动脚本、PyInstaller 打包和前端 API 兼容。
+## 9. 后续详细规划需要重点处理的内容
 
-详细计划应遵循“先建立行为基线，再移动代码，最后收紧依赖”的原则，避免在一次改动中同时改变目录结构、业务行为和数据契约。
+下一阶段的详细重构计划应围绕可独立验证的小批次改动展开：
+
+- 为现有 API 路径、同步 Manifest、安全校验和导入解析建立最小测试基线。
+- 确定 `main.py` 和 `server_app.py` 的 Router 拆分批次，以及每批需要保持的接口契约。
+- 确定同步模块移动、公共协议提取和兼容导入的顺序。
+- 确定 `file_reader.py` 的职责，并逐步解除导入流水线循环依赖。
+- 区分适合进入 repository 的稳定 CRUD 与应留在功能模块中的复杂 SQL。
+- 按页面实际职责确定前端组件、hook 和 API 的拆分顺序。
+- 每个批次分别验证后端启动、前端构建、桌面运行和 PyInstaller 打包。
+
+详细计划应遵循“先建立行为基线，再按功能移动代码，随后拆入口，最后收紧依赖”的原则。目录移动、业务行为修改和数据契约调整不应放在同一个批次中。

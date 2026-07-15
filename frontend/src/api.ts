@@ -585,6 +585,46 @@ export interface FilterPreset {
   config: FilterSpec;
 }
 
+// ── Flight record filter (data-management page) ──────────
+// Filters the flights list by FlightRecordFields. Text fields use a
+// case-insensitive "contains" match; numeric fields use comparison ops.
+// `record_note` is intentionally excluded.
+
+export interface FlightFilterField {
+  key: string;
+  label: string;
+  type: 'text' | 'number';
+  unit?: string;
+}
+
+export interface FlightFilterCondition {
+  field: string;
+  op: 'contains' | 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'between';
+  // value holds the text needle (contains) or the numeric comparison value
+  // (stored as a string; coerced with Number() at match time).
+  value: string | null;
+  min_val: number | null;
+  max_val: number | null;
+}
+
+export interface FlightFilterSpec {
+  logic: 'and' | 'or';
+  conditions: FlightFilterCondition[];
+}
+
+export const FLIGHT_FILTER_FIELDS: FlightFilterField[] = [
+  { key: 'record_location', label: '地点', type: 'text' },
+  { key: 'record_weather', label: '天气', type: 'text' },
+  { key: 'record_payload', label: '设备载荷', type: 'text' },
+  { key: 'record_wind_direction', label: '风向', type: 'text' },
+  { key: 'record_total_duration_min', label: '总时长', type: 'number', unit: 'min' },
+  { key: 'record_fuel_amount', label: '燃油量', type: 'number', unit: 'kg' },
+  { key: 'record_takeoff_weight', label: '起飞重量', type: 'number', unit: 'kg' },
+  { key: 'record_altitude', label: '海拔高度', type: 'number', unit: 'm' },
+  { key: 'record_wind_speed', label: '风速', type: 'number', unit: 'm/s' },
+  { key: 'record_temperature', label: '温度', type: 'number', unit: '°C' },
+];
+
 export interface FlightStats {
   duration_sec: number;
   start_time: string;

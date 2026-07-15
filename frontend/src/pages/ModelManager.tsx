@@ -12,8 +12,10 @@ import {
   type SyncExportModelNode, type SyncExportResult,
   type SyncImportPreview, type SyncImportReport,
   type DeleteScope,
+  FLIGHT_FILTER_FIELDS, type FlightFilterSpec,
 } from '../api';
 import { deleteActionLabel, deleteScopeFor } from '../syncStatus';
+import FlightFilterBar from '../components/FlightFilterBar';
 
 interface Props {
   onModelsChanged: () => void;
@@ -470,9 +472,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [aircraftSearch, setAircraftSearch] = useState('');
   const [timeFilterStart, setTimeFilterStart] = useState('');
   const [timeFilterEnd, setTimeFilterEnd] = useState('');
-  const [locationFilter, setLocationFilter] = useState('');
-  const [weatherFilter, setWeatherFilter] = useState('');
-  const [payloadFilter, setPayloadFilter] = useState('');
+  const [flightFilter, setFlightFilter] = useState<FlightFilterSpec | null>(null);
 
   const loadModels = async () => {
     try {
@@ -510,6 +510,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     setAircraftSearch('');
     setTimeFilterStart('');
     setTimeFilterEnd('');
+    setFlightFilter(null);
     setIsEditingColumns(false);
     setColumnEditData({});
     setShowOriginalName(true);
@@ -672,20 +673,39 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     return fs <= filterEndMs && fe >= filterStartMs;
   };
 
-  const flightMatchesRecordFilters = (f: Flight): boolean => {
-    const filters: [string, string | undefined][] = [
-      [locationFilter, f.record_location],
-      [weatherFilter, f.record_weather],
-      [payloadFilter, f.record_payload],
-    ];
-    return filters.every(([needle, value]) => {
-      if (!needle.trim()) return true;
-      return (value ?? '').toLowerCase().includes(needle.trim().toLowerCase());
+  const flightMatchesFilter = (f: Flight): boolean => {
+    if (!flightFilter || flightFilter.conditions.length === 0) return true;
+    const results = flightFilter.conditions.map((c) => {
+      const field = FLIGHT_FILTER_FIELDS.find((x) => x.key === c.field);
+      if (!field) return true;
+      const raw = f[c.field as keyof Flight];
+      if (field.type === 'text') {
+        const needle = (c.value ?? '').trim().toLowerCase();
+        if (!needle) return true;
+        return (raw ?? '').toString().toLowerCase().includes(needle);
+      }
+      // Numeric field
+      const v = raw == null || raw === '' ? null : Number(raw);
+      if (v == null || !Number.isFinite(v)) return false;
+      if (c.op === 'between') {
+        return c.min_val != null && c.max_val != null && v >= c.min_val && v <= c.max_val;
+      }
+      const target = c.value == null || c.value.trim() === '' ? null : Number(c.value);
+      if (target == null || !Number.isFinite(target)) return true; // incomplete -> no effect
+      switch (c.op) {
+        case 'gt': return v > target;
+        case 'gte': return v >= target;
+        case 'lt': return v < target;
+        case 'lte': return v <= target;
+        case 'eq': return v === target;
+        default: return true;
+      }
     });
+    return flightFilter.logic === 'and' ? results.every(Boolean) : results.some(Boolean);
   };
 
   const getFlightsForAircraft = (acId: number): Flight[] =>
-    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesRecordFilters(f));
+    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesFilter(f));
 
   const filteredAircraft = aircraft.filter((ac) => {
     if (!aircraftSearch.trim()) return true;
@@ -725,12 +745,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     }
   };
 
-  const clearRecordFilters = () => {
-    setLocationFilter('');
-    setWeatherFilter('');
-    setPayloadFilter('');
-  };
-
   const toggleRawFiles = async (flightId: number) => {
     if (expandedRawFlightId === flightId) {
       setExpandedRawFlightId(null);
@@ -764,8 +778,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       alert('打开目录失败: ' + (e.message || e));
     }
   };
-
-  const recordFiltersActive = [locationFilter, weatherFilter, payloadFilter].some((v) => v.trim());
 
   return (
     <div className="h-full flex">
@@ -966,42 +978,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       清除时间筛选
                     </button>
                   )}
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500 shrink-0">地点:</span>
-                    <input
-                      type="text"
-                      value={locationFilter}
-                      onChange={(e) => setLocationFilter(e.target.value)}
-                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500 shrink-0">天气:</span>
-                    <input
-                      type="text"
-                      value={weatherFilter}
-                      onChange={(e) => setWeatherFilter(e.target.value)}
-                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500 shrink-0">载荷:</span>
-                    <input
-                      type="text"
-                      value={payloadFilter}
-                      onChange={(e) => setPayloadFilter(e.target.value)}
-                      className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  {recordFiltersActive && (
-                    <button
-                      onClick={clearRecordFilters}
-                      className="text-xs text-blue-600 hover:text-blue-500"
-                    >
-                      清除记录筛选
-                    </button>
-                  )}
                 </div>
+
+                {/* Collapsible record-field filter (text: contains; numeric: > ≥ < ≤ = ~) */}
+                <FlightFilterBar value={flightFilter} onChange={setFlightFilter} />
                 {showAddAircraft && (
                   <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg space-y-2">
                     <input

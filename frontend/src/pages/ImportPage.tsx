@@ -565,6 +565,12 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
     try { const data = await listFlights(); setFlights(data.flights); } catch {}
   }, []);
 
+  // Load imported flights on mount so the "已导入飞行" list shows existing
+  // records immediately, without requiring a new import to trigger the fetch.
+  useEffect(() => {
+    loadFlights();
+  }, [loadFlights]);
+
   const handleDelete = async (flight: Flight) => {
     await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
     setDeletingFlightId(null);
