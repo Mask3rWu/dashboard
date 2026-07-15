@@ -38,3 +38,4 @@ flights.db
 .understand-anything/
 *export.json
 generate_requirements_docx.ps1
+.claude/
