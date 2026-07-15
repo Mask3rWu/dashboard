@@ -820,6 +820,15 @@ export const importSession = (
 export const browseFolder = () =>
   request<{ path: string; cancelled?: boolean }>('/folders/browse');
 
+// File browser (single file, e.g. a .fapkg sync package)
+export const browseFile = (opts: { title?: string; filetypes?: string } = {}) => {
+  const qs = new URLSearchParams();
+  if (opts.title) qs.set('title', opts.title);
+  if (opts.filetypes) qs.set('filetypes', opts.filetypes);
+  const text = qs.toString();
+  return request<{ path: string; cancelled?: boolean }>(`/files/browse${text ? `?${text}` : ''}`);
+};
+
 export const listSubdirs = (path: string) =>
   request<{ path: string; subdirs: string[] }>(`/folders/subdirs?path=${encodeURIComponent(path)}`);
 

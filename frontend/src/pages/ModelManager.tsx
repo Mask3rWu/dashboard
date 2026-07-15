@@ -1,14 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Pencil, Trash2, Download, Upload } from 'lucide-react';
 import {
   listModels, updateModel, deleteModel,
   listAircraft, createAircraft, updateAircraft, deleteAircraft,
   deleteFlight, updateFlight, updateFlightRecord,
-  getRawFiles, openRawFolder,
+  getRawFiles, openRawFolder, browseFile,
   getModelColumns, updateModelColumn, updateModelDataTypeLabel,
-  exportModel, importModel,
+  getSyncExportTree, exportSyncPackage, previewSyncImport, importSyncPackage,
   type AircraftModel, type Aircraft, type Flight,
   type DataTypeGroup, type FlightRecordFields, type RawFileItem,
+  type SyncExportModelNode, type SyncExportResult,
+  type SyncImportPreview, type SyncImportReport,
   type DeleteScope,
 } from '../api';
 import { deleteActionLabel, deleteScopeFor } from '../syncStatus';
@@ -20,6 +22,7 @@ interface Props {
   modelsVersion: number;
   capabilities: string[];
   serverOnline?: boolean;
+  isLoggedIn?: boolean;
 }
 
 function syncStateLabel(state?: string | null) {
@@ -207,7 +210,7 @@ function RecordTextarea({
   );
 }
 
-export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities, serverOnline = true }: Props) {
+export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities, serverOnline = true, isLoggedIn }: Props) {
   const [models, setModels] = useState<AircraftModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
@@ -257,46 +260,208 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [editingGroupLabel, setEditingGroupLabel] = useState<string | null>(null);
   const [editGroupLabelValue, setEditGroupLabelValue] = useState('');
 
-  // ─── Import / Export ───────────────────────────────────
-  const [showImportModal, setShowImportModal] = useState(false);
-  const [importData, setImportData] = useState<any>(null);
-  const [importName, setImportName] = useState('');
-  const [importError, setImportError] = useState('');
+  // ─── Sync package export / import ──────────────────────
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportFilter, setExportFilter] = useState('');
+  const [exportTree, setExportTree] = useState<SyncExportModelNode[]>([]);
+  const [selectedExportIds, setSelectedExportIds] = useState<Set<number>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const [exportResult, setExportResult] = useState<SyncExportResult | null>(null);
+  const [syncImportOpen, setSyncImportOpen] = useState(false);
+  const [syncImportPath, setSyncImportPath] = useState('');
+  const [syncImportPreview, setSyncImportPreview] = useState<SyncImportPreview | null>(null);
+  const [syncModelActions, setSyncModelActions] = useState<Record<number, {
+    action: 'use_existing' | 'create';
+    target_model_id?: number | null;
+    name?: string | null;
+  }>>({});
+  const [syncAircraftMappings, setSyncAircraftMappings] = useState<Record<number, {
+    action: 'use_existing' | 'create';
+    target_aircraft_id?: number | null;
+    name?: string | null;
+  }>>({});
+  const [syncConflictPolicy, setSyncConflictPolicy] = useState<'skip' | 'update_records'>('skip');
+  const [syncImportLoading, setSyncImportLoading] = useState(false);
+  const [syncImportBrowsing, setSyncImportBrowsing] = useState(false);
+  const [syncImportError, setSyncImportError] = useState('');
+  const [syncImportReport, setSyncImportReport] = useState<SyncImportReport | null>(null);
+  const canImportSyncPackage = !!isLoggedIn;
   const canDeleteModels = capabilities.includes('delete_models');
   const canDeleteAircraft = capabilities.includes('delete_aircraft');
   const canDeleteFlights = capabilities.includes('delete_flights');
   const canEditColumns = capabilities.includes('update_columns');
 
-  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const visibleExportFlightIds = exportTree.flatMap((model) =>
+    model.aircraft.flatMap((aircraft) => aircraft.flights.map((flight) => flight.id)),
+  );
+
+  const loadExportTree = useCallback(async (q = exportFilter) => {
+    setExportLoading(true);
+    setExportError('');
     try {
-      const text = await file.text();
-      const data = JSON.parse(text);
-      if (!data.version || !data.model) {
-        setImportError('无效的导出文件格式');
-        return;
-      }
-      setImportData(data);
-      setImportName(data.model.name || '');
-      setImportError('');
-      setShowImportModal(true);
-    } catch {
-      setImportError('无法解析文件，请选择有效的 JSON 文件');
+      const data = await getSyncExportTree(q);
+      setExportTree(data.tree);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExportLoading(false);
     }
-    e.target.value = ''; // reset so same file can be re-selected
+  }, [exportFilter]);
+
+  useEffect(() => {
+    if (!exportOpen) return;
+    const timer = window.setTimeout(() => loadExportTree(exportFilter), 250);
+    return () => window.clearTimeout(timer);
+  }, [exportFilter, exportOpen, loadExportTree]);
+
+  const openExportDialog = async () => {
+    setExportOpen(true);
+    setExportResult(null);
+    setExportError('');
+    await loadExportTree('');
   };
 
-  const handleImportConfirm = async () => {
-    if (!importData || !importName.trim()) return;
+  const toggleExportFlight = (id: number) => {
+    setSelectedExportIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectVisibleExportFlights = () => {
+    setSelectedExportIds((prev) => {
+      const next = new Set(prev);
+      visibleExportFlightIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
+  const clearVisibleExportFlights = () => {
+    setSelectedExportIds((prev) => {
+      const next = new Set(prev);
+      visibleExportFlightIds.forEach((id) => next.delete(id));
+      return next;
+    });
+  };
+
+  const submitExport = async () => {
+    if (selectedExportIds.size === 0) return;
+    setExporting(true);
+    setExportError('');
+    setExportResult(null);
     try {
-      await importModel(importName.trim(), importData);
-      setShowImportModal(false);
-      setImportData(null);
-      loadModels();
-      onModelsChanged();
-    } catch (err: any) {
-      setImportError(err.message || '导入失败');
+      const result = await exportSyncPackage(Array.from(selectedExportIds));
+      setExportResult(result);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const openSyncImportDialog = async () => {
+    setSyncImportOpen(true);
+    setSyncImportPreview(null);
+    setSyncImportReport(null);
+    setSyncImportError('');
+    await loadModels();
+  };
+
+  const submitSyncImportPreview = async (pathArg?: string) => {
+    const pkgPath = (pathArg ?? syncImportPath).trim();
+    if (!pkgPath) return;
+    setSyncImportLoading(true);
+    setSyncImportError('');
+    setSyncImportReport(null);
+    try {
+      const preview = await previewSyncImport(pkgPath);
+      setSyncImportPreview(preview);
+      const modelActions: typeof syncModelActions = {};
+      preview.model_plans.forEach((plan) => {
+        modelActions[plan.source_model_id] = plan.matched_model
+          ? { action: 'use_existing', target_model_id: plan.matched_model.id, name: plan.create_name }
+          : { action: 'create', target_model_id: null, name: plan.create_name };
+      });
+      setSyncModelActions(modelActions);
+      const aircraftMappings: typeof syncAircraftMappings = {};
+      preview.aircraft_plans.forEach((plan) => {
+        aircraftMappings[plan.source_aircraft_id] = plan.matched_aircraft
+          ? { action: 'use_existing', target_aircraft_id: plan.matched_aircraft.id, name: plan.create_name }
+          : { action: 'create', target_aircraft_id: null, name: plan.create_name };
+      });
+      setSyncAircraftMappings(aircraftMappings);
+      setSyncConflictPolicy('skip');
+    } catch (e) {
+      setSyncImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncImportLoading(false);
+    }
+  };
+
+  const browseSyncPackage = async () => {
+    setSyncImportBrowsing(true);
+    try {
+      const data = await browseFile({
+        title: '选择同步包',
+        filetypes: '同步包|*.fapkg|所有文件|*.*',
+      });
+      if (data.path && !data.cancelled) {
+        setSyncImportPath(data.path);
+        setSyncImportPreview(null);
+        setSyncImportReport(null);
+        setSyncImportError('');
+        await submitSyncImportPreview(data.path);
+      }
+    } catch (e) {
+      setSyncImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncImportBrowsing(false);
+    }
+  };
+
+  const updateSyncModelAction = (sourceModelId: number, patch: Partial<typeof syncModelActions[number]>) => {
+    setSyncModelActions((prev) => ({
+      ...prev,
+      [sourceModelId]: { ...(prev[sourceModelId] ?? { action: 'create' as const }), ...patch },
+    }));
+  };
+
+  const updateSyncAircraftMapping = (sourceAircraftId: number, patch: Partial<typeof syncAircraftMappings[number]>) => {
+    setSyncAircraftMappings((prev) => ({
+      ...prev,
+      [sourceAircraftId]: { ...(prev[sourceAircraftId] ?? { action: 'create' as const }), ...patch },
+    }));
+  };
+
+  const submitSyncImport = async () => {
+    if (!syncImportPreview) return;
+    setSyncImportLoading(true);
+    setSyncImportError('');
+    setSyncImportReport(null);
+    try {
+      const report = await importSyncPackage({
+        package_path: syncImportPreview.package_path,
+        model_actions: Object.entries(syncModelActions).map(([source_model_id, action]) => ({
+          source_model_id: Number(source_model_id),
+          ...action,
+        })),
+        aircraft_mappings: Object.entries(syncAircraftMappings).map(([source_aircraft_id, mapping]) => ({
+          source_aircraft_id: Number(source_aircraft_id),
+          ...mapping,
+        })),
+        conflict_policy: syncConflictPolicy,
+      });
+      setSyncImportReport(report);
+      await loadModels();
+      await onModelsChanged();
+    } catch (e) {
+      setSyncImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncImportLoading(false);
     }
   };
 
@@ -608,10 +773,26 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       <aside className="w-64 shrink-0 border-r border-gray-200 overflow-y-auto bg-gray-50/50 flex flex-col">
         <div className="p-3 border-b border-gray-200 flex items-center justify-between">
           <span className="text-xs font-medium text-gray-500">机型列表</span>
-          <label className="cursor-pointer text-gray-400 hover:text-blue-500" title="导入机型配置">
-            <Upload className="w-3.5 h-3.5" />
-            <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
-          </label>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={openExportDialog}
+              className="text-gray-400 hover:text-blue-500 p-0.5"
+              title="导出同步包"
+            >
+              <Upload className="w-3.5 h-3.5" />
+            </button>
+            {canImportSyncPackage && (
+              <button
+                type="button"
+                onClick={openSyncImportDialog}
+                className="text-gray-400 hover:text-emerald-500 p-0.5"
+                title="导入同步包"
+              >
+                <Download className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Global summary stats */}
@@ -676,19 +857,6 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                         title="重命名"
                       >
                         <Pencil className="w-3 h-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            const r = await exportModel(m.id);
-                            alert(`已导出到:\n${r.path}`);
-                          } catch (e: any) { alert('导出失败: ' + (e.message || e)); }
-                        }}
-                        className="text-gray-300 hover:text-green-500 p-0.5"
-                        title="导出配置"
-                      >
-                        <Download className="w-3 h-3" />
                       </button>
                       {canDeleteModels && deletingModelId === m.id ? (
                         <span className="text-[10px] text-red-500 whitespace-nowrap">
@@ -1283,45 +1451,320 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
         )}
       </main>
 
-      {/* Import Modal */}
-      {showImportModal && importData && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setShowImportModal(false)}>
-          <div className="bg-white rounded-lg shadow-xl p-6 w-96 max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-semibold text-gray-700 mb-4">导入机型配置</h3>
-            <div className="space-y-3">
+      {/* Sync package export modal */}
+      {exportOpen && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6">
+          <div className="w-full max-w-4xl max-h-[86vh] bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col">
+            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
               <div>
-                <label className="block text-xs text-gray-500 mb-1">来源</label>
-                <div className="text-sm text-gray-800 bg-gray-50 rounded px-2 py-1">
-                  {importData.model?.name}
+                <div className="text-base font-semibold text-gray-900">导出离线同步包</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  已选择 {selectedExportIds.size} 个架次，包将保存到固定 sync_exports 目录
                 </div>
               </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">新机型名称</label>
-                <input
-                  type="text"
-                  value={importName}
-                  onChange={(e) => setImportName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleImportConfirm(); }}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-400"
-                  autoFocus
-                />
-              </div>
-              {importError && (
-                <div className="text-xs text-red-500 bg-red-50 rounded px-2 py-1">{importError}</div>
+              <button
+                onClick={() => setExportOpen(false)}
+                className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+              <input
+                value={exportFilter}
+                onChange={(e) => setExportFilter(e.target.value)}
+                placeholder="筛选机型、飞机、架次、日期、地点、天气"
+                className="flex-1 bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={selectVisibleExportFlights}
+                disabled={visibleExportFlightIds.length === 0}
+                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
+              >
+                全选当前结果
+              </button>
+              <button
+                onClick={clearVisibleExportFlights}
+                disabled={visibleExportFlightIds.length === 0}
+                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
+              >
+                清除当前结果
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto px-5 py-4 space-y-4">
+              {exportLoading ? (
+                <div className="text-sm text-gray-400">加载中...</div>
+              ) : exportTree.length === 0 ? (
+                <div className="text-sm text-gray-400">无可导出的架次</div>
+              ) : (
+                exportTree.map((model) => (
+                  <div key={model.id} className="space-y-2">
+                    <div className="text-sm font-semibold text-gray-800">{model.name}</div>
+                    {model.aircraft.map((aircraft) => (
+                      <div key={aircraft.id} className="ml-3 border-l border-gray-200 pl-3 space-y-2">
+                        <div className="text-xs font-medium text-blue-700">{aircraft.name}</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+                              {aircraft.flights.map((flight) => (
+                                <label
+                                  key={flight.id}
+                                  className="flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-xs hover:bg-gray-50 cursor-pointer"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedExportIds.has(flight.id)}
+                                    onChange={() => toggleExportFlight(flight.id)}
+                                  />
+                                  <span className="font-medium text-gray-800">{flight.name}</span>
+                                  {flight.flight_date && <span className="text-gray-400">{flight.flight_date}</span>}
+                                  {flight.session_key && <span className="font-mono text-gray-400">{flight.session_key}</span>}
+                                  {flight.record_location && <span className="text-gray-400">{flight.record_location}</span>}
+                                </label>
+                              ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))
+              )}
+              {exportError && (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-3 py-2">
+                  {exportError}
+                </div>
+              )}
+              {exportResult && (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-100 rounded px-3 py-2 space-y-1">
+                  <div>导出完成: {exportResult.filename}</div>
+                  <div className="font-mono break-all">{exportResult.path}</div>
+                  <div>架次 {exportResult.flight_count}，原始文件 {exportResult.raw_file_count}</div>
+                </div>
               )}
             </div>
-            <div className="flex justify-end gap-2 mt-4">
+            <div className="px-5 py-4 border-t border-gray-200 flex items-center justify-end gap-2">
               <button
-                type="button"
-                onClick={() => { setShowImportModal(false); setImportData(null); }}
-                className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700"
-              >取消</button>
+                onClick={() => setExportOpen(false)}
+                className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+              >
+                取消
+              </button>
               <button
-                type="button"
-                onClick={handleImportConfirm}
-                disabled={!importName.trim()}
-                className="px-3 py-1.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-              >导入</button>
+                onClick={submitExport}
+                disabled={exporting || selectedExportIds.size === 0}
+                className="px-4 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-40"
+              >
+                {exporting ? '导出中...' : '导出'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sync package import modal */}
+      {syncImportOpen && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6">
+          <div className="w-full max-w-4xl max-h-[86vh] bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col">
+            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
+              <div>
+                <div className="text-base font-semibold text-gray-900">导入外场同步包</div>
+                <div className="text-xs text-gray-500 mt-1">先预览包内容，再确认机型、飞机映射和重复架次策略</div>
+              </div>
+              <button
+                onClick={() => setSyncImportOpen(false)}
+                className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+              <input
+                value={syncImportPath}
+                onChange={(e) => setSyncImportPath(e.target.value)}
+                placeholder="输入 .fapkg 同步包路径，或点击浏览选择"
+                className="flex-1 bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={browseSyncPackage}
+                disabled={syncImportBrowsing || syncImportLoading}
+                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
+              >
+                {syncImportBrowsing ? '...' : '浏览'}
+              </button>
+              <button
+                onClick={() => submitSyncImportPreview()}
+                disabled={syncImportLoading || !syncImportPath.trim()}
+                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
+              >
+                {syncImportLoading ? '处理中...' : '预览'}
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto px-5 py-4 space-y-4">
+              {syncImportError && (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-3 py-2 break-all">
+                  {syncImportError}
+                </div>
+              )}
+
+              {syncImportPreview && (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    <div className="rounded border border-gray-200 px-3 py-2">
+                      <div className="text-gray-400">来源节点</div>
+                      <div className="text-gray-800 font-medium truncate">{syncImportPreview.summary.source_node_id || '-'}</div>
+                    </div>
+                    <div className="rounded border border-gray-200 px-3 py-2">
+                      <div className="text-gray-400">导出时间</div>
+                      <div className="text-gray-800 font-medium truncate">{syncImportPreview.summary.exported_at || '-'}</div>
+                    </div>
+                    <div className="rounded border border-gray-200 px-3 py-2">
+                      <div className="text-gray-400">范围</div>
+                      <div className="text-gray-800 font-medium">
+                        {syncImportPreview.summary.flight_count} 架次 / {syncImportPreview.summary.aircraft_count} 飞机
+                      </div>
+                    </div>
+                    <div className="rounded border border-gray-200 px-3 py-2">
+                      <div className="text-gray-400">导入路径</div>
+                      <div className={syncImportPreview.summary.compatible ? 'text-green-700 font-medium' : 'text-amber-700 font-medium'}>
+                        {syncImportPreview.summary.compatible ? 'parsed.sqlite 直接导入' : '需要原始文件重解析'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {!syncImportPreview.summary.compatible && (
+                    <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-3 py-2">
+                      当前界面暂不执行不兼容包的重解析导入，请使用同 package/schema 版本导出的同步包。
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <div className="text-sm font-semibold text-gray-800">机型处理</div>
+                    {syncImportPreview.model_plans.map((plan) => {
+                      const action = syncModelActions[plan.source_model_id] ?? { action: plan.default_action, name: plan.create_name };
+                      return (
+                        <div key={plan.source_model_id} className="rounded border border-gray-200 px-3 py-2 flex items-center gap-3 text-xs">
+                          <span className="font-medium text-gray-800 w-40 truncate">{plan.source_name}</span>
+                          {plan.matched_model ? (
+                            <span className="text-green-700">匹配到机型：{plan.matched_model.name}</span>
+                          ) : (
+                            <>
+                              <select
+                                value={action.action}
+                                onChange={(e) => updateSyncModelAction(plan.source_model_id, { action: e.target.value as 'use_existing' | 'create' })}
+                                className="bg-white border border-gray-300 rounded px-2 py-1"
+                              >
+                                <option value="create">新建机型</option>
+                                <option value="use_existing">指定已有机型</option>
+                              </select>
+                              {action.action === 'create' ? (
+                                <input
+                                  value={action.name ?? plan.create_name}
+                                  onChange={(e) => updateSyncModelAction(plan.source_model_id, { name: e.target.value })}
+                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
+                                />
+                              ) : (
+                                <select
+                                  value={action.target_model_id ?? ''}
+                                  onChange={(e) => updateSyncModelAction(plan.source_model_id, { target_model_id: e.target.value ? Number(e.target.value) : null })}
+                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
+                                >
+                                  <option value="">选择机型...</option>
+                                  {models.map((model) => (
+                                    <option key={model.id} value={model.id}>{model.name}</option>
+                                  ))}
+                                </select>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-sm font-semibold text-gray-800">飞机映射</div>
+                    {syncImportPreview.aircraft_plans.map((plan) => {
+                      const mapping = syncAircraftMappings[plan.source_aircraft_id] ?? { action: plan.default_action, name: plan.create_name };
+                      return (
+                        <div key={plan.source_aircraft_id} className="rounded border border-gray-200 px-3 py-2 flex items-center gap-3 text-xs">
+                          <span className="font-medium text-gray-800 w-40 truncate">{plan.source_name}</span>
+                          {plan.matched_aircraft ? (
+                            <span className="text-green-700">匹配到飞机：{plan.matched_aircraft.name}</span>
+                          ) : (
+                            <>
+                              <select
+                                value={mapping.action}
+                                onChange={(e) => updateSyncAircraftMapping(plan.source_aircraft_id, { action: e.target.value as 'use_existing' | 'create' })}
+                                className="bg-white border border-gray-300 rounded px-2 py-1"
+                              >
+                                <option value="create">新建飞机</option>
+                                <option value="use_existing">指定已有飞机</option>
+                              </select>
+                              {mapping.action === 'create' ? (
+                                <input
+                                  value={mapping.name ?? plan.create_name}
+                                  onChange={(e) => updateSyncAircraftMapping(plan.source_aircraft_id, { name: e.target.value })}
+                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
+                                />
+                              ) : (
+                                <select
+                                  value={mapping.target_aircraft_id ?? ''}
+                                  onChange={(e) => updateSyncAircraftMapping(plan.source_aircraft_id, { target_aircraft_id: e.target.value ? Number(e.target.value) : null })}
+                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
+                                >
+                                  <option value="">选择飞机...</option>
+                                  {plan.existing_aircraft.map((aircraft) => (
+                                    <option key={aircraft.id} value={aircraft.id}>{aircraft.name}</option>
+                                  ))}
+                                </select>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="rounded border border-gray-200 px-3 py-2 text-xs space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-gray-800">重复架次</span>
+                      <span className="text-gray-500">{syncImportPreview.duplicates.length} 个自动匹配重复项</span>
+                    </div>
+                    <select
+                      value={syncConflictPolicy}
+                      onChange={(e) => setSyncConflictPolicy(e.target.value as 'skip' | 'update_records')}
+                      className="bg-white border border-gray-300 rounded px-2 py-1"
+                    >
+                      <option value="skip">保持现状，不更新记录字段</option>
+                      <option value="update_records">更新已有架次名称和飞行记录字段</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {syncImportReport && (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-100 rounded px-3 py-2 space-y-1">
+                  <div>导入完成：{syncImportReport.status}</div>
+                  <div>
+                    新增 {syncImportReport.imported_flights.length}，跳过 {syncImportReport.skipped_flights.length}，
+                    更新 {syncImportReport.updated_flights.length}，warning {syncImportReport.warnings.length}，
+                    失败 {syncImportReport.failures.length}
+                  </div>
+                  <div>解析数据行：{syncImportReport.parsed_rows ?? 0}，原始文件：{syncImportReport.raw_files?.attached ?? 0}</div>
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-4 border-t border-gray-200 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setSyncImportOpen(false)}
+                className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitSyncImport}
+                disabled={syncImportLoading || !syncImportPreview || !syncImportPreview.summary.compatible}
+                className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-500 disabled:opacity-40"
+              >
+                {syncImportLoading ? '导入中...' : '确认导入'}
+              </button>
             </div>
           </div>
         </div>

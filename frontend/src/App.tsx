@@ -530,7 +530,6 @@ export default function App() {
                 <ImportPage
                   onImported={onDataChanged}
                   canDeleteFlights={hasCapability('delete_flights')}
-                  isLoggedIn={!!appContext?.user || !!runtimeContext?.server_user}
                   serverOnline={serverOnline}
                 />
               </ErrorBoundary>
@@ -577,6 +576,7 @@ export default function App() {
                   modelsVersion={modelsVersion}
                   capabilities={mergedCapabilities}
                   serverOnline={serverOnline}
+                  isLoggedIn={!!appContext?.user || !!runtimeContext?.server_user}
                 />
               </ErrorBoundary>
             </div>

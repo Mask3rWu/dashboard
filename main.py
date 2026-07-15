@@ -813,6 +813,35 @@ def list_subdirs(path: str):
         raise HTTPException(403, "Permission denied")
 
 
+@app.get("/api/files/browse")
+def browse_file(title: str = "选择文件", filetypes: str = ""):
+    """Open native single-file picker dialog via tkinter.
+
+    filetypes is a pipe-separated list of "label|pattern" pairs, e.g.
+    "同步包|*.fapkg|所有文件|*.*". Empty shows all files.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        ft: list[tuple[str, str]] = []
+        if filetypes:
+            parts = [p for p in filetypes.split('|') if p]
+            for i in range(0, len(parts) - 1, 2):
+                ft.append((parts[i], parts[i + 1]))
+        if not ft:
+            ft = [('All Files', '*.*')]
+        selected_path = filedialog.askopenfilename(title=title, filetypes=ft)
+        root.destroy()
+        if selected_path and os.path.isfile(selected_path):
+            return {'path': selected_path}
+        return {'path': '', 'cancelled': True}
+    except Exception as e:
+        raise HTTPException(500, f"File browser failed: {e}")
+
+
 # ─── Model Routes ──────────────────────────────────────────
 
 @app.get("/api/models")
