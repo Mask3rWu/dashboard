@@ -1,12 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from configparser import ConfigParser
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
 
+# PyInstaller injects SPECPATH = absolute directory holding this spec (packaging/).
+# Resolve every path from it so the spec works regardless of the invocation CWD.
+ROOT = os.path.dirname(SPECPATH)
 
-source_config = Path('flight_analyzer.ini')
-packaged_config = Path('build') / 'flight_analyzer.ini'
+# The runtime config stays at the project root on purpose; the spec only embeds
+# the desktop runtime settings (local/dev), never server credentials.
+source_config = Path(ROOT) / 'flight_analyzer.ini'
+packaged_config = Path(SPECPATH) / 'build' / 'flight_analyzer.ini'
 parser = ConfigParser(interpolation=None)
 parser.read(source_config, encoding='utf-8')
 packaged_parser = ConfigParser(interpolation=None)
@@ -18,8 +24,8 @@ with packaged_config.open('w', encoding='utf-8') as f:
     packaged_parser.write(f)
 
 datas = [
-    ('frontend/dist', 'frontend/dist'),
-    ('backend', 'backend'),
+    (str(Path(ROOT) / 'frontend' / 'dist'), 'frontend/dist'),
+    (str(Path(ROOT) / 'backend'), 'backend'),
     # Include only the desktop runtime settings, never server credentials.
     # A flight_analyzer.ini next to the EXE still takes precedence.
     (str(packaged_config), '.'),
@@ -43,8 +49,8 @@ hiddenimports = [
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    [str(Path(ROOT) / 'main.py')],
+    pathex=[ROOT],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

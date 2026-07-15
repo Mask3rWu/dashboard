@@ -5,7 +5,7 @@ echo ========================================
 echo.
 
 echo [1/2] Building frontend...
-cd /d "%~dp0frontend"
+cd /d "%~dp0..\frontend"
 call npm run build
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Frontend build failed!
@@ -15,7 +15,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo [2/2] Starting backend...
-cd /d "%~dp0"
+cd /d "%~dp0.."
 call .venv\Scripts\activate.bat
 python main.py
 

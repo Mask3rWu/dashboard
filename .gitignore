@@ -2,6 +2,7 @@
 20250323153351_535/
 *.rar
 flight_analyzer.ini
+.devdata/
 
 # Python
 __pycache__/
@@ -12,6 +13,8 @@ venv/
 # PyInstaller
 build/
 dist/
+packaging/dist/
+packaging/build/
 
 # Frontend build
 frontend/dist/
@@ -33,6 +36,5 @@ flights.db
 
 # Others
 .understand-anything/
-docs/
 *export.json
 generate_requirements_docx.ps1

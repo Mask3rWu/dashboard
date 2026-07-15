@@ -84,7 +84,7 @@ server_base_url = http://服务器IP:9000/api
 然后正常启动本地软件：
 
 ```powershell
-.\run.ps1
+.\script\run.ps1
 ```
 
 或开发模式分别启动前后端：
@@ -123,7 +123,7 @@ python server_main.py
 4. 另开一个终端启动本地软件：
 
 ```powershell
-.\run.ps1
+.\script\run.ps1
 ```
 
 5. 在同步页确认 `online`，登录服务器账号，执行“只上传”“从服务器拉取到本地”或“同步一次”。
@@ -134,7 +134,7 @@ python server_main.py
 
 ```powershell
 $env:SERVER_BASE_URL = "http://10.0.0.12:9000/api"
-.\run.ps1
+.\script\run.ps1
 ```
 
 配置文件查找顺序：
@@ -150,7 +150,7 @@ $env:SERVER_BASE_URL = "http://10.0.0.12:9000/api"
 如果软件要在完全不能连接服务器的地方首次使用，可以在打包前从统一服务器生成内置机型 seed：
 
 ```powershell
-.\.venv\Scripts\python.exe .\tools\generate_builtin_model_seeds.py
+.\.venv\Scripts\python.exe .\script\generate_builtin_model_seeds.py
 ```
 
 生成文件：
@@ -162,8 +162,7 @@ backend\builtin_model_seeds.json
 之后再执行正常打包：
 
 ```powershell
-cd frontend && npm run build && cd ..
-.\.venv\Scripts\pyinstaller FlightAnalyzer.spec
+.\script\build.ps1
 ```
 
 打包后的软件第一次启动时，`init_db()` 会自动读取 `backend\builtin_model_seeds.json`，把缺失的机型、数据类型、列定义和动态数据表写入本地 `%APPDATA%\FlightAnalyzer\data.db`。如果本地已经存在同 `server_id`、`client_uid` 或同名机型，则跳过，不覆盖用户已有配置。
@@ -190,7 +189,7 @@ password = 你的服务器登录密码
 清空数据
 
 ```
-.venv/Scripts/python tools/reset_project_data.py --scope all --yes
+.venv/Scripts/python script/reset_project_data.py --scope all --yes
 ```
 
 

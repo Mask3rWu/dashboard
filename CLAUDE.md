@@ -25,15 +25,14 @@ npm install
 npm run dev          # 开发模式（Vite HMR）
 ```
 
-也可用根目录 `run.sh` / `run.bat` / `run.ps1` 启动。
+也可用 `script/run.sh` / `script/run.bat` / `script/run.ps1` 启动。
 
 ## 打包
 
 **最小依赖原则：用 `.venv` 打包，避免 Anaconda 全量环境导致体积膨胀和依赖冲突。**
 
 ```bash
-cd frontend && npm run build && cd ..
-.venv/Scripts/pyinstaller FlightAnalyzer.spec     # 输出 dist/FlightAnalyzer.exe
+script/build.sh          # Windows 用 script/build.bat：构建前端 + PyInstaller，输出 packaging/dist/FlightAnalyzer.exe
 ```
 
 frozen 模式（`console=False`）下 uvicorn 日志会因 `sys.stdout` 为 `None` 崩溃，修复见 `main.py:_build_log_config()` 的 docstring。

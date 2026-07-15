@@ -10,7 +10,7 @@ data_dir =
 server_base_url = http://SERVER_IP_OR_HOSTNAME:9000/api
 
 [server_auth]
-; Used by tools/generate_builtin_model_seeds.py before packaging.
+; Used by script/generate_builtin_model_seeds.py before packaging.
 ; This is the Flight Analyzer server login, not the MySQL account.
 username = admin
 password = CHANGE_ME
