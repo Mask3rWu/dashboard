@@ -265,6 +265,10 @@ def get_engine() -> Engine:
     return _ENGINE
 
 
+def check_connection(conn: "Connection") -> None:
+    conn.execute(text("SELECT 1"))
+
+
 def utcnow() -> datetime:
     return datetime.utcnow()
 

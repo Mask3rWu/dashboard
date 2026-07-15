@@ -19,7 +19,7 @@ capabilities_router = APIRouter()
 
 @router.get("/api/health")
 def health(request: Request, conn=Depends(connection)):
-    conn.exec_driver_sql("SELECT 1")
+    db.check_connection(conn)
     return {
         "status": "ok", "version": request.app.version, "db": "mysql",
         "server_data_dir": db.SERVER_DATA_DIR,

@@ -1,21 +1,13 @@
 import { useState, useCallback, useEffect } from 'react';
 import { scanFolder, importSession, browseFolder, type ScanResult, type SessionPreview } from '../api/imports';
-import { listFlights, deleteFlight, updateFlight, type Flight, type FlightRecordFields } from '../api/flights';
-import { listModels, createModelFromScan, listAircraft, createAircraft, type AircraftModel, type Aircraft, type DeleteScope } from '../api/models';
-import {
-  SYNC_STATE_FILTERS,
-  deleteActionLabel,
-  deleteScopeFor,
-  matchesSyncStateFilter,
-  syncStateClass,
-  syncStateLabel,
-  type SyncStateFilter,
-} from '../syncStatus';
-import FlightRecordForm from '../features/flights/FlightRecordForm';
+import { listFlights, type Flight, type FlightRecordFields } from '../api/flights';
+import { listModels, createModelFromScan, listAircraft, createAircraft, type AircraftModel, type Aircraft } from '../api/models';
 import { emptyRecord } from '../features/flights/recordFields';
 import DirectorySummary from '../features/import/DirectorySummary';
 import DirectoryPicker from '../features/import/DirectoryPicker';
 import ModelFromScanForm from '../features/import/ModelFromScanForm';
+import ImportedFlightList from '../features/import/ImportedFlightList';
+import SessionImportList from '../features/import/SessionImportList';
 
 
 interface Props {
@@ -51,17 +43,8 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
   const [sessionRecords, setSessionRecords] = useState<Record<string, FlightRecordFields>>({});
   const [sessionDates, setSessionDates] = useState<Record<string, string>>({});
 
-  // Flight management
+  // Imported flights
   const [flights, setFlights] = useState<Flight[]>([]);
-  const [flightSearch, setFlightSearch] = useState('');
-  const [syncFilter, setSyncFilter] = useState<SyncStateFilter>('all');
-  const [editingFlightId, setEditingFlightId] = useState<number | null>(null);
-  const [editName, setEditName] = useState('');
-  const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
-
-  // Create aircraft inline
-  const [showCreateAircraft, setShowCreateAircraft] = useState<Record<string, boolean>>({});
-  const [newAircraftSerial, setNewAircraftSerial] = useState('');
 
   // New-format model creation, including a manual override of a recommended match.
   const [newModelName, setNewModelName] = useState('');
@@ -70,34 +53,6 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
   const [showNewModelForm, setShowNewModelForm] = useState(false);
 
   function sessionKey(serial: string, skey: string) { return `${serial}__${skey}`; }
-
-  // ─── Dynamic duplicate status ──────────────────────────────
-  // Evaluates whether the session is a duplicate based on which
-  // aircraft the user currently has selected. A session is only
-  // "imported" if the SAME aircraft already has this date+time.
-
-  type EffectiveStatus = 'new' | 'imported' | 'conflict';
-
-  function getEffectiveStatus(session: SessionPreview, selectedAircraftSerial: string | null, flightDate: string): EffectiveStatus {
-    if (session.flight_date && flightDate && flightDate !== session.flight_date) return 'new';
-
-    // Backend already confirmed: auto-detected serial matches an imported flight
-    if (session.import_status === 'imported') return 'imported';
-
-    // No conflicts at all → clean new session
-    if (!session.conflicting_aircraft?.length) return 'new';
-
-    // Has conflicts: check if the user-selected aircraft is the conflicting one
-    if (selectedAircraftSerial) {
-      const match = session.conflicting_aircraft.find(
-        c => c.aircraft_serial === selectedAircraftSerial
-      );
-      if (match) return 'imported';  // same aircraft → duplicate
-    }
-
-    // Different aircraft (or no aircraft selected yet) → new, but warn about conflict
-    return 'conflict';
-  }
 
   // ─── Load context ────────────────────────────────────────
 
@@ -321,8 +276,6 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
     if (!serial.trim() || !selectedModelId) return;
     try {
       await createAircraft(selectedModelId, serial.trim());
-      setShowCreateAircraft({});
-      setNewAircraftSerial('');
       const updated = await listAircraft(selectedModelId);
       setAircraftList(updated.aircraft);
       // Auto-assign to session if provided
@@ -333,8 +286,10 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
           setErrorKeys((prev) => { const n = { ...prev }; delete n[sessionKey]; return n; });
         }
       }
+      return true;
     } catch {
       // Inline creation errors are surfaced by leaving the assignment unresolved.
+      return false;
     }
   };
 
@@ -352,25 +307,6 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
     loadFlights();
   }, [loadFlights]);
 
-  const handleDelete = async (flight: Flight) => {
-    await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
-    setDeletingFlightId(null);
-    await loadFlights();
-    await onImported();
-    await refreshScan();
-  };
-
-  const handleRename = async (id: number) => {
-    if (!editName.trim()) { setEditingFlightId(null); return; }
-    await updateFlight(id, editName.trim());
-    setEditingFlightId(null);
-    loadFlights();
-  };
-
-  const startRename = (f: Flight) => { setEditingFlightId(f.id); setEditName(f.name); };
-
-  const getSessionRecord = (key: string): FlightRecordFields => sessionRecords[key] ?? emptyRecord();
-
   const getSessionDate = (session: SessionPreview): string => {
     const key = sessionKey(session.aircraft_serial, session.session_key);
     return sessionDates[key] ?? session.flight_date ?? '';
@@ -387,27 +323,6 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
       [key]: { ...emptyRecord(), ...(prev[key] ?? {}), ...patch },
     }));
   };
-
-  const filteredFlights = flights.filter((f) => {
-    if (!matchesSyncStateFilter(f, syncFilter)) return false;
-    if (!flightSearch.trim()) return true;
-    const s = flightSearch.toLowerCase();
-    return f.name.toLowerCase().includes(s)
-      || (f.aircraft_name || '').toLowerCase().includes(s)
-      || (f.model_name || '').toLowerCase().includes(s);
-  });
-
-  // ─── Render data type badges ──────────────────────────────
-
-  const renderBadges = (dataTypes: Record<string, number>) => (
-    <div className="flex flex-wrap gap-1">
-      {Object.entries(dataTypes).map(([type, count]) => (
-        <span key={type} className="px-1.5 py-0.5 bg-gray-100 rounded text-xs text-gray-600">
-          {type} {count > 1 && `×${count}`}
-        </span>
-      ))}
-    </div>
-  );
 
   // ─── UI ───────────────────────────────────────────────────
 
@@ -526,256 +441,50 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
               onCancel={() => setShowNewModelForm(false)}
             />
           )}
-          {/* Sessions */}
           {scanResult.sessions.length > 0 && (
-            <div className="space-y-3">
-              {scanResult.sessions.map((session) => {
-                const key = sessionKey(session.aircraft_serial, session.session_key);
-                const isImporting = importingKeys.has(key);
-                const aid = getAircraftId(session);
-                const selectedSerial = aid
-                  ? (aircraftList.find(a => a.id === aid)?.name ?? session.aircraft_serial)
-                  : session.aircraft_serial;
-                const flightDate = getSessionDate(session);
-                const effStatus = getEffectiveStatus(session, selectedSerial, flightDate);
-                const isImported = importedKeys.has(key)
-                  || (effStatus === 'imported' && !importingKeys.has(key));
-                const isConflict = effStatus === 'conflict';
-                const errMsg = errorKeys[key];
-                const record = getSessionRecord(key);
-
-                // Card border based on effective status
-                const cardBorder = errMsg
-                  ? 'border-red-200 bg-red-50/30'
-                  : isImported
-                    ? 'border-green-200 bg-green-50/20'
-                    : isConflict
-                      ? 'border-amber-200 bg-amber-50/10'
-                      : 'border-gray-200';
-
-                return (
-                  <div key={key}
-                    className={`bg-white rounded-lg p-4 border transition-colors ${cardBorder}`}>
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="space-y-2 min-w-0">
-                        <div className="flex items-center gap-3 flex-wrap">
-                          {/* Aircraft serial / assignment status */}
-                          {aid ? (
-                            <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold border border-blue-200">
-                              {selectedSerial}
-                            </span>
-                          ) : session.aircraft_serial ? (
-                            <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold border border-amber-200">
-                              {session.aircraft_serial}（将自动创建）
-                            </span>
-                          ) : selectedModelId ? (
-                            <span className="px-2 py-0.5 bg-red-50 text-red-500 rounded text-xs font-medium border border-red-200">
-                              需要分配飞机
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 bg-gray-100 text-gray-400 rounded text-xs border border-gray-200">
-                              请先选择机型
-                            </span>
-                          )}
-                          {/* Session key + flight date */}
-                          <span className="text-sm font-mono text-gray-700">{session.session_key || '(默认场次)'}</span>
-                          {!isImported && (
-                            <label className="flex items-center gap-1 text-xs text-gray-500">
-                              <span>时间</span>
-                              <input
-                                type="date"
-                                required
-                                value={flightDate}
-                                onChange={(e) => updateSessionDate(key, e.target.value)}
-                                className={`bg-white border rounded px-1.5 py-0.5 text-xs text-gray-700 focus:outline-none focus:border-blue-500 ${flightDate ? 'border-gray-300' : 'border-red-300'}`}
-                              />
-                            </label>
-                          )}
-
-                          {/* Aircraft assignment controls (always shown when model selected) */}
-                          {selectedModelId && !isImported && (
-                            <div className="flex items-center gap-1">
-                              <select
-                                value={aid ?? ''}
-                                onChange={(e) => {
-                                  const aId = e.target.value ? Number(e.target.value) : null;
-                                  if (aId) {
-                                    setSessionAircraftMap((prev) => ({ ...prev, [key]: aId }));
-                                  } else {
-                                    // Revert to auto-detected — remove manual assignment
-                                    setSessionAircraftMap((prev) => {
-                                      const n = { ...prev };
-                                      delete n[key];
-                                      return n;
-                                    });
-                                  }
-                                  setErrorKeys((prev) => { const n = { ...prev }; delete n[key]; return n; });
-                                }}
-                                className="bg-white border border-gray-300 rounded px-1.5 py-0.5 text-xs"
-                              >
-                                <option value="">选择已有飞机...</option>
-                                {aircraftList.map((a) => (
-                                  <option key={a.id} value={a.id}>{a.name}</option>
-                                ))}
-                              </select>
-                              {showCreateAircraft[key] ? (
-                                <div className="flex items-center gap-1">
-                                  <input type="text" value={newAircraftSerial}
-                                    onChange={(e) => setNewAircraftSerial(e.target.value)}
-                                    placeholder={session.aircraft_serial || "输入飞机序号"}
-                                    className="bg-white border border-blue-400 rounded px-1 py-0.5 text-xs w-24 focus:outline-none"
-                                    onKeyDown={(e) => { if (e.key === 'Enter') handleCreateAircraft(newAircraftSerial || session.aircraft_serial, key); }} />
-                                  <button onClick={() => handleCreateAircraft(newAircraftSerial || session.aircraft_serial, key)}
-                                    className="text-[10px] px-1.5 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">创建</button>
-                                  <button onClick={() => setShowCreateAircraft((p) => ({ ...p, [key]: false }))}
-                                    className="text-[10px] px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">取消</button>
-                                </div>
-                              ) : (
-                                <button onClick={() => { setShowCreateAircraft((p) => ({ ...p, [key]: true })); setNewAircraftSerial(session.aircraft_serial || ''); }}
-                                  className="text-[10px] text-blue-600 hover:text-blue-500 whitespace-nowrap">+ 新飞机</button>
-                              )}
-                            </div>
-                          )}
-
-                          {isImporting && <span className="text-xs text-blue-500 animate-pulse">⏳ 导入中...</span>}
-                          {isImported && !isImporting && <span className="text-xs text-green-600 font-medium">✓ 已导入</span>}
-                          {isConflict && !isImported && !isImporting && (
-                            <span className="text-xs text-amber-600 font-medium">⚠ 存在冲突</span>
-                          )}
-                          {errMsg && <span className="text-xs text-red-500" title={errMsg}>✗ 失败</span>}
-                          <span className="text-xs text-gray-400">{session.file_count} 个文件</span>
-                          {session.record_defaults && (
-                            <span className="text-xs text-emerald-600" title={session.record_source || 'FlightRecord XML'}>XML预填</span>
-                          )}
-                          {session.record_defaults_error && (
-                            <span className="text-xs text-red-500" title={session.record_defaults_error}>XML错误</span>
-                          )}
-                          {effStatus === 'imported' && session.existing_flight_name && (
-                            <span className="text-[10px] text-gray-400">当前: {session.existing_flight_name}</span>
-                          )}
-                        </div>
-                        {/* Conflict warning — different aircraft already has this date+time */}
-                        {isConflict && session.conflicting_aircraft && (
-                          <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                            ⚠ 飞机「{session.conflicting_aircraft.map(c => c.aircraft_serial).join('、')}」已导入此日期+时间的飞行。
-                            如当前确认为不同飞机，可继续导入。
-                          </div>
-                        )}
-                        {renderBadges(session.data_types)}
-                        {!isImported && (
-                          <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
-                            <FlightRecordForm
-                              value={record}
-                              onChange={(patch) => updateSessionRecord(key, patch)}
-                              variant="import"
-                            />
-                          </div>
-                        )}
-                        {errMsg && <p className="text-xs text-red-500">{errMsg}</p>}
-                      </div>
-                      <div className="shrink-0 flex items-center gap-2">
-                        {!isImported && !isImporting && (
-                          <button onClick={() => handleImport(session)} disabled={(!selectedModelId && !aid) || !flightDate}
-                            className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs font-medium"
-                            title={!flightDate ? '请先填写飞行日期' : (isConflict ? '该日期+时间已有其他飞机导入，如确认为不同飞机则可导入' : (!selectedModelId && !aid ? '请先选择机型' : '导入'))}>
-                            导入
-                          </button>
-                        )}
-                        {isImporting && (
-                          <button disabled
-                            className="px-3 py-1 bg-gray-200 text-gray-400 rounded text-xs cursor-not-allowed">导入中...</button>
-                        )}
-                        {errMsg && (
-                          <button onClick={() => handleImport(session)}
-                            className="px-2 py-1 text-xs text-blue-600 hover:text-blue-500">重试</button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <SessionImportList
+              sessions={scanResult.sessions}
+              selectedModelId={selectedModelId}
+              aircraft={aircraftList}
+              aircraftAssignments={sessionAircraftMap}
+              importingKeys={importingKeys}
+              importedKeys={importedKeys}
+              errors={errorKeys}
+              records={sessionRecords}
+              dates={sessionDates}
+              onAssignAircraft={(key, aircraftId) => {
+                setSessionAircraftMap((previous) => {
+                  const next = { ...previous };
+                  if (aircraftId) next[key] = aircraftId;
+                  else delete next[key];
+                  return next;
+                });
+                setErrorKeys((previous) => {
+                  const next = { ...previous };
+                  delete next[key];
+                  return next;
+                });
+              }}
+              onDateChange={updateSessionDate}
+              onRecordChange={updateSessionRecord}
+              onCreateAircraft={handleCreateAircraft}
+              onImport={handleImport}
+            />
           )}
         </section>
       )}
 
-      {/* Section 3: Imported Flights */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold text-gray-900">已导入飞行</h2>
-          <div className="flex items-center gap-3">
-            <input type="text" value={flightSearch} onChange={(e) => setFlightSearch(e.target.value)}
-              placeholder="搜索架次..."
-              className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-44" />
-            <select
-              value={syncFilter}
-              onChange={(e) => setSyncFilter(e.target.value as SyncStateFilter)}
-              className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-            >
-              {SYNC_STATE_FILTERS.map((item) => (
-                <option key={item.key} value={item.key}>{item.label}</option>
-              ))}
-            </select>
-            <button onClick={loadFlights} className="text-xs text-blue-600 hover:text-blue-500">刷新</button>
-          </div>
-        </div>
-        {filteredFlights.length === 0 && flights.length > 0 ? (
-          <p className="text-sm text-gray-400">无匹配结果</p>
-        ) : flights.length === 0 ? (
-          <p className="text-sm text-gray-400">暂无已导入的飞行数据</p>
-        ) : (
-          <div className="space-y-2">
-            {filteredFlights.map((f) => (
-              <div key={f.id} className="flex items-center justify-between bg-white rounded-lg px-4 py-3 border border-gray-200">
-                <div className="flex items-center gap-4">
-                  <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
-                    {f.model_name}
-                  </span>
-                  <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
-                    {f.aircraft_name || f.drone_id || '?'}
-                  </span>
-                  {editingFlightId === f.id ? (
-                    <div className="flex items-center gap-1">
-                      <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') handleRename(f.id); if (e.key === 'Escape') setEditingFlightId(null); }}
-                        className="bg-white border border-blue-400 rounded px-2 py-0.5 text-sm text-gray-800 focus:outline-none w-40" autoFocus />
-                      <button onClick={() => handleRename(f.id)} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">保存</button>
-                      <button onClick={() => setEditingFlightId(null)} className="text-xs px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">取消</button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1 group">
-                      <span className="text-sm font-medium text-gray-800">{f.name}</span>
-                      <button onClick={() => startRename(f)}
-                        className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity text-xs">✏️</button>
-                    </div>
-                  )}
-                  {f.session_key && <span className="text-xs text-gray-400 font-mono">{f.session_key}</span>}
-                  {f.duration_sec && <span className="text-xs text-gray-400">{Math.round(f.duration_sec / 60)}分钟</span>}
-                  <span className="text-xs text-gray-400">原始文件 {f.raw_file_count ?? 0}</span>
-                  <span className={`text-[10px] px-2 py-0.5 rounded border ${syncStateClass(f.sync_state)}`}>
-                    {syncStateLabel(f.sync_state)}
-                  </span>
-                  {(f.raw_warnings?.length ?? 0) > 0 && (
-                    <span className="text-xs text-amber-600">warning {f.raw_warnings!.length}</span>
-                  )}
-                </div>
-                {canDeleteFlights && deletingFlightId === f.id ? (
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-gray-500">{deleteActionLabel(f, serverOnline)}?</span>
-                    <button onClick={() => handleDelete(f)} className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-500">是</button>
-                    <button onClick={() => setDeletingFlightId(null)} className="text-xs px-2 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">否</button>
-                  </div>
-                ) : canDeleteFlights ? (
-                  <button onClick={() => setDeletingFlightId(f.id)}
-                    className="text-xs text-red-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50">删除</button>
-                ) : (
-                  <span className="text-xs text-gray-300 px-2 py-1" title="当前环境或登录状态无删除权限">删除</span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+      <ImportedFlightList
+        flights={flights}
+        canDeleteFlights={canDeleteFlights}
+        serverOnline={serverOnline}
+        onRefresh={loadFlights}
+        onDeleted={async () => {
+          await loadFlights();
+          await onImported();
+          await refreshScan();
+        }}
+      />
 
     </div>
   );

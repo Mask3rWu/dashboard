@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { Pencil, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 import { getAlignedData, getStats, getCorrelation, getAnomaly, listPresets, createPreset, deletePreset, listFilterPresets, createFilterPreset, deleteFilterPreset, type ColumnGroup, type AlignedData, type FlightStats, type Preset, type FilterSpec, type FilterPreset, type AnomalyData, type CorrelationData } from '../api/analysis';
 import { getFlight, updateFlight, deleteFlight, type Flight } from '../api/flights';
-import { updateModelColumn, listAircraft, type AircraftModel, type Aircraft, type DeleteScope } from '../api/models';
+import { updateModelColumn, type AircraftModel, type Aircraft, type DeleteScope } from '../api/models';
 import FilterBar from '../components/FilterBar';
-import { deleteActionLabel, deleteScopeFor, syncStateClass, syncStateLabel } from '../syncStatus';
+import { deleteActionLabel, deleteScopeFor } from '../syncStatus';
 import { AnomalyChart, CorrelationHeatmap } from '../features/analysis/AnalysisCharts';
 import FlightChart, { type FlightChartHandle } from '../features/analysis/FlightChart';
+import FlightTree from '../features/analysis/FlightTree';
 
 interface Props {
   active: boolean;
@@ -77,77 +77,6 @@ export default function FlightView({
   const [editName, setEditName] = useState('');
   const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
 
-  // ─── Tree selector state ─────────────────────────────────
-  const [treeOpen, setTreeOpen] = useState(false);
-  const [treeModelId, setTreeModelId] = useState<number | null>(null);
-  const [treeAircraftId, setTreeAircraftId] = useState<number | null>(null);
-  const [treeAircraftList, setTreeAircraftList] = useState<Aircraft[]>([]);
-  const treeRef = useRef<HTMLDivElement>(null);
-
-  // Close tree on outside click
-  useEffect(() => {
-    if (!treeOpen) return;
-    const onMouseDown = (e: MouseEvent) => {
-      if (treeRef.current && !treeRef.current.contains(e.target as Node)) {
-        setTreeOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, [treeOpen]);
-
-  const openTreeModel = async (modelId: number) => {
-    setTreeModelId(modelId);
-    setTreeAircraftId(null);
-    try {
-      const data = await listAircraft(modelId);
-      setTreeAircraftList(data.aircraft);
-    } catch { setTreeAircraftList([]); }
-  };
-
-  const openTreeAircraft = (acId: number) => {
-    setTreeAircraftId(acId);
-  };
-
-  const selectTreeFlight = (flightId: number) => {
-    const f = flights.find(fl => fl.id === flightId);
-    if (f) {
-      onSelectModel(f.model_id);
-      onSelectAircraft(f.aircraft_id);
-    }
-    onSelectFlight(flightId);
-    setTreeOpen(false);
-  };
-
-  // Search-matched flight IDs (for upward filtering of model/aircraft)
-  const searchMatchedIds = (() => {
-    if (!flightSearch.trim()) return null;
-    const s = flightSearch.toLowerCase();
-    return new Set(
-      flights.filter(f =>
-        f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s)
-      ).map(f => f.id)
-    );
-  })();
-
-  // Models with at least one flight matching search
-  const visibleModels = searchMatchedIds
-    ? models.filter(m => flights.some(f => f.model_id === m.id && searchMatchedIds.has(f.id)))
-    : models;
-
-  // Aircraft (for expanded model) with at least one flight matching search
-  const visibleTreeAircraft = searchMatchedIds
-    ? treeAircraftList.filter(a => flights.some(f => f.aircraft_id === a.id && searchMatchedIds.has(f.id)))
-    : treeAircraftList;
-
-  // Tree column flights filtered by selected aircraft + search
-  const treeFlightsList = (treeAircraftId
-    ? flights.filter(f => f.aircraft_id === treeAircraftId)
-    : []).filter(f => {
-      if (!flightSearch.trim()) return true;
-      const s = flightSearch.toLowerCase();
-      return f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s);
-    });
 
   const flightChartRef = useRef<FlightChartHandle>(null);
   const presetNameRef = useRef<HTMLInputElement>(null);
@@ -449,145 +378,24 @@ export default function FlightView({
     <div className="h-full flex flex-col">
       {/* ── Toolbar ────────────────────────────────────── */}
       <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-200 bg-gray-50/80 shrink-0 flex-wrap relative">
-        {/* Tree selector: Model → Aircraft → Flight */}
-        <div className="flex items-center gap-2" ref={treeRef}>
-          {/* Trigger button */}
-          <button
-            onClick={() => setTreeOpen(!treeOpen)}
-            className="flex items-center gap-1 bg-white border border-gray-300 rounded-lg pl-3 pr-2 py-1.5 text-sm hover:border-blue-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 min-w-[180px] max-w-[360px]"
-          >
-            {selectedFlightId ? (
-              <span className="text-gray-700 truncate">
-                {(() => {
-                  const f = flights.find(fl => fl.id === selectedFlightId);
-                  const m = models.find(mo => mo.id === selectedModelId);
-                  const a = aircraft.find(ac => ac.id === selectedAircraftId);
-                  if (f && m && a) return `${m.name} / ${a.name} / ${f.name}`;
-                  return f?.name || '选择架次...';
-                })()}
-              </span>
-            ) : (
-              <span className="text-gray-400">选择架次...</span>
-            )}
-            <ChevronDown className={`w-4 h-4 text-gray-400 ml-auto shrink-0 transition-transform ${treeOpen ? 'rotate-180' : ''}`} />
-          </button>
-
-          {/* Tree popover */}
-          {treeOpen && (
-            <div className="absolute top-full left-4 mt-1 z-50 flex bg-white border border-gray-200 rounded-lg shadow-lg max-h-[320px]">
-              {/* Column 1: Models */}
-              <div className="w-44 border-r border-gray-100 overflow-y-auto py-1">
-                <div className="px-3 py-1.5 text-xs text-gray-400 font-medium sticky top-0 bg-white">机型</div>
-                {visibleModels.length === 0 ? (
-                  <div className="px-3 py-2 text-xs text-gray-400">无匹配机型</div>
-                ) : (
-                  visibleModels.map((m) => (
-                    <button
-                      key={m.id}
-                      onMouseEnter={() => openTreeModel(m.id)}
-                      className={`w-full text-left px-3 py-1.5 text-sm flex items-center justify-between ${
-                        treeModelId === m.id
-                          ? 'bg-blue-50 text-blue-700'
-                          : 'text-gray-700 hover:bg-gray-50'
-                      }`}
-                    >
-                      <span className="truncate">{m.name}</span>
-                      <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
-                    </button>
-                  ))
-                )}
-              </div>
-
-              {/* Column 2: Aircraft (visible when model selected) */}
-              {treeModelId && (
-                <div className="w-44 border-r border-gray-100 overflow-y-auto py-1">
-                  <div className="px-3 py-1.5 text-xs text-gray-400 font-medium sticky top-0 bg-white">飞机</div>
-                  {visibleTreeAircraft.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-gray-400">无匹配飞机</div>
-                  ) : (
-                    visibleTreeAircraft.map((a) => (
-                      <button
-                        key={a.id}
-                        onMouseEnter={() => openTreeAircraft(a.id)}
-                        className={`w-full text-left px-3 py-1.5 text-sm flex items-center justify-between ${
-                          treeAircraftId === a.id
-                            ? 'bg-blue-50 text-blue-700'
-                            : 'text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        <span className="truncate">{a.name}</span>
-                        <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-
-              {/* Column 3: Flights (visible when aircraft selected) */}
-              {treeAircraftId && (
-                <div className="w-52 overflow-y-auto py-1">
-                  <div className="px-3 py-1.5 text-xs text-gray-400 font-medium sticky top-0 bg-white">架次</div>
-                  {treeFlightsList.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-gray-400">无架次</div>
-                  ) : (
-                    treeFlightsList.map((f) => (
-                      <button
-                        key={f.id}
-                        onClick={() => selectTreeFlight(f.id)}
-                        className={`w-full text-left px-3 py-1.5 text-sm ${
-                          f.id === selectedFlightId
-                            ? 'bg-blue-50 text-blue-700'
-                            : 'text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2 min-w-0">
-                          <span className="truncate">{f.name}</span>
-                          <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${syncStateClass(f.sync_state)}`}>
-                            {syncStateLabel(f.sync_state)}
-                          </span>
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Search */}
-          <input
-            type="text"
-            value={flightSearch}
-            onChange={(e) => setFlightSearch(e.target.value)}
-            placeholder="搜索架次..."
-            className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-32"
-          />
-
-          {/* Rename button */}
-          {selectedFlightId && editingFlightId !== selectedFlightId && (
-            <button
-              onClick={() => {
-                const f = flights.find((fl) => fl.id === selectedFlightId);
-                if (f) startRename(f);
-              }}
-              className="text-gray-400 hover:text-blue-500 text-xs px-1.5 py-1 rounded hover:bg-gray-100 shrink-0"
-              title="重命名"
-            >
-              <Pencil className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* Delete button */}
-          {selectedFlightId && canDeleteFlights && deletingFlightId !== selectedFlightId && (
-            <button
-              onClick={() => setDeletingFlightId(selectedFlightId)}
-              className="text-gray-400 hover:text-red-500 px-1.5 py-1 rounded hover:bg-red-50 shrink-0 flex items-center"
-              title="删除"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-        </div>
+        <FlightTree
+          flights={flights}
+          models={models}
+          aircraft={aircraft}
+          selectedFlightId={selectedFlightId}
+          selectedModelId={selectedModelId}
+          selectedAircraftId={selectedAircraftId}
+          search={flightSearch}
+          editingFlightId={editingFlightId}
+          deletingFlightId={deletingFlightId}
+          canDeleteFlights={canDeleteFlights}
+          onSearchChange={setFlightSearch}
+          onSelectFlight={onSelectFlight}
+          onSelectModel={onSelectModel}
+          onSelectAircraft={onSelectAircraft}
+          onStartRename={startRename}
+          onRequestDelete={setDeletingFlightId}
+        />
 
         {/* Inline rename input */}
         {editingFlightId && (
