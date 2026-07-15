@@ -7,9 +7,20 @@ pattern matching and session key extraction via format config JSONs.
 import os
 import re
 import xml.etree.ElementTree as ET
-from backend.format_configs import get_data_type_key
-
-ENCODINGS = ['gbk', 'gb2312', 'utf-8', 'latin-1']
+from backend.database import get_db
+from backend.import_pipeline.format_configs import (
+    compare_configs,
+    generate_config_from_scan,
+    get_data_type_key,
+    get_table_name,
+    load_all_model_configs_with_ids,
+    load_format_config_by_model,
+)
+from backend.import_pipeline.file_reader import detect_encoding, has_header, parse_lines
+from backend.import_pipeline.session_metadata import (
+    _extract_flight_date,
+    _extract_timestamp_from_key,
+)
 
 RECORD_TEXT_FIELDS = {
     "record_location",
@@ -82,52 +93,6 @@ RECORD_XML_ALIASES = {
 }
 
 
-def detect_encoding(filepath):
-    """Detect text encoding of a file."""
-    for enc in ENCODINGS:
-        try:
-            with open(filepath, 'r', encoding=enc) as f:
-                f.readline()
-            return enc
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    return 'latin-1'
-
-
-def has_header(filepath):
-    """Detect if a TSV file has a header row (per-file).
-
-    Returns True if the first token of the first line is 'Time'.
-    Returns False if it matches HH:MM:SS (data row).
-    """
-    encoding = detect_encoding(filepath)
-    try:
-        with open(filepath, 'r', encoding=encoding, errors='replace') as f:
-            first_line = f.readline().strip()
-    except Exception:
-        return False
-
-    if not first_line:
-        return False
-    tokens = first_line.split()
-    if not tokens:
-        return False
-    if tokens[0].strip().lower() == 'time':
-        return True
-    if re.match(r'^\d{1,2}:\d{2}:\d{2}', tokens[0]):
-        return False
-    # If neither, assume it's a header (could be another language for "Time")
-    return True
-
-
-def parse_lines(filepath):
-    """Read file, return list of line strings (non-empty)."""
-    encoding = detect_encoding(filepath)
-    with open(filepath, 'r', encoding=encoding, errors='replace') as f:
-        return [line.strip() for line in f.readlines() if line.strip()]
-
-
-
 def time_to_sec(t_str):
     """Convert HH:MM:SS[.f] to seconds."""
     try:
@@ -173,14 +138,6 @@ def parse_session_key(filename, config):
     if len(parts) == 2 and parts[1].isdigit():
         return parts[1]
     return ''
-
-
-def _extract_timestamp_from_key(session_key):
-    """Extract seconds-since-midnight from HHMMSS prefix of a session key."""
-    ts = session_key[:6]
-    if len(ts) == 6 and ts.isdigit():
-        return int(ts[:2]) * 3600 + int(ts[2:4]) * 60 + int(ts[4:6])
-    return None
 
 
 def _build_clusters(files_info, max_diff_sec=3):
@@ -256,11 +213,6 @@ def resolve_model_for_scan(conn, source_path):
             suggested_name, discovered_types (also provided for a manual
             new-model override when an existing model is recommended)
     """
-    from backend.format_configs import (
-        generate_config_from_scan, load_all_model_configs_with_ids,
-        compare_configs, load_format_config_by_model,
-    )
-
     # Step 1 — auto-generate config from the folder
     generated = generate_config_from_scan(source_path)
     if not generated or not generated.get('data_types'):
@@ -608,9 +560,6 @@ def scan_folder_sessions(source_path, conn=None):
 
     This is the main entry point used by the scan API endpoint.
     """
-    from backend.database import get_db
-    from backend.format_configs import get_table_name
-
     if conn is None:
         conn = get_db()
         close_conn = True
@@ -655,7 +604,6 @@ def scan_folder_sessions(source_path, conn=None):
 
     # The folder date is part of every session preview, including the
     # new-model flow where duplicate checks are skipped until a model exists.
-    from backend.parser import _extract_flight_date
     flight_date = _extract_flight_date(source_path)
     for sess in scan_result.get('sessions', []):
         sess['flight_date'] = flight_date

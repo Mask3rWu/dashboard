@@ -452,3 +452,7 @@ def get_sync_import_report(conn, import_id: int):
         "SELECT * FROM sync_imports WHERE id=?",
         (import_id,),
     ).fetchone()
+
+
+def get_sync_run(conn, run_id: int):
+    return conn.execute("SELECT * FROM sync_runs WHERE id=?", (run_id,)).fetchone()

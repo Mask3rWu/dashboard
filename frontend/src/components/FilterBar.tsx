@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import type { FilterCondition, FilterSpec, FilterPreset, ColumnGroup } from '../api';
+import type { FilterCondition, FilterSpec, FilterPreset, ColumnGroup } from '../api/analysis';
 
 interface Props {
   /** Only columns currently selected in the chart (grouped by data type) */

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -11,22 +10,26 @@ import sqlite3
 import tempfile
 import zipfile
 from datetime import datetime
-from pathlib import PurePosixPath
 from typing import Any
 
 from backend.database import CURRENT_SCHEMA_VERSION
-from backend.format_configs import (
+from backend.import_pipeline.format_configs import (
     build_model_config_from_db,
     data_table_name,
     register_model_tables,
 )
 from backend.raw_storage import store_raw_file_for_flight
-from backend.sync_package import PACKAGE_VERSION
-from backend import sync_repository
+from backend.sync import repository as sync_repository
+from backend.sync.protocol import (
+    assert_safe_zip as _assert_safe_zip,
+    is_local_manifest_compatible,
+    safe_zip_path as _safe_zip_path,
+    sha256_file as _sha256_file,
+    validate_local_manifest,
+)
 
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _RECORD_COLUMNS = (
     "record_total_duration_min",
     "record_location",
@@ -62,34 +65,6 @@ def _q(identifier: str) -> str:
     if not value or "\x00" in value:
         raise ValueError(f"Unsafe SQL identifier: {identifier}")
     return f'"{value.replace(chr(34), chr(34) + chr(34))}"'
-
-
-def _safe_zip_path(path: str) -> str:
-    raw = str(path or "").replace("\\", "/")
-    if raw.startswith("/") or _WINDOWS_DRIVE.match(raw):
-        raise ValueError(f"Unsafe zip path: {path}")
-    parts = PurePosixPath(raw).parts
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"Unsafe zip path: {path}")
-    return "/".join(parts)
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _assert_safe_zip(zf: zipfile.ZipFile) -> None:
-    for info in zf.infolist():
-        if info.is_dir():
-            continue
-        _safe_zip_path(info.filename)
 
 
 def _load_manifest(package_path: str) -> tuple[dict, list[str]]:
@@ -375,26 +350,11 @@ def _preview_duplicates(conn, manifest: dict, aircraft_plans: list[dict]) -> lis
 
 
 def _is_compatible(manifest: dict) -> bool:
-    return (
-        int(manifest.get("package_version") or 0) == PACKAGE_VERSION
-        and int(manifest.get("schema_version") or 0) == CURRENT_SCHEMA_VERSION
-        and manifest.get("parsed_data", {}).get("format") == "sqlite"
-    )
+    return is_local_manifest_compatible(manifest, CURRENT_SCHEMA_VERSION)
 
 
 def _validate_manifest(manifest: dict, require_compatible: bool) -> None:
-    for key in ("package_version", "schema_version", "models", "aircraft", "flights", "raw_files", "parsed_data"):
-        if key not in manifest:
-            raise ValueError(f"manifest 缺少字段: {key}")
-    for key in ("models", "aircraft", "flights", "raw_files"):
-        if not isinstance(manifest.get(key), list):
-            raise ValueError(f"manifest 字段格式无效: {key}")
-        if any(not isinstance(item, dict) for item in manifest.get(key, [])):
-            raise ValueError(f"manifest 字段包含无效条目: {key}")
-    if not isinstance(manifest.get("parsed_data"), dict):
-        raise ValueError("manifest 字段格式无效: parsed_data")
-    if require_compatible and not _is_compatible(manifest):
-        raise ValueError("当前版本暂不支持该同步包的原始文件重解析导入路径")
+    validate_local_manifest(manifest, CURRENT_SCHEMA_VERSION, require_compatible)
 
 
 def import_package(conn, package_path: str, options: dict | None = None) -> dict:

@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from backend import raw_file_repository
+from backend.repositories import raw_files as raw_file_repository
 from backend.database import DATA_DIR
 
 

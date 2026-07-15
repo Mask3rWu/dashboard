@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import * as echarts from 'echarts';
-import { getColumns, getCompare, listAircraft, type Flight, type ColumnGroup, type AircraftModel, type Aircraft } from '../api';
+import { getColumns, getCompare, type ColumnGroup } from '../api/analysis';
+import type { Flight } from '../api/flights';
+import { listAircraft, type AircraftModel, type Aircraft } from '../api/models';
 import { syncStateClass, syncStateLabel } from '../syncStatus';
 
 interface Props {

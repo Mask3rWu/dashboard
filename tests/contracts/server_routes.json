@@ -1,0 +1,22 @@
+[
+  {"methods": ["GET"], "path": "/api/health"},
+  {"methods": ["POST"], "path": "/api/auth/login"},
+  {"methods": ["POST"], "path": "/api/auth/logout"},
+  {"methods": ["GET"], "path": "/api/auth/me"},
+  {"methods": ["POST"], "path": "/api/auth/change-password"},
+  {"methods": ["POST"], "path": "/api/users"},
+  {"methods": ["GET"], "path": "/api/users"},
+  {"methods": ["PATCH"], "path": "/api/users/{user_id}"},
+  {"methods": ["POST"], "path": "/api/users/{user_id}/reset-password"},
+  {"methods": ["DELETE"], "path": "/api/users/{user_id}"},
+  {"methods": ["GET"], "path": "/api/capabilities"},
+  {"methods": ["POST"], "path": "/api/models"},
+  {"methods": ["POST"], "path": "/api/sync/preflight"},
+  {"methods": ["POST"], "path": "/api/sync/push"},
+  {"methods": ["GET"], "path": "/api/sync/changes"},
+  {"methods": ["GET"], "path": "/api/sync/preview"},
+  {"methods": ["GET"], "path": "/api/sync/bundle"},
+  {"methods": ["DELETE"], "path": "/api/models/{model_id}"},
+  {"methods": ["DELETE"], "path": "/api/aircraft/{aircraft_id}"},
+  {"methods": ["DELETE"], "path": "/api/flights/{flight_id}"}
+]

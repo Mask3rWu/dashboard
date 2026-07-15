@@ -13,6 +13,8 @@ import logging
 import os
 import re
 
+from backend.import_pipeline.file_reader import has_header, parse_lines
+
 logger = logging.getLogger(__name__)
 
 HEADER_SAMPLE_LIMIT_PER_PATTERN = 20
@@ -295,8 +297,6 @@ def _discover_file_patterns(source_path):
     sample_counts = {}
 
     def read_pattern_sample(filepath):
-        from backend.scanner import has_header, parse_lines
-
         lines = parse_lines(filepath)
         if not lines:
             return None
@@ -371,7 +371,6 @@ def _detect_has_header(source_path, sample_patterns):
     for entry in sample_patterns:
         _name, filepath = entry[0], entry[1]
         try:
-            from backend.scanner import has_header
             if has_header(filepath):
                 return True
         except Exception:
@@ -395,7 +394,6 @@ def _detect_has_uav_send_id(source_path, sample_patterns, has_header_flag):
     for entry in sample_patterns:
         _name, filepath = entry[0], entry[1]
         try:
-            from backend.scanner import parse_lines
             lines = parse_lines(filepath)
             if lines:
                 header_tokens = lines[0].split()
@@ -479,7 +477,6 @@ def _is_raw_dump(filepath):
 
     # ── Signal 2: hex-dump token ratio across sampled data rows ──
     try:
-        from backend.scanner import parse_lines, has_header
         lines = parse_lines(filepath)
     except Exception:
         return False
@@ -513,11 +510,10 @@ def _detect_column_types(filepath, has_header, has_uav, num_columns):
     """
     types = ['REAL'] * num_columns
     try:
-        from backend.scanner import parse_lines, has_header as _has_header
         lines = parse_lines(filepath)
         if not lines:
             return types
-        start = 1 if _has_header(filepath) else 0
+        start = 1 if has_header(filepath) else 0
         if start >= len(lines):
             return types
         tokens = lines[start].split()

@@ -8,48 +8,30 @@ import json
 import os
 import logging
 from backend.database import get_db
+from backend.import_pipeline.session_metadata import _extract_flight_date
 
 logger = logging.getLogger(__name__)
 
 # Re-export from scanner for backward compatibility
-from backend.scanner import (
+from backend.import_pipeline.scanner import (
     detect_encoding, has_header, parse_lines, time_to_sec,
     scan_folder, scan_folder_sessions, parse_session_key,
-    _validate_source_path,
+    scan_files_recursive, _build_clusters, _validate_source_path,
 )
 
 # Re-export config helpers
-from backend.format_configs import (
+from backend.import_pipeline.format_configs import (
     load_format_config_by_model, get_data_type_key, data_table_name,
     register_model_tables, get_columns_for_model, get_columns_for_flight,
 )
 
-from backend.importer import (
+from backend.import_pipeline.importer import (
     import_data_type, import_alerts, import_files_for_session,
 )
 from backend.raw_storage import attach_raw_files_to_flight
-from backend import flight_repository
+from backend.repositories import flights as flight_repository
 
 RECORD_FIELD_COLUMNS = flight_repository.RECORD_COLUMNS
-
-
-def _extract_flight_date(source_path):
-    """Extract flight date from directory hierarchy.
-
-    Walks up from source_path to find the first directory whose name
-    starts with an 8-digit YYYYMMDD prefix. Returns 'YYYY-MM-DD' or None.
-    """
-    path = os.path.normpath(source_path)
-    while True:
-        dirname = os.path.basename(path)
-        if len(dirname) >= 8 and dirname[:8].isdigit():
-            ds = dirname[:8]
-            return f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
-        parent = os.path.dirname(path)
-        if parent == path:
-            break
-        path = parent
-    return None
 
 
 def import_session(source_path, aircraft_id, session_key, record_fields=None, flight_date_override=None):
@@ -100,7 +82,6 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None, fl
         conn.close()
         return {'error': f'Format config not found for model {model_id}'}
 
-    from backend.scanner import scan_files_recursive
     try:
         all_files = scan_files_recursive(source_path, stored_config)
     except FileNotFoundError as e:
@@ -123,7 +104,6 @@ def import_session(source_path, aircraft_id, session_key, record_fields=None, fl
         conn.close()
         return {'error': f'No files found for aircraft {target_serial}'}
 
-    from backend.scanner import _build_clusters
     clusters = _build_clusters(drone_files)
 
     # Find the cluster matching session_key

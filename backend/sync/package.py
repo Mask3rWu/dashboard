@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -12,20 +11,21 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime
-from pathlib import PurePosixPath
 
-from backend import sync_repository
+from backend.sync import repository as sync_repository
+from backend.sync.protocol import (
+    PACKAGE_VERSION,
+    SYNC_PROTOCOL_VERSION,
+    safe_zip_path as _safe_zip_path,
+    sha256_file as _sha256_file,
+)
 from backend.database import CURRENT_SCHEMA_VERSION, DATA_DIR
-from backend.format_configs import build_model_config_from_db
+from backend.import_pipeline.format_configs import build_model_config_from_db
 from backend.raw_storage import RAW_ROOT
 
 
-PACKAGE_VERSION = 2
-SYNC_PROTOCOL_VERSION = 1
 APP_VERSION = "2.0.0"
 EXPORT_DIR = os.path.join(DATA_DIR, "sync_exports")
-
-_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 def _q(identifier: str) -> str:
@@ -37,27 +37,6 @@ def _q(identifier: str) -> str:
 
 def _dict(row) -> dict:
     return dict(row) if row is not None else {}
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _safe_zip_path(path: str) -> str:
-    raw = str(path).replace("\\", "/")
-    if raw.startswith("/") or _WINDOWS_DRIVE.match(raw):
-        raise ValueError(f"Unsafe zip path: {path}")
-    parts = PurePosixPath(raw).parts
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"Unsafe zip path: {path}")
-    return "/".join(parts)
 
 
 def _unique_package_path(source_node_id: str, bundle_kind: str) -> str:

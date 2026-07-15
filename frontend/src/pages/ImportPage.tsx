@@ -1,11 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
-import {
-  scanFolder, importSession, listFlights, deleteFlight, updateFlight, browseFolder,
-  listModels, createModelFromScan, listAircraft, createAircraft, listSubdirs,
-  type Flight, type ScanResult, type SessionPreview,
-  type AircraftModel, type Aircraft, type FlightRecordFields,
-  type DeleteScope,
-} from '../api';
+import { scanFolder, importSession, browseFolder, type ScanResult, type SessionPreview } from '../api/imports';
+import { listFlights, deleteFlight, updateFlight, type Flight, type FlightRecordFields } from '../api/flights';
+import { listModels, createModelFromScan, listAircraft, createAircraft, type AircraftModel, type Aircraft, type DeleteScope } from '../api/models';
 import {
   SYNC_STATE_FILTERS,
   deleteActionLabel,
@@ -15,6 +11,9 @@ import {
   syncStateLabel,
   type SyncStateFilter,
 } from '../syncStatus';
+import FlightRecordForm from '../features/flights/FlightRecordForm';
+import { emptyRecord } from '../features/flights/recordFields';
+import DirectorySummary from '../features/import/DirectorySummary';
 
 
 interface Props {
@@ -24,242 +23,6 @@ interface Props {
 }
 
 // ── Directory structure validation ─────────────────────────
-
-function parseDirStructure(sourcePath: string, subdirs?: string[] | null): {
-  valid: boolean;
-  flightDate?: string;
-  aircraftSerials?: string[];
-  message: string;
-  level: 'ok' | 'warn' | 'error';
-} {
-  if (!sourcePath.trim()) {
-    return { valid: false, message: '', level: 'ok' };
-  }
-  // Normalize path separators
-  const parts = sourcePath.replace(/\\/g, '/').split('/').filter(Boolean);
-
-  // Find date directory (starts with 8 digits)
-  let dateIdx = -1;
-  for (let i = 0; i < parts.length; i++) {
-    if (/^\d{8}/.test(parts[i])) {
-      dateIdx = i;
-      break;
-    }
-  }
-
-  if (dateIdx < 0) {
-    return {
-      valid: false,
-      message: '目录结构不符合规范：第一层目录需以 YYYYMMDD（8位日期）开头，例如 20250323_test_flight/',
-      level: 'error',
-    };
-  }
-
-  const dateRaw = parts[dateIdx].substring(0, 8);
-  const flightDate = `${dateRaw.substring(0, 4)}-${dateRaw.substring(4, 6)}-${dateRaw.substring(6, 8)}`;
-
-  // Use filesystem subdirectories (from API) as aircraft serials
-  if (subdirs && subdirs.length > 0) {
-    return {
-      valid: true,
-      flightDate,
-      aircraftSerials: subdirs,
-      message: `日期: ${flightDate}，飞机序号: ${subdirs.join(', ')}`,
-      level: 'ok',
-    };
-  }
-
-  // Serial from path string (if source_path goes deeper than date dir)
-  const serialIdx = dateIdx + 1;
-  if (serialIdx < parts.length) {
-    const aircraftSerial = parts[serialIdx];
-    return {
-      valid: true,
-      flightDate,
-      aircraftSerials: [aircraftSerial],
-      message: `日期: ${flightDate}，飞机序号: ${aircraftSerial}`,
-      level: 'ok',
-    };
-  }
-
-  // No subdirectories found on disk and no serial in path
-  if (subdirs !== undefined) {
-    // Filesystem was checked — truly nothing there
-    return {
-      valid: true,
-      flightDate,
-      message: `日期: ${flightDate}，未找到飞机序号子目录`,
-      level: 'warn',
-    };
-  }
-
-  // Still waiting for filesystem check
-  return {
-    valid: true,
-    flightDate,
-    message: `日期: ${flightDate}`,
-    level: 'ok',
-  };
-}
-
-function DirStructureBanner({ sourcePath, scanResult }: { sourcePath: string; scanResult?: ScanResult | null }) {
-  const [subdirs, setSubdirs] = useState<string[] | null | undefined>(undefined);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!sourcePath.trim()) {
-      setSubdirs(undefined);
-      return;
-    }
-    listSubdirs(sourcePath)
-      .then((data) => { if (!cancelled) setSubdirs(data.subdirs); })
-      .catch(() => { if (!cancelled) setSubdirs(null); });
-    return () => { cancelled = true; };
-  }, [sourcePath]);
-
-  // After scan, use actual serials from sessions as ground truth
-  const scannedSerials = scanResult?.sessions
-    ?.map((s) => s.aircraft_serial)
-    .filter((s) => s && s.trim()) ?? [];
-  const uniqueScanned = [...new Set(scannedSerials)];
-
-  const info = uniqueScanned.length > 0
-    ? parseDirStructure(sourcePath, uniqueScanned)
-    : parseDirStructure(sourcePath, subdirs);
-
-  if (!info.message) return null;
-
-  const colors = {
-    ok: 'bg-green-50 text-green-700 border-green-200',
-    warn: 'bg-amber-50 text-amber-700 border-amber-200',
-    error: 'bg-red-50 text-red-600 border-red-200',
-  };
-
-  return (
-    <div className={`mb-3 px-3 py-2 rounded-lg border text-xs ${colors[info.level]}`}>
-      {info.level === 'ok' && '✓ '}
-      {info.level === 'warn' && '⚠ '}
-      {info.level === 'error' && '✗ '}
-      {info.message}
-    </div>
-  );
-}
-
-function emptyRecord(): FlightRecordFields {
-  return {
-    record_total_duration_min: null,
-    record_location: '',
-    record_payload: '',
-    record_weather: '',
-    record_fuel_amount: null,
-    record_takeoff_weight: null,
-    record_altitude: null,
-    record_wind_speed: null,
-    record_wind_direction: '',
-    record_temperature: null,
-    record_note: '',
-  };
-}
-
-function parseNumberInput(value: string): number | null {
-  if (value.trim() === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function RecordInput({
-  label,
-  value,
-  onChange,
-  type = 'text',
-}: {
-  label: string;
-  value: string | number | null | undefined;
-  onChange: (value: string) => void;
-  type?: 'text' | 'number' | 'date';
-}) {
-  return (
-    <label className="space-y-1">
-      <span className="block text-[11px] text-gray-500">{label}</span>
-      <input
-        type={type}
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-      />
-    </label>
-  );
-}
-
-function DurationInput({
-  value,
-  onChange,
-}: {
-  value: number | null | undefined;
-  onChange: (value: number | null) => void;
-}) {
-  const hasValue = value != null && Number.isFinite(Number(value));
-  const total = hasValue ? Math.max(0, Math.round(Number(value))) : 0;
-  const hours = hasValue ? Math.floor(total / 60) : '';
-  const minutes = hasValue ? total % 60 : '';
-
-  const update = (nextHours: string, nextMinutes: string) => {
-    if (nextHours.trim() === '' && nextMinutes.trim() === '') {
-      onChange(null);
-      return;
-    }
-    const h = Math.max(0, parseNumberInput(nextHours) ?? 0);
-    const m = Math.max(0, parseNumberInput(nextMinutes) ?? 0);
-    onChange(Math.round(h) * 60 + Math.round(m));
-  };
-
-  return (
-    <label className="space-y-1">
-      <span className="block text-[11px] text-gray-500">总时长</span>
-      <div className="flex items-center gap-1">
-        <input
-          type="number"
-          min="0"
-          value={hours}
-          onChange={(e) => update(e.target.value, String(minutes))}
-          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-        />
-        <span className="text-[11px] text-gray-500">h</span>
-        <input
-          type="number"
-          min="0"
-          max="59"
-          value={minutes}
-          onChange={(e) => update(String(hours), e.target.value)}
-          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-        />
-        <span className="text-[11px] text-gray-500">min</span>
-      </div>
-    </label>
-  );
-}
-
-function RecordTextarea({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string | null | undefined;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="space-y-1 block">
-      <span className="block text-[11px] text-gray-500">{label}</span>
-      <textarea
-        rows={2}
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full resize-none bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-      />
-    </label>
-  );
-}
 
 // ── ImportPage ─────────────────────────────────────────────
 
@@ -663,7 +426,7 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
           </div>
 
           {/* Directory structure validation */}
-          <DirStructureBanner sourcePath={path} scanResult={scanResult} />
+          <DirectorySummary sourcePath={path} scanResult={scanResult} />
 
           {/* Model selection — always resolved (matched or auto-created) */}
           {scanResult.model && scanResult.sessions.length > 0 && (
@@ -961,19 +724,11 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
                         {renderBadges(session.data_types)}
                         {!isImported && (
                           <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 space-y-3">
-                            <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
-                              <DurationInput value={record.record_total_duration_min} onChange={(v) => updateSessionRecord(key, { record_total_duration_min: v })} />
-                              <RecordInput label="地点" value={record.record_location} onChange={(v) => updateSessionRecord(key, { record_location: v })} />
-                              <RecordInput label="天气" value={record.record_weather} onChange={(v) => updateSessionRecord(key, { record_weather: v })} />
-                              <RecordInput label="设备载荷（kg）" type="number" value={record.record_payload} onChange={(v) => updateSessionRecord(key, { record_payload: v })} />
-                              <RecordInput label="燃油量（kg）" type="number" value={record.record_fuel_amount} onChange={(v) => updateSessionRecord(key, { record_fuel_amount: parseNumberInput(v) })} />
-                              <RecordInput label="起飞重量（kg）" type="number" value={record.record_takeoff_weight} onChange={(v) => updateSessionRecord(key, { record_takeoff_weight: parseNumberInput(v) })} />
-                              <RecordInput label="海拔高度（m）" type="number" value={record.record_altitude} onChange={(v) => updateSessionRecord(key, { record_altitude: parseNumberInput(v) })} />
-                              <RecordInput label="风速（m/s）" type="number" value={record.record_wind_speed} onChange={(v) => updateSessionRecord(key, { record_wind_speed: parseNumberInput(v) })} />
-                              <RecordInput label="风向" value={record.record_wind_direction} onChange={(v) => updateSessionRecord(key, { record_wind_direction: v })} />
-                              <RecordInput label="温度（°C）" type="number" value={record.record_temperature} onChange={(v) => updateSessionRecord(key, { record_temperature: parseNumberInput(v) })} />
-                            </div>
-                            <RecordTextarea label="备注" value={record.record_note} onChange={(v) => updateSessionRecord(key, { record_note: v })} />
+                            <FlightRecordForm
+                              value={record}
+                              onChange={(patch) => updateSessionRecord(key, patch)}
+                              variant="import"
+                            />
                           </div>
                         )}
                         {errMsg && <p className="text-xs text-red-500">{errMsg}</p>}

@@ -8,8 +8,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-from . import sync_client
-from . import permission_repository
+from .sync import client as sync_client
+from .repositories import permissions as permission_repository
 from .database import DATA_DIR
 
 

@@ -6,9 +6,10 @@ import_data_type() that reads column definitions from a format config.
 
 import logging
 import sqlite3
-from backend.format_configs import (
+from backend.import_pipeline.format_configs import (
     load_format_config_by_model, data_table_name, get_data_type_key,
 )
+from backend.import_pipeline.file_reader import has_header, parse_lines
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,6 @@ def import_data_type(conn, flight_id, filepath, data_type_key, format_config, mo
     has_uav = format_config.get('has_uav_send_id', False)
 
     # Per-file header detection
-    from backend.scanner import has_header, parse_lines
     skip_header = has_header(filepath)
 
     # Build INSERT SQL — only include columns with non-null ordinals
@@ -136,7 +136,6 @@ def import_alerts(conn, flight_id, filepath, data_type_key, format_config, model
     configs with generic col_N names, falls back to standard one-token-per-column
     import.
     """
-    from backend.scanner import has_header, parse_lines
     tdef = format_config['data_types'].get(data_type_key, {})
     table_name = data_table_name(model_id, data_type_key)
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -16,10 +15,14 @@ from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from . import server_database as db
+from backend import server_database as db
+from .protocol import (
+    safe_zip_path as _safe_zip_path,
+    sha256_file as _sha256_file,
+    validate_server_manifest,
+)
 
 
-WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 WINDOWS_INVALID_CHARS = set('<>:"\\|?*')
 WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -27,16 +30,6 @@ WINDOWS_RESERVED_NAMES = {
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 }
 DYNAMIC_INSERT_BATCH_SIZE = 1000
-
-
-def _safe_zip_path(path: str) -> str:
-    raw = str(path or "").replace("\\", "/")
-    if raw.startswith("/") or WINDOWS_DRIVE_RE.match(raw):
-        raise ValueError(f"Unsafe zip path: {path}")
-    parts = PurePosixPath(raw).parts
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"Unsafe zip path: {path}")
-    return "/".join(parts)
 
 
 def _safe_part(value: Any, fallback: str = "_") -> str:
@@ -72,17 +65,6 @@ def _q_sqlite(identifier: str) -> str:
     if not value or "\x00" in value:
         raise ValueError(f"Unsafe SQLite identifier: {identifier!r}")
     return f'"{value.replace(chr(34), chr(34) + chr(34))}"'
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _json_default(value: Any) -> Any:
@@ -127,31 +109,7 @@ def _first_manifest_id(row: dict[str, Any], *keys: str) -> int | None:
 
 
 def validate_manifest(manifest: dict[str, Any], *, require_push_batch: bool = True) -> dict[str, Any]:
-    if not isinstance(manifest, dict):
-        raise ValueError("manifest must be a JSON object")
-    if int(manifest.get("package_version") or 0) < 2:
-        raise ValueError("Only package_version >= 2 is supported")
-    if int(manifest.get("sync_protocol_version") or 0) != 1:
-        raise ValueError("Unsupported sync_protocol_version")
-    package_id = str(manifest.get("package_id") or "").strip()
-    source_node_id = str(manifest.get("source_node_id") or "").strip()
-    if not package_id:
-        raise ValueError("manifest.package_id is required")
-    if not source_node_id:
-        raise ValueError("manifest.source_node_id is required")
-    bundle_kind = str(manifest.get("bundle_kind") or "")
-    if require_push_batch and bundle_kind != "push_batch":
-        raise ValueError("Only bundle_kind=push_batch can be pushed to the server")
-    parsed = manifest.get("parsed_data") or {}
-    if parsed.get("format") != "sqlite":
-        raise ValueError("manifest.parsed_data.format must be sqlite")
-    parsed["path"] = _safe_zip_path(parsed.get("path") or "data/parsed.sqlite")
-    for raw in manifest.get("raw_files") or []:
-        if raw.get("package_path"):
-            raw["package_path"] = _safe_zip_path(raw["package_path"])
-        if raw.get("storage_rel_path"):
-            raw["storage_rel_path"] = _safe_zip_path(raw["storage_rel_path"])
-    return manifest
+    return validate_server_manifest(manifest, require_push_batch=require_push_batch)
 
 
 def existing_import_report(conn, package_id: str, source_node_id: str) -> dict[str, Any] | None:

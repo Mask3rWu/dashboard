@@ -8,7 +8,7 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
-from . import user_repository
+from .repositories import users as user_repository
 
 
 PASSWORD_SCHEME = "pbkdf2_sha256"

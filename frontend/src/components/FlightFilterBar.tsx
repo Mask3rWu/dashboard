@@ -4,7 +4,7 @@ import {
   type FlightFilterCondition,
   type FlightFilterField,
   type FlightFilterSpec,
-} from '../api';
+} from '../api/flights';
 
 type FlightCondition = FlightFilterCondition;
 

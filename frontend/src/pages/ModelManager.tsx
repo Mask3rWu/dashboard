@@ -1,21 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Pencil, Trash2, Download, Upload } from 'lucide-react';
-import {
-  listModels, updateModel, deleteModel,
-  listAircraft, createAircraft, updateAircraft, deleteAircraft,
-  deleteFlight, updateFlight, updateFlightRecord,
-  getRawFiles, openRawFolder, browseFile,
-  getModelColumns, updateModelColumn, updateModelDataTypeLabel,
-  getSyncExportTree, exportSyncPackage, previewSyncImport, importSyncPackage,
-  type AircraftModel, type Aircraft, type Flight,
-  type DataTypeGroup, type FlightRecordFields, type RawFileItem,
-  type SyncExportModelNode, type SyncExportResult,
-  type SyncImportPreview, type SyncImportReport,
-  type DeleteScope,
-  FLIGHT_FILTER_FIELDS, type FlightFilterSpec,
-} from '../api';
+import { listModels, updateModel, deleteModel, listAircraft, createAircraft, updateAircraft, deleteAircraft, getModelColumns, updateModelColumn, updateModelDataTypeLabel, type AircraftModel, type Aircraft, type DataTypeGroup, type DeleteScope } from '../api/models';
+import { deleteFlight, updateFlight, updateFlightRecord, getRawFiles, openRawFolder, FLIGHT_FILTER_FIELDS, type Flight, type FlightRecordFields, type RawFileItem, type FlightFilterSpec } from '../api/flights';
+import { browseFile } from '../api/imports';
+import { getSyncExportTree, exportSyncPackage, previewSyncImport, importSyncPackage, type SyncExportModelNode, type SyncExportResult, type SyncImportPreview, type SyncImportReport } from '../api/sync';
 import { deleteActionLabel, deleteScopeFor } from '../syncStatus';
 import FlightFilterBar from '../components/FlightFilterBar';
+import FlightRecordForm from '../features/flights/FlightRecordForm';
+import { emptyRecord, formatDurationMinutes, recordFromFlight } from '../features/flights/recordFields';
+import ModelExportDialog from '../features/models/ModelExportDialog';
 
 interface Props {
   onModelsChanged: () => void;
@@ -49,52 +42,6 @@ function syncStateClass(state?: string | null) {
   return 'bg-gray-50 text-gray-600 border-gray-200';
 }
 
-function emptyRecord(): FlightRecordFields {
-  return {
-    record_total_duration_min: null,
-    record_location: '',
-    record_payload: '',
-    record_weather: '',
-    record_fuel_amount: null,
-    record_takeoff_weight: null,
-    record_altitude: null,
-    record_wind_speed: null,
-    record_wind_direction: '',
-    record_temperature: null,
-    record_note: '',
-  };
-}
-
-function recordFromFlight(f: Flight): FlightRecordFields {
-  return {
-    record_total_duration_min: f.record_total_duration_min ?? null,
-    record_location: f.record_location ?? '',
-    record_payload: f.record_payload ?? '',
-    record_weather: f.record_weather ?? '',
-    record_fuel_amount: f.record_fuel_amount ?? null,
-    record_takeoff_weight: f.record_takeoff_weight ?? null,
-    record_altitude: f.record_altitude ?? null,
-    record_wind_speed: f.record_wind_speed ?? null,
-    record_wind_direction: f.record_wind_direction ?? '',
-    record_temperature: f.record_temperature ?? null,
-    record_note: f.record_note ?? '',
-  };
-}
-
-function parseNumberInput(value: string): number | null {
-  if (value.trim() === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function formatDurationMinutes(value: number | null | undefined): string {
-  if (value == null) return '';
-  const total = Math.max(0, Math.round(Number(value)));
-  const hours = Math.floor(total / 60);
-  const minutes = total % 60;
-  return `${hours} h ${minutes} min`;
-}
-
 function formatKgValue(value: string | number | null | undefined): string {
   if (value == null || String(value).trim() === '') return '';
   const text = String(value).trim();
@@ -116,100 +63,6 @@ function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function RecordField({
-  label,
-  value,
-  onChange,
-  type = 'text',
-}: {
-  label: string;
-  value: string | number | null | undefined;
-  onChange: (value: string) => void;
-  type?: 'text' | 'number';
-}) {
-  return (
-    <label className="space-y-1">
-      <span className="block text-[10px] text-gray-500">{label}</span>
-      <input
-        type={type}
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-      />
-    </label>
-  );
-}
-
-function DurationField({
-  value,
-  onChange,
-}: {
-  value: number | null | undefined;
-  onChange: (value: number | null) => void;
-}) {
-  const hasValue = value != null && Number.isFinite(Number(value));
-  const total = hasValue ? Math.max(0, Math.round(Number(value))) : 0;
-  const hours = hasValue ? Math.floor(total / 60) : '';
-  const minutes = hasValue ? total % 60 : '';
-
-  const update = (nextHours: string, nextMinutes: string) => {
-    if (nextHours.trim() === '' && nextMinutes.trim() === '') {
-      onChange(null);
-      return;
-    }
-    const h = Math.max(0, parseNumberInput(nextHours) ?? 0);
-    const m = Math.max(0, parseNumberInput(nextMinutes) ?? 0);
-    onChange(Math.round(h) * 60 + Math.round(m));
-  };
-
-  return (
-    <label className="space-y-1">
-      <span className="block text-[10px] text-gray-500">总时长</span>
-      <div className="flex items-center gap-1">
-        <input
-          type="number"
-          min="0"
-          value={hours}
-          onChange={(e) => update(e.target.value, String(minutes))}
-          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-        />
-        <span className="text-[10px] text-gray-500">h</span>
-        <input
-          type="number"
-          min="0"
-          max="59"
-          value={minutes}
-          onChange={(e) => update(String(hours), e.target.value)}
-          className="min-w-0 flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-        />
-        <span className="text-[10px] text-gray-500">min</span>
-      </div>
-    </label>
-  );
-}
-
-function RecordTextarea({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string | null | undefined;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="space-y-1 block">
-      <span className="block text-[10px] text-gray-500">{label}</span>
-      <textarea
-        rows={2}
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full resize-none bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
-      />
-    </label>
-  );
 }
 
 export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities, serverOnline = true, isLoggedIn }: Props) {
@@ -1191,19 +1044,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                                     </div>
                                     {editingRecordFlightId === f.id && (
                                       <div className="mt-3 rounded border border-blue-100 bg-blue-50/40 p-3 space-y-3">
-                                        <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
-                                          <DurationField value={recordForm.record_total_duration_min} onChange={(v) => updateRecordForm({ record_total_duration_min: v })} />
-                                          <RecordField label="地点" value={recordForm.record_location} onChange={(v) => updateRecordForm({ record_location: v })} />
-                                          <RecordField label="天气" value={recordForm.record_weather} onChange={(v) => updateRecordForm({ record_weather: v })} />
-                                          <RecordField label="设备载荷（kg）" type="number" value={recordForm.record_payload} onChange={(v) => updateRecordForm({ record_payload: v })} />
-                                          <RecordField label="燃油量（kg）" type="number" value={recordForm.record_fuel_amount} onChange={(v) => updateRecordForm({ record_fuel_amount: parseNumberInput(v) })} />
-                                          <RecordField label="起飞重量（kg）" type="number" value={recordForm.record_takeoff_weight} onChange={(v) => updateRecordForm({ record_takeoff_weight: parseNumberInput(v) })} />
-                                          <RecordField label="海拔高度（m）" type="number" value={recordForm.record_altitude} onChange={(v) => updateRecordForm({ record_altitude: parseNumberInput(v) })} />
-                                          <RecordField label="风速（m/s）" type="number" value={recordForm.record_wind_speed} onChange={(v) => updateRecordForm({ record_wind_speed: parseNumberInput(v) })} />
-                                          <RecordField label="风向" value={recordForm.record_wind_direction} onChange={(v) => updateRecordForm({ record_wind_direction: v })} />
-                                          <RecordField label="温度（°C）" type="number" value={recordForm.record_temperature} onChange={(v) => updateRecordForm({ record_temperature: parseNumberInput(v) })} />
-                                        </div>
-                                        <RecordTextarea label="备注" value={recordForm.record_note} onChange={(v) => updateRecordForm({ record_note: v })} />
+                                        <FlightRecordForm value={recordForm} onChange={updateRecordForm} />
                                         <div className="flex items-center gap-2 justify-end">
                                           <button
                                             type="button"
@@ -1433,111 +1274,23 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
       {/* Sync package export modal */}
       {exportOpen && (
-        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6">
-          <div className="w-full max-w-4xl max-h-[86vh] bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col">
-            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
-              <div>
-                <div className="text-base font-semibold text-gray-900">导出离线同步包</div>
-                <div className="text-xs text-gray-500 mt-1">
-                  已选择 {selectedExportIds.size} 个架次，包将保存到固定 sync_exports 目录
-                </div>
-              </div>
-              <button
-                onClick={() => setExportOpen(false)}
-                className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
-              >
-                关闭
-              </button>
-            </div>
-            <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
-              <input
-                value={exportFilter}
-                onChange={(e) => setExportFilter(e.target.value)}
-                placeholder="筛选机型、飞机、架次、日期、地点、天气"
-                className="flex-1 bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={selectVisibleExportFlights}
-                disabled={visibleExportFlightIds.length === 0}
-                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
-              >
-                全选当前结果
-              </button>
-              <button
-                onClick={clearVisibleExportFlights}
-                disabled={visibleExportFlightIds.length === 0}
-                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
-              >
-                清除当前结果
-              </button>
-            </div>
-            <div className="flex-1 overflow-auto px-5 py-4 space-y-4">
-              {exportLoading ? (
-                <div className="text-sm text-gray-400">加载中...</div>
-              ) : exportTree.length === 0 ? (
-                <div className="text-sm text-gray-400">无可导出的架次</div>
-              ) : (
-                exportTree.map((model) => (
-                  <div key={model.id} className="space-y-2">
-                    <div className="text-sm font-semibold text-gray-800">{model.name}</div>
-                    {model.aircraft.map((aircraft) => (
-                      <div key={aircraft.id} className="ml-3 border-l border-gray-200 pl-3 space-y-2">
-                        <div className="text-xs font-medium text-blue-700">{aircraft.name}</div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
-                              {aircraft.flights.map((flight) => (
-                                <label
-                                  key={flight.id}
-                                  className="flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-xs hover:bg-gray-50 cursor-pointer"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedExportIds.has(flight.id)}
-                                    onChange={() => toggleExportFlight(flight.id)}
-                                  />
-                                  <span className="font-medium text-gray-800">{flight.name}</span>
-                                  {flight.flight_date && <span className="text-gray-400">{flight.flight_date}</span>}
-                                  {flight.session_key && <span className="font-mono text-gray-400">{flight.session_key}</span>}
-                                  {flight.record_location && <span className="text-gray-400">{flight.record_location}</span>}
-                                </label>
-                              ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ))
-              )}
-              {exportError && (
-                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-3 py-2">
-                  {exportError}
-                </div>
-              )}
-              {exportResult && (
-                <div className="text-xs text-green-700 bg-green-50 border border-green-100 rounded px-3 py-2 space-y-1">
-                  <div>导出完成: {exportResult.filename}</div>
-                  <div className="font-mono break-all">{exportResult.path}</div>
-                  <div>架次 {exportResult.flight_count}，原始文件 {exportResult.raw_file_count}</div>
-                </div>
-              )}
-            </div>
-            <div className="px-5 py-4 border-t border-gray-200 flex items-center justify-end gap-2">
-              <button
-                onClick={() => setExportOpen(false)}
-                className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-              >
-                取消
-              </button>
-              <button
-                onClick={submitExport}
-                disabled={exporting || selectedExportIds.size === 0}
-                className="px-4 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-40"
-              >
-                {exporting ? '导出中...' : '导出'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ModelExportDialog
+          selectedIds={selectedExportIds}
+          filter={exportFilter}
+          onFilterChange={setExportFilter}
+          visibleFlightIds={visibleExportFlightIds}
+          onSelectVisible={selectVisibleExportFlights}
+          onClearVisible={clearVisibleExportFlights}
+          loading={exportLoading}
+          tree={exportTree}
+          onToggleFlight={toggleExportFlight}
+          error={exportError}
+          result={exportResult}
+          exporting={exporting}
+          onClose={() => setExportOpen(false)}
+          onSubmit={submitExport}
+        />
       )}
-
       {/* Sync package import modal */}
       {syncImportOpen && (
         <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6">
