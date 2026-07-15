@@ -8,13 +8,16 @@ export interface FilterSpec { logic: 'and' | 'or'; conditions: FilterCondition[]
 export interface FilterPreset { id: number; model_id: number; name: string; config: FilterSpec; }
 export interface FlightStats { duration_sec: number; start_time: string; end_time: string; drone_id: string; name: string; }
 export interface Preset { id: number; model_id: number; name: string; columns: string[]; }
+export interface CorrelationData { columns: string[]; labels: string[]; matrix: number[][]; }
+export interface AnomalyData { times: string[]; values: number[]; anomaly_indices: number[]; upper_bound: number[]; lower_bound: number[]; label: string; unit: string; }
+export interface CompareSeries { flight_id: number; name: string; times_sec: number[]; values: number[]; label: string; unit: string; }
 export const getRegistryColumns = (modelId: number) => request<{ columns: ColumnGroup[] }>(`/registry/columns?model_id=${modelId}`);
 export const getColumns = (flightId: number) => request<{ columns: ColumnGroup[] }>(`/flights/${flightId}/columns`);
 export const getAlignedData = (flightId: number, columnKeys: string[], filter?: FilterSpec) => request<AlignedData>(`/flights/${flightId}/aligned`, { method: 'POST', body: JSON.stringify({ column_keys: columnKeys, filter: filter || undefined }) });
 export const getStats = (flightId: number) => request<FlightStats>(`/flights/${flightId}/stats`);
-export const getCorrelation = (flightId: number, columnKeys: string[]) => request<{ columns: string[]; labels: string[]; matrix: number[][] }>(`/flights/${flightId}/correlation`, { method: 'POST', body: JSON.stringify({ column_keys: columnKeys }) });
-export const getAnomaly = (flightId: number, columnKey: string, windowSize = 30, sigma = 3.0) => request<{ times: string[]; values: number[]; anomaly_indices: number[]; upper_bound: number[]; lower_bound: number[]; label: string; unit: string }>(`/flights/${flightId}/anomaly`, { method: 'POST', body: JSON.stringify({ column_key: columnKey, window_size: windowSize, sigma }) });
-export const getCompare = (flightIds: number[], columnKey: string) => request<{ series: { flight_id: number; name: string; times_sec: number[]; values: number[]; label: string; unit: string }[] }>('/compare', { method: 'POST', body: JSON.stringify({ flight_ids: flightIds, column_key: columnKey }) });
+export const getCorrelation = (flightId: number, columnKeys: string[]) => request<CorrelationData>(`/flights/${flightId}/correlation`, { method: 'POST', body: JSON.stringify({ column_keys: columnKeys }) });
+export const getAnomaly = (flightId: number, columnKey: string, windowSize = 30, sigma = 3.0) => request<AnomalyData>(`/flights/${flightId}/anomaly`, { method: 'POST', body: JSON.stringify({ column_key: columnKey, window_size: windowSize, sigma }) });
+export const getCompare = (flightIds: number[], columnKey: string) => request<{ series: CompareSeries[] }>('/compare', { method: 'POST', body: JSON.stringify({ flight_ids: flightIds, column_key: columnKey }) });
 export const listPresets = (modelId: number) => request<{ presets: Preset[] }>(`/presets?model_id=${modelId}`);
 export const createPreset = (modelId: number, name: string, columns: string[]) => request<Preset>('/presets', { method: 'POST', body: JSON.stringify({ model_id: modelId, name, columns }) });
 export const deletePreset = (id: number) => request('/presets/' + id, { method: 'DELETE' });

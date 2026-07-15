@@ -1,13 +1,19 @@
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
+import type { AnomalyData, CorrelationData } from '../../api/analysis';
 
-export function CorrelationHeatmap({ data }: { data: { labels: string[]; matrix: number[][] } }) {
+interface HeatmapTooltipParam {
+  name?: string;
+  value?: [number, number, number];
+}
+
+export function CorrelationHeatmap({ data }: { data: CorrelationData }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!ref.current) return;
     const chart = echarts.init(ref.current);
     chart.setOption({
-      tooltip: { formatter: (p: any) => `${p.name}: <strong>${p.value?.[2]?.toFixed(3)}</strong>` },
+      tooltip: { formatter: (param: HeatmapTooltipParam) => `${param.name}: <strong>${param.value?.[2]?.toFixed(3)}</strong>` },
       grid: { left: 120, right: 60, top: 20, bottom: 80 },
       xAxis: {
         type: 'category', data: data.labels,
@@ -34,15 +40,6 @@ export function CorrelationHeatmap({ data }: { data: { labels: string[]; matrix:
     return () => chart.dispose();
   }, [data]);
   return <div ref={ref} className="w-full h-full" />;
-}
-
-export interface AnomalyData {
-  times: string[];
-  values: number[];
-  anomaly_indices?: number[];
-  upper_bound?: number[];
-  lower_bound?: number[];
-  unit?: string;
 }
 
 export function AnomalyChart({ data }: { data: AnomalyData }) {

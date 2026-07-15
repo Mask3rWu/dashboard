@@ -12,11 +12,10 @@ from backend.import_pipeline.session_metadata import _extract_flight_date
 
 logger = logging.getLogger(__name__)
 
-# Re-export from scanner for backward compatibility
 from backend.import_pipeline.scanner import (
-    detect_encoding, has_header, parse_lines, time_to_sec,
-    scan_folder, scan_folder_sessions, parse_session_key,
-    scan_files_recursive, _build_clusters, _validate_source_path,
+    scan_files_recursive,
+    _build_clusters,
+    _validate_source_path,
 )
 
 # Re-export config helpers

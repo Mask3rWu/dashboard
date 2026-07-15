@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useEffectEvent } from 'react';
 import { Pencil, Trash2, Download, Upload } from 'lucide-react';
 import { listModels, updateModel, deleteModel, listAircraft, createAircraft, updateAircraft, deleteAircraft, getModelColumns, updateModelColumn, updateModelDataTypeLabel, type AircraftModel, type Aircraft, type DataTypeGroup, type DeleteScope } from '../api/models';
 import { deleteFlight, updateFlight, updateFlightRecord, getRawFiles, openRawFolder, FLIGHT_FILTER_FIELDS, type Flight, type FlightRecordFields, type RawFileItem, type FlightFilterSpec } from '../api/flights';
@@ -9,6 +9,8 @@ import FlightFilterBar from '../components/FlightFilterBar';
 import FlightRecordForm from '../features/flights/FlightRecordForm';
 import { emptyRecord, formatDurationMinutes, recordFromFlight } from '../features/flights/recordFields';
 import ModelExportDialog from '../features/models/ModelExportDialog';
+import ModelImportDialog, { type SyncAircraftMapping, type SyncModelAction } from '../features/models/ModelImportDialog';
+import ColumnEditor from '../features/models/ColumnEditor';
 
 interface Props {
   onModelsChanged: () => void;
@@ -63,6 +65,10 @@ function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities, serverOnline = true, isLoggedIn }: Props) {
@@ -127,16 +133,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [syncImportOpen, setSyncImportOpen] = useState(false);
   const [syncImportPath, setSyncImportPath] = useState('');
   const [syncImportPreview, setSyncImportPreview] = useState<SyncImportPreview | null>(null);
-  const [syncModelActions, setSyncModelActions] = useState<Record<number, {
-    action: 'use_existing' | 'create';
-    target_model_id?: number | null;
-    name?: string | null;
-  }>>({});
-  const [syncAircraftMappings, setSyncAircraftMappings] = useState<Record<number, {
-    action: 'use_existing' | 'create';
-    target_aircraft_id?: number | null;
-    name?: string | null;
-  }>>({});
+  const [syncModelActions, setSyncModelActions] = useState<Record<number, SyncModelAction>>({});
+  const [syncAircraftMappings, setSyncAircraftMappings] = useState<Record<number, SyncAircraftMapping>>({});
   const [syncConflictPolicy, setSyncConflictPolicy] = useState<'skip' | 'update_records'>('skip');
   const [syncImportLoading, setSyncImportLoading] = useState(false);
   const [syncImportBrowsing, setSyncImportBrowsing] = useState(false);
@@ -343,11 +341,15 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   useEffect(() => { loadModels(); }, []);
 
+  const refreshSelectedModel = useEffectEvent(() => {
+    if (selectedModelId) loadAircraft(selectedModelId);
+  });
+
   // Refresh models/aircraft when external data changes (e.g. import on another tab)
   useEffect(() => {
     if (modelsVersion > 0) {
       loadModels();
-      if (selectedModelId) loadAircraft(selectedModelId);
+      refreshSelectedModel();
     }
   }, [modelsVersion]);
 
@@ -492,8 +494,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       setEditingGroupLabel(null);
       const d = await getModelColumns(selectedModelId);
       setColumnGroups(d.data_types);
-    } catch (e: any) {
-      alert('保存失败: ' + (e.message || e));
+    } catch (error: unknown) {
+      alert('保存失败: ' + errorMessage(error));
     }
   };
 
@@ -611,10 +613,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       const data = await getRawFiles(flightId);
       setRawFilesByFlight((prev) => ({ ...prev, [flightId]: data.files }));
       setRawWarningsByFlight((prev) => ({ ...prev, [flightId]: data.warnings }));
-    } catch (e: any) {
+    } catch (error: unknown) {
       setRawWarningsByFlight((prev) => ({
         ...prev,
-        [flightId]: [{ error: e.message || String(e) }],
+        [flightId]: [{ error: errorMessage(error) }],
       }));
     } finally {
       setLoadingRawFlightId(null);
@@ -627,8 +629,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       if (result.warnings?.length) {
         alert(`原始文件目录已打开，但有 ${result.warnings.length} 个路径更新警告。`);
       }
-    } catch (e: any) {
-      alert('打开目录失败: ' + (e.message || e));
+    } catch (error: unknown) {
+      alert('打开目录失败: ' + errorMessage(error));
     }
   };
 
@@ -1129,144 +1131,24 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                 )}
               </div>
 
-              {/* Right: Column Definitions (40%) */}
-              <div className="min-w-0 overflow-y-auto border-l border-gray-200 pl-6" style={{ flex: '4' }}>
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-gray-700">
-                    列定义 ({columnGroups.reduce((s, g) => s + g.columns.length, 0)} 列)
-                  </h3>
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-1 text-[10px] text-gray-400 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={showOriginalName}
-                        onChange={(e) => setShowOriginalName(e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      原字段
-                    </label>
-                    {canEditColumns && columnGroups.length > 0 && (
-                    !isEditingColumns ? (
-                      <button
-                        onClick={startBatchEditColumns}
-                        className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-500"
-                      >
-                        编辑列定义
-                      </button>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={saveAllColumns}
-                          className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-500"
-                        >
-                          保存全部
-                        </button>
-                        <button
-                          onClick={cancelBatchEditColumns}
-                          className="px-3 py-1.5 text-xs bg-gray-200 text-gray-600 rounded-lg hover:bg-gray-300"
-                        >
-                          取消
-                        </button>
-                      </div>
-                    )
-                  )}
-                  </div>
-                </div>
-
-                {columnGroups.length === 0 ? (
-                  <p className="text-xs text-gray-400">暂无列定义</p>
-                ) : (
-                  <div className="space-y-3">
-                    {columnGroups.map((group) => (
-                      <div key={group.data_type_key} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                        <div className="px-3 py-2 bg-gray-50 text-xs font-medium text-gray-600 flex items-center justify-between">
-                          {editingGroupLabel === group.data_type_key ? (
-                            <div className="flex items-center gap-1 flex-1">
-                              <input
-                                type="text"
-                                value={editGroupLabelValue}
-                                onChange={(e) => setEditGroupLabelValue(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') saveGroupLabel(group.data_type_key);
-                                  if (e.key === 'Escape') setEditingGroupLabel(null);
-                                }}
-                                className="flex-1 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs focus:outline-none"
-                                autoFocus
-                              />
-                              <button onClick={() => saveGroupLabel(group.data_type_key)}
-                                className="text-[10px] px-1.5 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">✓</button>
-                              <button onClick={() => setEditingGroupLabel(null)}
-                                className="text-[10px] px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300">✕</button>
-                            </div>
-                          ) : (
-                            <>
-                              <span>{group.label}</span>
-                              {canEditColumns && (
-                                <button
-                                  onClick={() => { setEditingGroupLabel(group.data_type_key); setEditGroupLabelValue(group.label); }}
-                                  className="text-gray-300 hover:text-blue-500 text-[10px] ml-2"
-                                  title="编辑组名称"
-                                >
-                                  <Pencil className="w-3 h-3 inline" />
-                                </button>
-                              )}
-                            </>
-                          )}
-                        </div>
-                        <div className="divide-y divide-gray-100">
-                          {group.columns.map((col) => {
-                            const editKey = `${group.data_type_key}::${col.column_name}`;
-                            const editData = columnEditData[editKey];
-                            return (
-                              <div key={col.column_name} className="flex items-center px-3 py-1.5 text-xs gap-1">
-                                <span className="text-gray-400 w-6 shrink-0">{col.ordinal}</span>
-                                {isEditingColumns && editData ? (
-                                  <>
-                                    <input
-                                      type="text"
-                                      value={editData.label}
-                                      onChange={(e) => updateColumnEditField(editKey, 'label', e.target.value)}
-                                      className="flex-1 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs focus:outline-none min-w-0"
-                                      placeholder="显示名称"
-                                    />
-                                    {showOriginalName && (
-                                      <span className="text-gray-400 font-mono text-xs shrink-0 truncate" style={{ width: '4.5rem' }} title={col.column_name}>
-                                        {col.column_name}
-                                      </span>
-                                    )}
-                                    <input
-                                      type="text"
-                                      value={editData.unit}
-                                      onChange={(e) => updateColumnEditField(editKey, 'unit', e.target.value)}
-                                      className="bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs focus:outline-none"
-                                      style={{ width: '3rem' }}
-                                      placeholder="单位"
-                                    />
-                                  </>
-                                ) : (
-                                  <>
-                                    <span className="flex-1 text-gray-700 truncate">
-                                      {col.display_label || col.column_name}
-                                    </span>
-                                    {showOriginalName && (
-                                      <span className="text-gray-400 font-mono text-xs shrink-0 truncate" style={{ width: '4.5rem' }} title={col.column_name}>
-                                        {col.column_name}
-                                      </span>
-                                    )}
-                                    <span className="text-gray-400 shrink-0 text-right" style={{ width: '3rem' }}>
-                                      {col.unit || '-'}
-                                    </span>
-                                  </>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <ColumnEditor
+                groups={columnGroups}
+                canEdit={canEditColumns}
+                editing={isEditingColumns}
+                editData={columnEditData}
+                showOriginalName={showOriginalName}
+                editingGroupLabel={editingGroupLabel}
+                groupLabelValue={editGroupLabelValue}
+                onShowOriginalNameChange={setShowOriginalName}
+                onStartBatchEdit={startBatchEditColumns}
+                onSaveAll={saveAllColumns}
+                onCancelBatchEdit={cancelBatchEditColumns}
+                onStartGroupEdit={(dataTypeKey, label) => { setEditingGroupLabel(dataTypeKey); setEditGroupLabelValue(label); }}
+                onGroupLabelValueChange={setEditGroupLabelValue}
+                onSaveGroupLabel={saveGroupLabel}
+                onCancelGroupEdit={() => setEditingGroupLabel(null)}
+                onColumnEditField={updateColumnEditField}
+              />
             </div>
           </>
         )}
@@ -1293,214 +1175,26 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
       )}
       {/* Sync package import modal */}
       {syncImportOpen && (
-        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6">
-          <div className="w-full max-w-4xl max-h-[86vh] bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col">
-            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
-              <div>
-                <div className="text-base font-semibold text-gray-900">导入外场同步包</div>
-                <div className="text-xs text-gray-500 mt-1">先预览包内容，再确认机型、飞机映射和重复架次策略</div>
-              </div>
-              <button
-                onClick={() => setSyncImportOpen(false)}
-                className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
-              >
-                关闭
-              </button>
-            </div>
-            <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
-              <input
-                value={syncImportPath}
-                onChange={(e) => setSyncImportPath(e.target.value)}
-                placeholder="输入 .fapkg 同步包路径，或点击浏览选择"
-                className="flex-1 bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={browseSyncPackage}
-                disabled={syncImportBrowsing || syncImportLoading}
-                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
-              >
-                {syncImportBrowsing ? '...' : '浏览'}
-              </button>
-              <button
-                onClick={() => submitSyncImportPreview()}
-                disabled={syncImportLoading || !syncImportPath.trim()}
-                className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40"
-              >
-                {syncImportLoading ? '处理中...' : '预览'}
-              </button>
-            </div>
-            <div className="flex-1 overflow-auto px-5 py-4 space-y-4">
-              {syncImportError && (
-                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-3 py-2 break-all">
-                  {syncImportError}
-                </div>
-              )}
-
-              {syncImportPreview && (
-                <>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                    <div className="rounded border border-gray-200 px-3 py-2">
-                      <div className="text-gray-400">来源节点</div>
-                      <div className="text-gray-800 font-medium truncate">{syncImportPreview.summary.source_node_id || '-'}</div>
-                    </div>
-                    <div className="rounded border border-gray-200 px-3 py-2">
-                      <div className="text-gray-400">导出时间</div>
-                      <div className="text-gray-800 font-medium truncate">{syncImportPreview.summary.exported_at || '-'}</div>
-                    </div>
-                    <div className="rounded border border-gray-200 px-3 py-2">
-                      <div className="text-gray-400">范围</div>
-                      <div className="text-gray-800 font-medium">
-                        {syncImportPreview.summary.flight_count} 架次 / {syncImportPreview.summary.aircraft_count} 飞机
-                      </div>
-                    </div>
-                    <div className="rounded border border-gray-200 px-3 py-2">
-                      <div className="text-gray-400">导入路径</div>
-                      <div className={syncImportPreview.summary.compatible ? 'text-green-700 font-medium' : 'text-amber-700 font-medium'}>
-                        {syncImportPreview.summary.compatible ? 'parsed.sqlite 直接导入' : '需要原始文件重解析'}
-                      </div>
-                    </div>
-                  </div>
-
-                  {!syncImportPreview.summary.compatible && (
-                    <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-3 py-2">
-                      当前界面暂不执行不兼容包的重解析导入，请使用同 package/schema 版本导出的同步包。
-                    </div>
-                  )}
-
-                  <div className="space-y-2">
-                    <div className="text-sm font-semibold text-gray-800">机型处理</div>
-                    {syncImportPreview.model_plans.map((plan) => {
-                      const action = syncModelActions[plan.source_model_id] ?? { action: plan.default_action, name: plan.create_name };
-                      return (
-                        <div key={plan.source_model_id} className="rounded border border-gray-200 px-3 py-2 flex items-center gap-3 text-xs">
-                          <span className="font-medium text-gray-800 w-40 truncate">{plan.source_name}</span>
-                          {plan.matched_model ? (
-                            <span className="text-green-700">匹配到机型：{plan.matched_model.name}</span>
-                          ) : (
-                            <>
-                              <select
-                                value={action.action}
-                                onChange={(e) => updateSyncModelAction(plan.source_model_id, { action: e.target.value as 'use_existing' | 'create' })}
-                                className="bg-white border border-gray-300 rounded px-2 py-1"
-                              >
-                                <option value="create">新建机型</option>
-                                <option value="use_existing">指定已有机型</option>
-                              </select>
-                              {action.action === 'create' ? (
-                                <input
-                                  value={action.name ?? plan.create_name}
-                                  onChange={(e) => updateSyncModelAction(plan.source_model_id, { name: e.target.value })}
-                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
-                                />
-                              ) : (
-                                <select
-                                  value={action.target_model_id ?? ''}
-                                  onChange={(e) => updateSyncModelAction(plan.source_model_id, { target_model_id: e.target.value ? Number(e.target.value) : null })}
-                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
-                                >
-                                  <option value="">选择机型...</option>
-                                  {models.map((model) => (
-                                    <option key={model.id} value={model.id}>{model.name}</option>
-                                  ))}
-                                </select>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="text-sm font-semibold text-gray-800">飞机映射</div>
-                    {syncImportPreview.aircraft_plans.map((plan) => {
-                      const mapping = syncAircraftMappings[plan.source_aircraft_id] ?? { action: plan.default_action, name: plan.create_name };
-                      return (
-                        <div key={plan.source_aircraft_id} className="rounded border border-gray-200 px-3 py-2 flex items-center gap-3 text-xs">
-                          <span className="font-medium text-gray-800 w-40 truncate">{plan.source_name}</span>
-                          {plan.matched_aircraft ? (
-                            <span className="text-green-700">匹配到飞机：{plan.matched_aircraft.name}</span>
-                          ) : (
-                            <>
-                              <select
-                                value={mapping.action}
-                                onChange={(e) => updateSyncAircraftMapping(plan.source_aircraft_id, { action: e.target.value as 'use_existing' | 'create' })}
-                                className="bg-white border border-gray-300 rounded px-2 py-1"
-                              >
-                                <option value="create">新建飞机</option>
-                                <option value="use_existing">指定已有飞机</option>
-                              </select>
-                              {mapping.action === 'create' ? (
-                                <input
-                                  value={mapping.name ?? plan.create_name}
-                                  onChange={(e) => updateSyncAircraftMapping(plan.source_aircraft_id, { name: e.target.value })}
-                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
-                                />
-                              ) : (
-                                <select
-                                  value={mapping.target_aircraft_id ?? ''}
-                                  onChange={(e) => updateSyncAircraftMapping(plan.source_aircraft_id, { target_aircraft_id: e.target.value ? Number(e.target.value) : null })}
-                                  className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"
-                                >
-                                  <option value="">选择飞机...</option>
-                                  {plan.existing_aircraft.map((aircraft) => (
-                                    <option key={aircraft.id} value={aircraft.id}>{aircraft.name}</option>
-                                  ))}
-                                </select>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="rounded border border-gray-200 px-3 py-2 text-xs space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="font-medium text-gray-800">重复架次</span>
-                      <span className="text-gray-500">{syncImportPreview.duplicates.length} 个自动匹配重复项</span>
-                    </div>
-                    <select
-                      value={syncConflictPolicy}
-                      onChange={(e) => setSyncConflictPolicy(e.target.value as 'skip' | 'update_records')}
-                      className="bg-white border border-gray-300 rounded px-2 py-1"
-                    >
-                      <option value="skip">保持现状，不更新记录字段</option>
-                      <option value="update_records">更新已有架次名称和飞行记录字段</option>
-                    </select>
-                  </div>
-                </>
-              )}
-
-              {syncImportReport && (
-                <div className="text-xs text-green-700 bg-green-50 border border-green-100 rounded px-3 py-2 space-y-1">
-                  <div>导入完成：{syncImportReport.status}</div>
-                  <div>
-                    新增 {syncImportReport.imported_flights.length}，跳过 {syncImportReport.skipped_flights.length}，
-                    更新 {syncImportReport.updated_flights.length}，warning {syncImportReport.warnings.length}，
-                    失败 {syncImportReport.failures.length}
-                  </div>
-                  <div>解析数据行：{syncImportReport.parsed_rows ?? 0}，原始文件：{syncImportReport.raw_files?.attached ?? 0}</div>
-                </div>
-              )}
-            </div>
-            <div className="px-5 py-4 border-t border-gray-200 flex items-center justify-end gap-2">
-              <button
-                onClick={() => setSyncImportOpen(false)}
-                className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-              >
-                取消
-              </button>
-              <button
-                onClick={submitSyncImport}
-                disabled={syncImportLoading || !syncImportPreview || !syncImportPreview.summary.compatible}
-                className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-500 disabled:opacity-40"
-              >
-                {syncImportLoading ? '导入中...' : '确认导入'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ModelImportDialog
+          path={syncImportPath}
+          onPathChange={setSyncImportPath}
+          browsing={syncImportBrowsing}
+          loading={syncImportLoading}
+          error={syncImportError}
+          preview={syncImportPreview}
+          report={syncImportReport}
+          models={models}
+          modelActions={syncModelActions}
+          aircraftMappings={syncAircraftMappings}
+          conflictPolicy={syncConflictPolicy}
+          onBrowse={browseSyncPackage}
+          onPreview={() => submitSyncImportPreview()}
+          onModelActionChange={updateSyncModelAction}
+          onAircraftMappingChange={updateSyncAircraftMapping}
+          onConflictPolicyChange={setSyncConflictPolicy}
+          onClose={() => setSyncImportOpen(false)}
+          onSubmit={submitSyncImport}
+        />
       )}
     </div>
   );

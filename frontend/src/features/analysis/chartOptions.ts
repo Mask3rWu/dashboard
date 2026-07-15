@@ -48,7 +48,7 @@ export function buildChartOption(
   const seriesColor = (si: number) => colors[si % colors.length];
   const unitColor = (gi: number) => colors[gi % colors.length];
 
-  const yAxes: any[] = [];
+  const yAxes: echarts.YAXisComponentOption[] = [];
   const keyToGroup = new Map<string, number>();
 
   if (isNorm) {
@@ -136,8 +136,8 @@ export function buildChartOption(
     },
   ];
 
-  const mainYAxes = yAxes.map((a) => ({ ...a, gridIndex: 0 }));
-  const yAxisArr = hasFilter ? [
+  const mainYAxes: echarts.YAXisComponentOption[] = yAxes.map((a) => ({ ...a, gridIndex: 0 }));
+  const yAxisArr: echarts.YAXisComponentOption[] = hasFilter ? [
     ...mainYAxes,
     { type: 'value', gridIndex: 1, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
     { type: 'value', gridIndex: 0, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
@@ -162,29 +162,31 @@ export function buildChartOption(
       backgroundColor: '#fff',
       borderColor: '#e5e7eb',
       textStyle: { color: '#374151', fontSize: 12 },
-      formatter: (params: any) => {
+      formatter: (params: echarts.TooltipComponentFormatterCallbackParams) => {
         if (!Array.isArray(params)) return '';
-        const mainParams = params.filter((p: any) =>
+        const tooltipItems = params as echarts.DefaultLabelFormatterCallbackParams[];
+        const mainParams = tooltipItems.filter((p) =>
           p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__' && p.seriesName !== '__text_anchor__');
         if (mainParams.length === 0 && textSeries.length === 0) return '';
-        const anchorParam = params.find((p: any) => p.seriesName === '__text_anchor__');
+        const anchorParam = tooltipItems.find((p) => p.seriesName === '__text_anchor__');
         const timeIdx = mainParams[0]?.dataIndex ?? anchorParam?.dataIndex ?? -1;
         const time = mainParams[0]?.name || anchorParam?.name || (timeIdx >= 0 ? (times[timeIdx] || '') : '');
         let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
         // Deduplicate by seriesName (ECharts may return the same series twice
         // when multiple yAxes share data — filter keeps only the first occurrence)
         const seenNames = new Set<string>();
-        mainParams.forEach((p: any) => {
+        mainParams.forEach((p) => {
           if (!p.seriesName || seenNames.has(p.seriesName)) return;
           seenNames.add(p.seriesName);
-          if (p.value?.[1] != null) {
-            const sIdx = p.seriesIndex;
+          const pointValue = Array.isArray(p.value) ? p.value[1] : null;
+          if (pointValue != null) {
+            const sIdx = p.seriesIndex ?? -1;
             const key = numericSeries[sIdx]?.[0] || '';
             const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
-            const displayVal = Number(p.value[1]).toFixed(2);
+            const displayVal = Number(pointValue).toFixed(2);
             html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
             if (sf !== 1.0) {
-              const rawVal = (Number(p.value[1]) / sf).toFixed(3);
+              const rawVal = (Number(pointValue) / sf).toFixed(3);
               html += ` <span style="color:#9ca3af;font-size:10px">(原始: ${rawVal}×${sf})</span>`;
             }
             html += `</div>`;

@@ -7,6 +7,7 @@ pattern matching and session key extraction via format config JSONs.
 import os
 import re
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from backend.database import get_db
 from backend.import_pipeline.format_configs import (
     compare_configs,
@@ -150,8 +151,6 @@ def _build_clusters(files_info, max_diff_sec=3):
     Returns:
         list of (canonical_key, [file_info, ...])
     """
-    from collections import defaultdict
-
     by_key = defaultdict(list)
     for f in files_info:
         by_key[f['session_key']].append(f)
@@ -483,7 +482,6 @@ def scan_folder(source_path, config):
         }
 
     # Group by aircraft_serial, then cluster by time within each aircraft
-    from collections import defaultdict
     by_aircraft = defaultdict(list)
     for f in files:
         by_aircraft[f['aircraft_serial']].append(f)

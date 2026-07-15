@@ -69,14 +69,17 @@ export default function FlightFilterBar({ value, onChange }: Props) {
   // Sync from parent when value changes externally (e.g. reset on model switch).
   useEffect(() => {
     suppressEmitRef.current = true;
-    if (value) {
-      const valid = value.conditions.filter((c) => fieldMap.has(c.field));
-      setLogic(value.logic);
-      setConditions(valid);
-    } else {
-      setLogic('and');
-      setConditions([]);
-    }
+    const timer = window.setTimeout(() => {
+      if (value) {
+        const valid = value.conditions.filter((c) => fieldMap.has(c.field));
+        setLogic(value.logic);
+        setConditions(valid);
+      } else {
+        setLogic('and');
+        setConditions([]);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [value]);
 
   // Emit valid conditions (debounced) whenever local state changes.

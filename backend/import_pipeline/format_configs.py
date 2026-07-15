@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
 
 from backend.import_pipeline.file_reader import has_header, parse_lines
 
@@ -456,8 +457,7 @@ def _is_raw_dump(filepath):
     Returns:
         bool: True if the file looks like a raw byte dump.
     """
-    import re as _re
-    hex_token = _re.compile(r'^[0-9A-Fa-f]{1,2}$')
+    hex_token = re.compile(r'^[0-9A-Fa-f]{1,2}$')
 
     # ── Signal 1: binary content in the file head ──
     # NUL bytes are an unambiguous binary marker. For the share signal we count
@@ -821,8 +821,6 @@ def get_columns_for_model(conn, model_id):
     Returns:
         [{table, label, columns: [{key, label, unit}]}]
     """
-    from collections import OrderedDict
-
     rows = conn.execute(
         """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
                   cr.column_name, cr.display_label as col_label, cr.unit,
@@ -858,8 +856,6 @@ def get_columns_for_flight(conn, flight_id):
     """Get available columns for a specific flight, grouped by data type.
     Only returns data types that actually have data for this flight.
     """
-    from collections import OrderedDict
-
     # Get flight's model_id
     flight = conn.execute(
         "SELECT a.model_id FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.id = ?",

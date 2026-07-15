@@ -83,7 +83,6 @@ export default function DirectorySummary({ sourcePath, scanResult }: { sourcePat
   useEffect(() => {
     let cancelled = false;
     if (!sourcePath.trim()) {
-      setSubdirs(undefined);
       return;
     }
     listSubdirs(sourcePath)

@@ -1,19 +1,18 @@
 import { useState, useEffect, useRef } from 'react';
 import { Pencil, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
-import * as echarts from 'echarts';
-import { getAlignedData, getStats, getCorrelation, getAnomaly, listPresets, createPreset, deletePreset, listFilterPresets, createFilterPreset, deleteFilterPreset, type ColumnGroup, type AlignedData, type FlightStats, type Preset, type FilterSpec, type FilterPreset } from '../api/analysis';
+import { getAlignedData, getStats, getCorrelation, getAnomaly, listPresets, createPreset, deletePreset, listFilterPresets, createFilterPreset, deleteFilterPreset, type ColumnGroup, type AlignedData, type FlightStats, type Preset, type FilterSpec, type FilterPreset, type AnomalyData, type CorrelationData } from '../api/analysis';
 import { getFlight, updateFlight, deleteFlight, type Flight } from '../api/flights';
 import { updateModelColumn, listAircraft, type AircraftModel, type Aircraft, type DeleteScope } from '../api/models';
 import FilterBar from '../components/FilterBar';
 import { deleteActionLabel, deleteScopeFor, syncStateClass, syncStateLabel } from '../syncStatus';
-import { buildChartOption } from '../features/analysis/chartOptions';
-import { AnomalyChart, CorrelationHeatmap, type AnomalyData } from '../features/analysis/AnalysisCharts';
+import { AnomalyChart, CorrelationHeatmap } from '../features/analysis/AnalysisCharts';
+import FlightChart, { type FlightChartHandle } from '../features/analysis/FlightChart';
 
 interface Props {
   active: boolean;
   flights: Flight[];
   selectedFlightId: number | null;
-  onSelectFlight: (id: number) => void;
+  onSelectFlight: (id: number | null) => void;
   onFlightsChanged: () => void;
   // Three-level selection
   models: AircraftModel[];
@@ -56,7 +55,7 @@ export default function FlightView({
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
   const [anomalyCol, setAnomalyCol] = useState('');
   const [anomalyData, setAnomalyData] = useState<AnomalyData | null>(null);
-  const [corrData, setCorrData] = useState<any>(null);
+  const [corrData, setCorrData] = useState<CorrelationData | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
@@ -150,10 +149,8 @@ export default function FlightView({
       return f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s);
     });
 
-  const chartRef = useRef<HTMLDivElement>(null);
-  const chartInst = useRef<echarts.ECharts | null>(null);
+  const flightChartRef = useRef<FlightChartHandle>(null);
   const presetNameRef = useRef<HTMLInputElement>(null);
-  const yZoomRef = useRef({ start: 0, end: 100 });
 
   // Derive current model_id from the selected flight
   const currentModelId = flights.find(f => f.id === selectedFlightId)?.model_id ?? null;
@@ -163,15 +160,18 @@ export default function FlightView({
   const alignedRequestRef = useRef(0);
 
   useEffect(() => {
-    setSelectedColumns([]);
-    setFilterSpec(null);
-    setColumnGroups([]);
-    setAligned(null);
-    setPresets([]);
-    setFilterPresets([]);
-    setCorrData(null);
-    setAnomalyData(null);
-    setAnomalyCol('');
+    const timer = window.setTimeout(() => {
+      setSelectedColumns([]);
+      setFilterSpec(null);
+      setColumnGroups([]);
+      setAligned(null);
+      setPresets([]);
+      setFilterPresets([]);
+      setCorrData(null);
+      setAnomalyData(null);
+      setAnomalyCol('');
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [currentModelId]);
 
   // ─── Load flight data ──────────────────────────────────
@@ -180,233 +180,98 @@ export default function FlightView({
     // when selectedFlightId becomes null (otherwise they'd write
     // data for a flight that is no longer selected).
     latestFlightRef.current = selectedFlightId;
+    let cancelled = false;
     if (!selectedFlightId) {
-      setAligned(null);
-      return;
+      const timer = window.setTimeout(() => setAligned(null), 0);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timer);
+      };
     }
-    setLoading(true);
-    setAligned(null);  // clear chart immediately when flight changes
-    Promise.all([
-      getFlight(selectedFlightId),
-      getStats(selectedFlightId),
-      currentModelId != null ? listPresets(currentModelId) : Promise.resolve({ presets: [] }),
-      currentModelId != null ? listFilterPresets(currentModelId) : Promise.resolve({ presets: [] }),
-    ]).then(([flightData, statsData, presetData, fpData]) => {
-      // Abort if flight changed during fetch
-      if (latestFlightRef.current !== selectedFlightId) return;
-      setColumnGroups(flightData.columns);
-      setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
-      // Initialize scale factors from column metadata
-      const sf: Record<string, number> = {};
-      flightData.columns.forEach((g: ColumnGroup) => {
-        g.columns.forEach((c: any) => {
-          sf[c.key] = c.scale_factor ?? 1.0;
+    const flightId = selectedFlightId;
+    const modelId = currentModelId;
+    const timer = window.setTimeout(() => {
+      if (cancelled || latestFlightRef.current !== flightId) return;
+      setLoading(true);
+      setAligned(null);  // clear chart immediately when flight changes
+      Promise.all([
+        getFlight(flightId),
+        getStats(flightId),
+        modelId != null ? listPresets(modelId) : Promise.resolve({ presets: [] }),
+        modelId != null ? listFilterPresets(modelId) : Promise.resolve({ presets: [] }),
+      ]).then(([flightData, statsData, presetData, fpData]) => {
+        if (cancelled || latestFlightRef.current !== flightId) return;
+        setColumnGroups(flightData.columns);
+        setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
+        const sf: Record<string, number> = {};
+        flightData.columns.forEach((g: ColumnGroup) => {
+          g.columns.forEach((c) => {
+            sf[c.key] = c.scale_factor ?? 1.0;
+          });
         });
-      });
-      setScaleFactors(sf);
-      setStats(statsData);
-      setPresets(presetData.presets);
-      setFilterPresets(fpData.presets);
+        setScaleFactors(sf);
+        setStats(statsData);
+        setPresets(presetData.presets);
+        setFilterPresets(fpData.presets);
 
-      setSelectedColumns((prev) => {
-        const newKeys = new Set(
-          flightData.columns.flatMap((g) => g.columns.map((c) => c.key))
-        );
-        const kept = prev.filter((k) => newKeys.has(k));
-        if (kept.length > 0) return kept;
-        // First load: pick sensible defaults
-        const defaults = [
-          'pos.lat', 'pos.lng', 'gps.nava_alt',
-          'engine.engine_rpm', 'drone_state.battery_pct',
-        ];
-        return defaults.filter((d) => newKeys.has(d));
+        setSelectedColumns((prev) => {
+          const newKeys = new Set(flightData.columns.flatMap((g) => g.columns.map((c) => c.key)));
+          const kept = prev.filter((key) => newKeys.has(key));
+          if (kept.length > 0) return kept;
+          const defaults = ['pos.lat', 'pos.lng', 'gps.nava_alt', 'engine.engine_rpm', 'drone_state.battery_pct'];
+          return defaults.filter((key) => newKeys.has(key));
+        });
+        setCorrData(null);
+        setAnomalyData(null);
+      }).catch((error) => {
+        console.error('Failed to load flight data:', error);
+      }).finally(() => {
+        if (!cancelled && latestFlightRef.current === flightId) setLoading(false);
       });
-      setCorrData(null);
-      setAnomalyData(null);
-    }).catch((err) => {
-      console.error('Failed to load flight data:', err);
-    }).finally(() => {
-      if (latestFlightRef.current === selectedFlightId) {
-        setLoading(false);
-      }
-    });
-  }, [selectedFlightId]);
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedFlightId, currentModelId]);
 
   // ─── Fetch aligned data ────────────────────────────────
   useEffect(() => {
     const requestId = ++alignedRequestRef.current;
+    let cancelled = false;
     if (!selectedFlightId || selectedColumns.length === 0) {
-      setAligned(null);
-      setAlignedLoading(false);
-      return;
+      const timer = window.setTimeout(() => {
+        setAligned(null);
+        setAlignedLoading(false);
+      }, 0);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timer);
+      };
     }
     const flightId = selectedFlightId;
-    setAlignedLoading(true);
-    getAlignedData(flightId, selectedColumns, filterSpec ?? undefined)
-      .then((data) => {
-        // Abort if flight changed during fetch
-        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
-          setAligned(data);
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch aligned data:', err);
-        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
-          setAligned(null);
-        }
-      })
-      .finally(() => {
-        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
-          setAlignedLoading(false);
-        }
-      });
-  }, [selectedFlightId, selectedColumns, filterSpec]);
-
-  // ─── Chart: lifecycle ──────────────────────────────────
-  //
-  // Why one effect, not two:
-  // Previously we had two effects — one for init/dispose (keyed on
-  // viewMode/active) and one for setOption (keyed on data). The split
-  // caused crashes ("Cannot read properties of undefined (reading
-  // 'group')" / "__ec_inner_*") because the update effect would call
-  // setOption on an instance whose internal component tree carried
-  // residue from the previous flight. ECharts 6.1 + notMerge=true
-  // doesn't handle dramatic shape changes (different yAxis count, unit
-  // groups, hasFilter on/off) cleanly.
-  //
-  // The fix: dispose and re-init the chart from scratch on every
-  // significant change. Implementation note: zrender dblclick handler
-  // is re-bound after each init (cheap, single listener).
-  //
-  // Container size handling: ResizeObserver still drives resize() on
-  // an existing instance, and re-init when the container first gains
-  // dimensions (deferred init for keep-alive tabs).
-  useEffect(() => {
-    if (!active || viewMode !== 'chart' || !chartRef.current) {
-      if (chartInst.current) {
-        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-        chartInst.current = null;
-      }
-      return;
-    }
-
-    const container = chartRef.current;
-
-    const bindDblClick = (inst: echarts.ECharts) => {
-      const zr = inst.getZr();
-      zr.on('dblclick', (e: any) => {
-        const ZOOM = 2;
-        const MIN_RANGE = 2;
-        const opt = inst.getOption();
-        const dzList = (opt?.dataZoom as any[]) || [];
-        const xSlider = dzList.find((d: any) => d.type === 'slider' && d.yAxisIndex === undefined);
-        const ySlider = dzList.find((d: any) => d.type === 'slider' && (d.yAxisIndex !== undefined));
-        const xStart: number = xSlider?.start ?? 0;
-        const xEnd: number = xSlider?.end ?? 100;
-        const yStart: number = ySlider?.start ?? 0;
-        const yEnd: number = ySlider?.end ?? 100;
-
-        const gridModel = (inst as any)?.getModel().getComponent('grid', 0);
-        const rect = (gridModel as any)?.coordinateSystem?.getRect?.();
-        const fx = rect ? Math.max(0, Math.min(1, (e.offsetX - rect.x) / rect.width)) : 0.5;
-        const fy = rect ? 1 - Math.max(0, Math.min(1, (e.offsetY - rect.y) / rect.height)) : 0.5;
-        const xCenter = xStart + fx * (xEnd - xStart);
-        const yCenter = yStart + fy * (yEnd - yStart);
-
-        const xRange = xEnd - xStart;
-        if (xRange > MIN_RANGE) {
-          const newXRange = xRange / ZOOM;
-          inst.dispatchAction({
-            type: 'dataZoom',
-            dataZoomIndex: 0,
-            start: Math.max(0, xCenter - newXRange / 2),
-            end: Math.min(100, xCenter + newXRange / 2),
-          });
-        }
-
-        const yRange = yEnd - yStart;
-        if (yRange > MIN_RANGE) {
-          const newYRange = yRange / ZOOM;
-          yZoomRef.current = {
-            start: Math.max(0, yCenter - newYRange / 2),
-            end: Math.min(100, yCenter + newYRange / 2),
-          };
-          inst.dispatchAction({
-            type: 'dataZoom',
-            dataZoomId: 'ySlider',
-            start: yZoomRef.current.start,
-            end: yZoomRef.current.end,
-          });
-        }
-      });
-    };
-
-    // Build option for the current data state. Computed inside the
-    // effect so it captures the latest aligned/normalize/scaleFactors
-    // without needing a separate effect.
-    const buildAndApply = (inst: echarts.ECharts) => {
-      if (!aligned) return;
-      try {
-        const option = buildChartOption(aligned, normalize, scaleFactors);
-        inst.setOption(option, true);
-        // WebView2 quirk: canvas size sometimes lags one frame behind
-        // layout when the container has just become visible. Force a
-        // resize on the next frame so ECharts paints against the
-        // now-flushed dimensions.
-        requestAnimationFrame(() => {
-          try { inst.resize(); } catch (e) { /* ignore */ }
+    const columns = selectedColumns;
+    const filter = filterSpec ?? undefined;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      setAlignedLoading(true);
+      getAlignedData(flightId, columns, filter)
+        .then((data) => {
+          if (!cancelled && latestFlightRef.current === flightId && alignedRequestRef.current === requestId) setAligned(data);
+        })
+        .catch((error) => {
+          console.error('Failed to fetch aligned data:', error);
+          if (!cancelled && latestFlightRef.current === flightId && alignedRequestRef.current === requestId) setAligned(null);
+        })
+        .finally(() => {
+          if (!cancelled && latestFlightRef.current === flightId && alignedRequestRef.current === requestId) setAlignedLoading(false);
         });
-      } catch (e) {
-        console.error('setOption failed:', e);
-      }
-    };
-
-    // Create a fresh instance every time this effect runs. This is the
-    // cornerstone of the fix: ECharts 6.1 cannot reliably diff between
-    // option shapes that differ in yAxis count / unit groups / hasFilter,
-    // so we never reuse an instance across data changes.
-    const createInstance = () => {
-      if (container.clientWidth === 0 || container.clientHeight === 0) return null;
-      try {
-        const inst = echarts.init(container);
-        bindDblClick(inst);
-        return inst;
-      } catch (e) {
-        console.error('ECharts init failed:', e);
-        return null;
-      }
-    };
-
-    // Dispose any existing instance from a previous effect run
-    // (shouldn't normally happen — cleanup below handles it — but
-    // defensive against StrictMode double-invoke).
-    if (chartInst.current) {
-      try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-      chartInst.current = null;
-    }
-
-    chartInst.current = createInstance();
-    if (chartInst.current) buildAndApply(chartInst.current);
-
-    const ro = new ResizeObserver(() => {
-      if (!chartInst.current) {
-        // Deferred init for keep-alive: container just gained dimensions.
-        chartInst.current = createInstance();
-        if (chartInst.current) buildAndApply(chartInst.current);
-      } else {
-        try { chartInst.current.resize(); } catch (e) { /* ignore */ }
-      }
-    });
-    ro.observe(container);
-
+    }, 0);
     return () => {
-      ro.disconnect();
-      if (chartInst.current) {
-        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-        chartInst.current = null;
-      }
+      cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [viewMode, active, aligned, normalize, scaleFactors]);
+  }, [selectedFlightId, selectedColumns, filterSpec]);
 
   // ─── Column toggle ─────────────────────────────────────
   const toggleColumn = (key: string) => {
@@ -523,7 +388,7 @@ export default function FlightView({
       await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
       if (selectedFlightId === flight.id) {
         const remaining = flights.filter((f) => f.id !== flight.id);
-        onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
+        onSelectFlight(remaining.length > 0 ? remaining[0].id : null);
       }
       setDeletingFlightId(null);
       onFlightsChanged();
@@ -809,19 +674,7 @@ export default function FlightView({
 
         <button
           onClick={() => {
-            yZoomRef.current = { start: 0, end: 100 };
-            chartInst.current?.dispatchAction({
-              type: 'dataZoom',
-              dataZoomIndex: 0,
-              start: 0,
-              end: 100,
-            });
-            chartInst.current?.dispatchAction({
-              type: 'dataZoom',
-              dataZoomId: 'ySlider',
-              start: 0,
-              end: 100,
-            });
+            flightChartRef.current?.resetZoom();
           }}
           className="px-2 py-0.5 text-xs rounded border border-gray-300 text-gray-500 hover:bg-gray-100 transition-colors"
           title="双击图表可放大，点击此按钮重置缩放"
@@ -1100,22 +953,15 @@ export default function FlightView({
         <div className="flex-1 flex flex-col min-w-0 relative">
           {/* Chart Tab */}
           {viewMode === 'chart' && (
-            <>
-              <div ref={chartRef} className="flex-1 min-h-0" />
-              {chartEmptyState && (
-                <EmptyState
-                  title={chartEmptyState.title}
-                  description={chartEmptyState.description}
-                />
-              )}
-              <ChartDebugBadge
-                active={active}
-                chartRef={chartRef}
-                chartInst={chartInst}
-                aligned={aligned}
-                selectedColumns={selectedColumns}
-              />
-            </>
+            <FlightChart
+              ref={flightChartRef}
+              active={active}
+              aligned={aligned}
+              normalize={normalize}
+              scaleFactors={scaleFactors}
+              selectedColumns={selectedColumns}
+              emptyState={chartEmptyState}
+            />
           )}
 
           {/* Correlation Tab */}
@@ -1171,73 +1017,3 @@ export default function FlightView({
 
 // ═══════════════════════════════════════════════════════════
 // Sub-components
-// ═══════════════════════════════════════════════════════════
-
-function EmptyState({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-      <div className="max-w-md px-6 py-5 text-center">
-        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-gray-400">
-          !
-        </div>
-        <div className="text-sm font-medium text-gray-700">{title}</div>
-        <div className="mt-1 text-xs leading-5 text-gray-500">{description}</div>
-      </div>
-    </div>
-  );
-}
-
-// In-app debug HUD — no DevTools needed.
-// Sticks to the bottom-right of the chart area, updates ~4×/sec,
-// shows the values needed to diagnose the "chart blank after tab
-// switch" bug: container dimensions, instance liveness, data
-// presence, etc. Click to force a resize.
-function ChartDebugBadge({
-  active,
-  chartRef,
-  chartInst,
-  aligned,
-  selectedColumns,
-}: {
-  active: boolean;
-  chartRef: React.RefObject<HTMLDivElement | null>;
-  chartInst: React.MutableRefObject<echarts.ECharts | null>;
-  aligned: AlignedData | null;
-  selectedColumns: string[];
-}) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 250);
-    return () => clearInterval(id);
-  }, []);
-
-  const el = chartRef.current;
-  const w = el?.clientWidth ?? 0;
-  const h = el?.clientHeight ?? 0;
-  const visible = el ? (el.offsetParent !== null) : false;
-  const inst = chartInst.current;
-  const instW = inst ? (inst.getWidth?.() ?? -1) : -1;
-  const instH = inst ? (inst.getHeight?.() ?? -1) : -1;
-  const seriesCount = aligned ? Object.keys(aligned.series || {}).length : 0;
-  const timesCount = aligned?.times?.length ?? 0;
-
-  const forceResize = () => {
-    if (inst) {
-      try { inst.resize(); } catch { /* ignore */ }
-    }
-  };
-
-  return (
-    <div
-      onClick={forceResize}
-      title="Click to force chart.resize()"
-      className="absolute bottom-2 right-2 z-50 bg-black/75 text-white text-[10px] font-mono px-2 py-1 rounded leading-tight cursor-pointer hover:bg-black/90 select-none"
-      style={{ pointerEvents: 'auto' }}
-    >
-      <div>active:{String(active)} vis:{String(visible)}</div>
-      <div>DOM:{w}×{h} inst:{inst ? `${instW}×${instH}` : 'null'}</div>
-      <div>data:{seriesCount}s/{timesCount}p cols:{selectedColumns.length}</div>
-      <div>tick:{tick} (click→resize)</div>
-    </div>
-  );
-}

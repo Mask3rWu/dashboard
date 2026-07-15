@@ -14,12 +14,18 @@ import {
 import FlightRecordForm from '../features/flights/FlightRecordForm';
 import { emptyRecord } from '../features/flights/recordFields';
 import DirectorySummary from '../features/import/DirectorySummary';
+import DirectoryPicker from '../features/import/DirectoryPicker';
+import ModelFromScanForm from '../features/import/ModelFromScanForm';
 
 
 interface Props {
   onImported: () => void | Promise<void>;
   canDeleteFlights: boolean;
   serverOnline?: boolean;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // ── Directory structure validation ─────────────────────────
@@ -99,14 +105,18 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
     try {
       const data = await listModels();
       setModels(data.models);
-    } catch {}
+    } catch {
+      // Keep the previous model list when the context refresh fails.
+    }
   };
 
   const loadAircraftForModel = async (modelId: number) => {
     try {
       const data = await listAircraft(modelId);
       setAircraftList(data.aircraft);
-    } catch {}
+    } catch {
+      // Keep the previous aircraft list when the refresh fails.
+    }
   };
 
   // Seed the new-model form from the scan, and pre-select every non-raw,
@@ -159,8 +169,8 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
       setSessionAircraftMap({});
       setSessionRecords(recordDefaultsBySession(data.sessions));
       setSessionDates({});
-    } catch (e: any) {
-      setScanResult({ source_path: scanPath, folder_name: scanPath, model: null, sessions: [], error: '扫描失败: ' + e.message });
+    } catch (error: unknown) {
+      setScanResult({ source_path: scanPath, folder_name: scanPath, model: null, sessions: [], error: '扫描失败: ' + errorMessage(error) });
     } finally { setScanning(false); }
   };
 
@@ -172,7 +182,9 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
         setPath(data.path);
         await doScan(data.path);
       }
-    } catch {} finally { setBrowsing(false); }
+    } catch {
+      // A cancelled or unavailable native folder dialog leaves the current path unchanged.
+    } finally { setBrowsing(false); }
   };
 
   const handleScan = async () => {
@@ -194,7 +206,7 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
 
   const ensureAircraft = async (session: SessionPreview): Promise<number | null> => {
     // Already assigned
-    let aid = getAircraftId(session);
+    const aid = getAircraftId(session);
     if (aid) return aid;
 
     // Need to create aircraft — requires a model and a serial
@@ -222,7 +234,9 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
 
   const refreshScan = async () => {
     if (!path.trim()) return;
-    try { const data = await scanFolder(path.trim()); setScanResult(data); } catch {}
+    try { const data = await scanFolder(path.trim()); setScanResult(data); } catch {
+      // Preserve the current scan preview when a background refresh fails.
+    }
   };
 
   const handleImport = async (session: SessionPreview) => {
@@ -253,8 +267,8 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
       await onImported();
       await loadFlights();
       await refreshScan();
-    } catch (e: any) {
-      setErrorKeys((prev) => ({ ...prev, [key]: e.message }));
+    } catch (error: unknown) {
+      setErrorKeys((prev) => ({ ...prev, [key]: errorMessage(error) }));
     } finally {
       setImportingKeys((prev) => { const n = new Set(prev); n.delete(key); return n; });
     }
@@ -287,8 +301,8 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
       await loadAircraftForModel(result.id);
       await refreshScan();
       setShowNewModelForm(false);
-    } catch (e: any) {
-      alert('创建机型失败: ' + e.message);
+    } catch (error: unknown) {
+      alert('创建机型失败: ' + errorMessage(error));
     } finally {
       setCreatingModel(false);
     }
@@ -319,13 +333,17 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
           setErrorKeys((prev) => { const n = { ...prev }; delete n[sessionKey]; return n; });
         }
       }
-    } catch {}
+    } catch {
+      // Inline creation errors are surfaced by leaving the assignment unresolved.
+    }
   };
 
   // ─── Flight list management ───────────────────────────────
 
   const loadFlights = useCallback(async () => {
-    try { const data = await listFlights(); setFlights(data.flights); } catch {}
+    try { const data = await listFlights(); setFlights(data.flights); } catch {
+      // Keep the current flight list when a background refresh fails.
+    }
   }, []);
 
   // Load imported flights on mount so the "已导入飞行" list shows existing
@@ -395,23 +413,15 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
 
   return (
     <div className="h-full overflow-auto p-8 max-w-4xl mx-auto space-y-8">
-      {/* Section 1: Folder & Scan */}
-      <section>
-        <h2 className="text-xl font-semibold text-gray-900 mb-4">导入飞行数据</h2>
-        <div className="flex gap-3">
-          <input type="text" value={path} onChange={(e) => setPath(e.target.value)}
-            placeholder="输入飞行数据文件夹路径，或点击浏览选择"
-            className="flex-1 bg-white border border-gray-300 rounded-lg px-4 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:border-blue-500" />
-          <button onClick={handleBrowse} disabled={browsing}
-            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 rounded-lg text-sm font-medium text-gray-700">
-            {browsing ? '...' : '浏览'}
-          </button>
-          <button onClick={handleScan} disabled={scanning || !path.trim()}
-            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 rounded-lg text-sm font-medium text-gray-700">
-            {scanning ? '扫描中...' : scanResult ? '重新扫描' : '扫描'}
-          </button>
-        </div>
-      </section>
+      <DirectoryPicker
+        path={path}
+        browsing={browsing}
+        scanning={scanning}
+        hasScanResult={!!scanResult}
+        onPathChange={setPath}
+        onBrowse={handleBrowse}
+        onScan={handleScan}
+      />
 
       {/* Section 2: Scan Results */}
       {scanResult && (
@@ -502,90 +512,20 @@ export default function ImportPage({ onImported, canDeleteFlights, serverOnline 
             </div>
           )}
 
-          {/* New format, or a manual override of the recommended model. */}
           {showNewModelForm && scanResult.discovered_types && (
-            <div className="mb-4 p-4 bg-amber-50 rounded-lg border border-amber-200 space-y-3">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-amber-800">{scanResult.model ? '新建机型' : '发现新格式'}</span>
-                <span className="text-xs text-amber-600">
-                  {scanResult.model ? '不使用当前推荐机型，按扫描结果创建新机型' : '未匹配到已有机型，创建新机型后即可导入'}
-                </span>
-              </div>
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs text-gray-500">机型名称</span>
-                <input
-                  value={newModelName}
-                  onChange={(e) => setNewModelName(e.target.value)}
-                  className="bg-white border border-gray-300 rounded px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:border-blue-500"
-                  placeholder="给新机型命名"
-                />
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-500">
-                    数据类型（勾选要导入的，共 {scanResult.discovered_types.length} 个）
-                  </span>
-                  <button
-                    onClick={() => setNewModelTypes(new Set(scanResult.discovered_types!.map((t) => t.data_type_key)))}
-                    className="text-xs text-blue-600 hover:underline"
-                  >
-                    全选
-                  </button>
-                </div>
-                {scanResult.discovered_types.map((t) => {
-                  const checked = newModelTypes.has(t.data_type_key);
-                  return (
-                    <label
-                      key={t.data_type_key}
-                      className="flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-white/60 cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleNewModelType(t.data_type_key)}
-                      />
-                      <span className="text-gray-800">{t.display_label}</span>
-                      <span className="text-xs text-gray-400">{t.data_type_key}</span>
-                      {t.is_alert && (
-                        <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs border border-amber-200">告警</span>
-                      )}
-                      {t.is_raw && (
-                        <span
-                          className="px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-xs border border-gray-300"
-                          title="疑似原始字节转储，分析价值低，默认不导入。可手动勾选。"
-                        >
-                          原始数据
-                        </span>
-                      )}
-                      <span className="text-xs text-gray-400 ml-auto">{t.column_count} 列</span>
-                    </label>
-                  );
-                })}
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleConfirmCreateModel}
-                  disabled={creatingModel || !newModelName.trim() || newModelTypes.size === 0}
-                  className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {creatingModel ? '创建中…' : '创建机型并继续'}
-                </button>
-                {scanResult.model && (
-                  <button
-                    onClick={() => setShowNewModelForm(false)}
-                    disabled={creatingModel}
-                    className="px-3 py-1.5 text-sm bg-white text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    取消
-                  </button>
-                )}
-                {newModelTypes.size === 0 && (
-                  <span className="text-xs text-red-500">至少选择一个数据类型</span>
-                )}
-              </div>
-            </div>
+            <ModelFromScanForm
+              discoveredTypes={scanResult.discovered_types}
+              hasMatchedModel={!!scanResult.model}
+              name={newModelName}
+              selectedTypes={newModelTypes}
+              creating={creatingModel}
+              onNameChange={setNewModelName}
+              onSelectAll={() => setNewModelTypes(new Set(scanResult.discovered_types!.map((type) => type.data_type_key)))}
+              onToggleType={toggleNewModelType}
+              onSubmit={handleConfirmCreateModel}
+              onCancel={() => setShowNewModelForm(false)}
+            />
           )}
-
           {/* Sessions */}
           {scanResult.sessions.length > 0 && (
             <div className="space-y-3">

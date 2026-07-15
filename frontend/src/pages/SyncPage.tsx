@@ -68,7 +68,11 @@ export default function SyncPage({ runtime, onRefreshContext, onDataChanged, onN
   }, [setError]);
 
   useEffect(() => {
-    loadQueue();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) return loadQueue();
+    });
+    return () => { cancelled = true; };
   }, [loadQueue]);
 
   const filteredItems = useMemo(() => {
