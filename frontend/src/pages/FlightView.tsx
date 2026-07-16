@@ -760,7 +760,6 @@ export default function FlightView({
               aligned={aligned}
               normalize={normalize}
               scaleFactors={scaleFactors}
-              selectedColumns={selectedColumns}
               emptyState={chartEmptyState}
             />
           )}

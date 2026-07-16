@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import * as echarts from 'echarts';
 import type { AlignedData } from '../../api/analysis';
 import { bindDoubleClickZoom } from './chartInteraction';
@@ -18,7 +18,6 @@ interface Props {
   aligned: AlignedData | null;
   normalize: boolean;
   scaleFactors: Record<string, number>;
-  selectedColumns: string[];
   emptyState: EmptyStateData | null;
 }
 
@@ -34,52 +33,7 @@ function EmptyState({ title, description }: EmptyStateData) {
   );
 }
 
-function ChartDebugBadge({ active, chartRef, chartInstance, aligned, selectedColumns }: {
-  active: boolean;
-  chartRef: React.RefObject<HTMLDivElement | null>;
-  chartInstance: React.MutableRefObject<echarts.ECharts | null>;
-  aligned: AlignedData | null;
-  selectedColumns: string[];
-}) {
-  const [metrics, setMetrics] = useState({ tick: 0, width: 0, height: 0, visible: false, instanceWidth: -1, instanceHeight: -1, hasInstance: false });
-  useEffect(() => {
-    const sample = () => {
-      const element = chartRef.current;
-      const instance = chartInstance.current;
-      setMetrics((current) => ({
-        tick: current.tick + 1,
-        width: element?.clientWidth ?? 0,
-        height: element?.clientHeight ?? 0,
-        visible: element?.offsetParent !== null,
-        instanceWidth: instance?.getWidth?.() ?? -1,
-        instanceHeight: instance?.getHeight?.() ?? -1,
-        hasInstance: !!instance,
-      }));
-    };
-    sample();
-    const id = window.setInterval(sample, 250);
-    return () => window.clearInterval(id);
-  }, [chartInstance, chartRef]);
-
-  const forceResize = () => {
-    if (chartInstance.current) {
-      try { chartInstance.current.resize(); } catch { /* ignore */ }
-    }
-  };
-  const seriesCount = aligned ? Object.keys(aligned.series || {}).length : 0;
-  const timesCount = aligned?.times?.length ?? 0;
-
-  return (
-    <div onClick={forceResize} title="Click to force chart.resize()" className="absolute bottom-2 right-2 z-50 bg-black/75 text-white text-[10px] font-mono px-2 py-1 rounded leading-tight cursor-pointer hover:bg-black/90 select-none" style={{ pointerEvents: 'auto' }}>
-      <div>active:{String(active)} vis:{String(metrics.visible)}</div>
-      <div>DOM:{metrics.width}×{metrics.height} inst:{metrics.hasInstance ? `${metrics.instanceWidth}×${metrics.instanceHeight}` : 'null'}</div>
-      <div>data:{seriesCount}s/{timesCount}p cols:{selectedColumns.length}</div>
-      <div>tick:{metrics.tick} (click→resize)</div>
-    </div>
-  );
-}
-
-const FlightChart = forwardRef<FlightChartHandle, Props>(function FlightChart({ active, aligned, normalize, scaleFactors, selectedColumns, emptyState }, ref) {
+const FlightChart = forwardRef<FlightChartHandle, Props>(function FlightChart({ active, aligned, normalize, scaleFactors, emptyState }, ref) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
   const yZoomRef = useRef({ start: 0, end: 100 });
@@ -165,7 +119,6 @@ const FlightChart = forwardRef<FlightChartHandle, Props>(function FlightChart({ 
     <>
       <div ref={chartRef} className="flex-1 min-h-0" />
       {emptyState && <EmptyState title={emptyState.title} description={emptyState.description} />}
-      <ChartDebugBadge active={active} chartRef={chartRef} chartInstance={chartInstance} aligned={aligned} selectedColumns={selectedColumns} />
     </>
   );
 });
