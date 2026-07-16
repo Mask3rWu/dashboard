@@ -189,6 +189,95 @@ def test_pull_preview_and_metadata_attach_records_by_client_uid(isolated_data_di
         conn.close()
 
 
+def test_pull_preview_matches_aircraft_by_name_when_client_uid_differs(isolated_data_dir):
+    """An aircraft created independently on another node (different client_uid,
+    no server_id) must be recognised on pull by (model, name), mirroring the
+    upload-side _find_aircraft fallback -- otherwise the download table reports
+    'create' while the upload table reports 'existing' for the same aircraft."""
+    from backend.database import get_db, init_db
+
+    init_db()
+    conn = get_db()
+    suffix = uuid.uuid4().hex
+    try:
+        # Local model already linked to the server (matched by server_id).
+        conn.execute(
+            "INSERT INTO aircraft_models (client_uid, server_id, name, sync_state, sync_origin) "
+            "VALUES (?, ?, ?, 'synced', 'server')",
+            (f"model-local-{suffix}", 101, f"Model {suffix}"),
+        )
+        model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Local aircraft created on this node: own client_uid, no server_id, pending upload.
+        conn.execute(
+            "INSERT INTO aircraft (client_uid, model_id, name, sync_state) VALUES (?, ?, ?, 'pending_upload')",
+            (f"aircraft-local-{suffix}", model_id, "Aircraft001"),
+        )
+        aircraft_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        manifest = {
+            "source_node_id": "server",
+            "server_cursor": "42",
+            "models": [{"id": 101, "client_uid": f"model-local-{suffix}", "name": f"Model {suffix}", "version": 1}],
+            "aircraft": [{
+                "id": 201,
+                "client_uid": f"aircraft-server-{suffix}",
+                "model_id": 101,
+                "name": "Aircraft001",
+                "version": 1,
+            }],
+            "flights": [],
+            "raw_files": [],
+        }
+
+        preview = sync_import.preview_pull_manifest(conn, manifest)
+        item = preview["aircraft"][0]
+        assert item["matched_by"] == "name"
+        assert item["action"] == "existing"
+        assert item["local"]["id"] == aircraft_id
+
+        # Metadata apply links the existing local row instead of creating a duplicate.
+        report = sync_import.apply_pull_manifest_metadata(conn, manifest)
+        assert report["status"] == "success"
+        row = conn.execute(
+            "SELECT server_id, COUNT(*) AS n FROM aircraft WHERE model_id=?", (model_id,)
+        ).fetchone()
+        assert row["n"] == 1
+        assert row["server_id"] == 201
+    finally:
+        conn.close()
+
+
+def test_pull_preview_matches_model_by_name_when_client_uid_differs(isolated_data_dir):
+    from backend.database import get_db, init_db
+
+    init_db()
+    conn = get_db()
+    suffix = uuid.uuid4().hex
+    try:
+        conn.execute(
+            "INSERT INTO aircraft_models (client_uid, name, sync_state) VALUES (?, ?, 'pending_upload')",
+            (f"model-local-{suffix}", f"Model {suffix}"),
+        )
+        model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        manifest = {
+            "source_node_id": "server",
+            "server_cursor": "42",
+            "models": [{"id": 101, "client_uid": f"model-server-{suffix}", "name": f"Model {suffix}", "version": 1}],
+            "aircraft": [],
+            "flights": [],
+            "raw_files": [],
+        }
+
+        preview = sync_import.preview_pull_manifest(conn, manifest)
+        item = preview["models"][0]
+        assert item["matched_by"] == "name"
+        assert item["action"] == "existing"
+        assert item["local"]["id"] == model_id
+    finally:
+        conn.close()
+
+
 def test_preflight_flight_distinguishes_existing_from_update_metadata(monkeypatch):
     """An identical flight should preflight as 'existing'; only a real metadata
     change should be 'update_metadata'. Mirrors the model/aircraft behaviour and

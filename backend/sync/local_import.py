@@ -758,8 +758,19 @@ def _find_local_by_sync_identity(
     table: str,
     server_id: int,
     client_uid: str | None,
+    *,
+    name: str | None = None,
+    model_id: int | None = None,
 ):
-    """Match a pulled entity by server mapping first, then its stable client identity."""
+    """Match a pulled entity the same way the server matches an upload.
+
+    Tier 1: server_id (already linked). Tier 2: client_uid (same object, not yet
+    linked). Tier 3: business name -- mirrors the upload-side
+    ``_find_model``/``_find_aircraft`` fallback so an object created independently
+    on another node (different client_uid, no server_id) is still recognised.
+    ``aircraft_models.name`` is globally unique and ``aircraft`` has
+    ``UNIQUE(model_id, name)``, so the name tier resolves to at most one row.
+    """
     existing = _find_local_by_server_id(conn, table, server_id)
     if existing:
         return existing, "server_id"
@@ -770,6 +781,19 @@ def _find_local_by_sync_identity(
         ).fetchone()
         if existing:
             return existing, "client_uid"
+    if name:
+        if table == "aircraft_models":
+            existing = conn.execute(
+                f"SELECT * FROM {_q(table)} WHERE name=?",
+                (str(name),),
+            ).fetchone()
+        elif table == "aircraft" and model_id is not None:
+            existing = conn.execute(
+                f"SELECT * FROM {_q(table)} WHERE model_id=? AND name=?",
+                (int(model_id), str(name)),
+            ).fetchone()
+        if existing:
+            return existing, "name"
     return None, None
 
 
@@ -834,7 +858,8 @@ def _upsert_pull_models(
     for row in manifest.get("models") or []:
         server_id = int(row["id"])
         existing, _ = _find_local_by_sync_identity(
-            conn, "aircraft_models", server_id, row.get("client_uid")
+            conn, "aircraft_models", server_id, row.get("client_uid"),
+            name=row.get("name"),
         )
         config = _build_config_from_pull_rows(manifest, server_id, parsed)
         target_name = row.get("name") or f"server_model_{server_id}"
@@ -928,7 +953,8 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
             report["warnings"].append({"scope": "aircraft", "server_id": server_id, "message": "model not available"})
             continue
         existing, _ = _find_local_by_sync_identity(
-            conn, "aircraft", server_id, row.get("client_uid")
+            conn, "aircraft", server_id, row.get("client_uid"),
+            name=row.get("name"), model_id=local_model_id,
         )
         target_name = row.get("name") or f"server_aircraft_{server_id}"
         if existing:
@@ -1332,22 +1358,17 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
         }
         for row in manifest.get("aircraft") or []
     }
-    aircraft_map: dict[int, int] = {}
-    for row in manifest.get("aircraft") or []:
-        server_id = int(row.get("id") or 0)
-        existing, _ = _find_local_by_sync_identity(
-            conn, "aircraft", server_id, row.get("client_uid")
-        )
-        if existing:
-            aircraft_map[server_id] = int(existing["id"])
-
     model_items = []
+    model_map: dict[int, int] = {}
     aircraft_items = []
     for row in manifest.get("models") or []:
         server_id = int(row.get("id") or 0)
         existing, matched_by = _find_local_by_sync_identity(
-            conn, "aircraft_models", server_id, row.get("client_uid")
+            conn, "aircraft_models", server_id, row.get("client_uid"),
+            name=row.get("name"),
         )
+        if existing:
+            model_map[server_id] = int(existing["id"])
         action = "create"
         reason = None
         local = None
@@ -1381,11 +1402,16 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
             "local": local,
         })
 
+    aircraft_map: dict[int, int] = {}
     for row in manifest.get("aircraft") or []:
         server_id = int(row.get("id") or 0)
+        local_model_id = model_map.get(int(row.get("model_id") or 0))
         existing, matched_by = _find_local_by_sync_identity(
-            conn, "aircraft", server_id, row.get("client_uid")
+            conn, "aircraft", server_id, row.get("client_uid"),
+            name=row.get("name"), model_id=local_model_id,
         )
+        if existing:
+            aircraft_map[server_id] = int(existing["id"])
         server_model_name = model_names.get(int(row.get("model_id") or 0), "-")
         action = "create"
         reason = None
