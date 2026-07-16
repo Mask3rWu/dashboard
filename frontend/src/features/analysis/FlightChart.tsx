@@ -102,6 +102,16 @@ const FlightChart = forwardRef<FlightChartHandle, Props>(function FlightChart({ 
     }
 
     const container = chartRef.current;
+    const scrollVisibleTooltip = (event: WheelEvent) => {
+      const tooltip = container.querySelector<HTMLElement>('.flight-chart-tooltip');
+      if (!tooltip || tooltip.style.display === 'none' || tooltip.style.visibility === 'hidden'
+        || tooltip.scrollHeight <= tooltip.clientHeight) return;
+
+      tooltip.scrollTop += event.deltaY;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    container.addEventListener('wheel', scrollVisibleTooltip, { capture: true, passive: false });
     const applyOption = (instance: echarts.ECharts) => {
       if (!aligned) return;
       try {
@@ -143,6 +153,7 @@ const FlightChart = forwardRef<FlightChartHandle, Props>(function FlightChart({ 
     observer.observe(container);
     return () => {
       observer.disconnect();
+      container.removeEventListener('wheel', scrollVisibleTooltip, { capture: true });
       if (chartInstance.current) {
         try { chartInstance.current.dispose(); } catch { /* ignore */ }
         chartInstance.current = null;

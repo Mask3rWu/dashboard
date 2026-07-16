@@ -205,6 +205,7 @@ export function buildChartOption(
       renderMode: 'html',
       confine: true,
       enterable: true,
+      className: 'flight-chart-tooltip',
       backgroundColor: 'rgba(255,255,255,0.84)',
       borderColor: '#e5e7eb',
       textStyle: { color: '#374151', fontSize: 12 },
