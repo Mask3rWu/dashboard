@@ -222,6 +222,11 @@ export default function App() {
   }, [selectedAircraftId, selectedModelId, selectedFlightId, flights]);
 
   const navigateToFlight = (flightId: number) => {
+    const flight = flights.find((item) => item.id === flightId);
+    if (flight) {
+      setSelectedModelId(flight.model_id);
+      setSelectedAircraftId(flight.aircraft_id);
+    }
     setSelectedFlightId(flightId);
     setTab('flight');
   };
