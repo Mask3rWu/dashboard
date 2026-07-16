@@ -21,7 +21,8 @@ from backend.config import load_app_config
 
 CONFIG_PATH = load_app_config()
 
-from backend.database import init_db, DATA_DIR, DB_PATH
+from backend.database import init_db, get_db, DATA_DIR, DB_PATH
+from backend.raw_storage import refresh_raw_storage_paths
 from backend.api.desktop.app import (
     STARTUP_LOG_PATH,
     create_app,
@@ -179,6 +180,15 @@ def main():
     try:
         db_result = init_db()
         _startup_log(f"Database initialized: {db_result}")
+        conn = get_db()
+        try:
+            raw_warnings = refresh_raw_storage_paths(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        _startup_log(f"Raw storage layout refreshed: warnings={len(raw_warnings)}")
+        for warning in raw_warnings:
+            _startup_log(f"Raw storage warning: {warning}")
     except Exception as e:
         details = f"{e}\n{traceback.format_exc()}"
         _startup_log(f"Database initialization failed: {details}")

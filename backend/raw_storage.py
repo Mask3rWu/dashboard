@@ -80,9 +80,14 @@ def _prefix_filename(filename: str, date_prefix: str) -> str:
     return f"{date_prefix}_{safe}"
 
 
+def _model_base_rel(flight: dict) -> str:
+    model = f"{_safe_part(flight.get('model_name'), 'model')}__model_{flight['model_id']}"
+    return _rel_to_posix(PurePosixPath(model))
+
+
 def _aircraft_base_rel(flight: dict) -> str:
     aircraft = f"{_safe_part(flight.get('aircraft_name'), 'aircraft')}__aircraft_{flight['aircraft_id']}"
-    return _rel_to_posix(PurePosixPath(aircraft))
+    return _rel_to_posix(PurePosixPath(_model_base_rel(flight), aircraft))
 
 
 def _raw_file_rel_path(flight: dict, original_name: str, original_rel_path: str) -> str:
@@ -291,7 +296,7 @@ def refresh_raw_storage_paths(
     aircraft_id: int | None = None,
     flight_id: int | None = None,
 ) -> list[dict]:
-    """Move raw files to paths implied by the current aircraft name."""
+    """Move raw files to paths implied by the current model and aircraft names."""
     where = []
     params = []
     if model_id is not None:
@@ -327,7 +332,9 @@ def refresh_raw_storage_paths(
                     desired = _unique_storage_rel_path(conn, desired, int(row["flight_id"]), int(row["id"]))
                     dst = _abs_raw_path(desired)
             old_parent = os.path.dirname(src)
-            shutil.move(src, dst)
+            # Both paths are inside RAW_ROOT, so this is a same-filesystem
+            # metadata rename and never falls back to copying file contents.
+            os.rename(src, dst)
             _cleanup_empty_raw_dirs(old_parent)
             conn.execute(
                 "UPDATE flight_raw_files SET storage_rel_path=? WHERE id=?",
