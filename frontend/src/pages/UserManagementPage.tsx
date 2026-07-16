@@ -6,8 +6,8 @@ import {
   listUsers,
   resetUserPassword,
   updateUser,
-  type CurrentUser,
-} from '../api';
+} from '../api/users';
+import type { CurrentUser } from '../api/auth';
 
 function formatTime(value?: string | null) {
   if (!value) return '-';

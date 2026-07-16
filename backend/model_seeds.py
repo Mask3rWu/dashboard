@@ -9,8 +9,8 @@ import os
 from datetime import datetime
 from typing import Any
 
-from .format_configs import register_model_tables
-from . import user_repository
+from .import_pipeline.format_configs import register_model_tables
+from .repositories import users as user_repository
 
 
 logger = logging.getLogger(__name__)

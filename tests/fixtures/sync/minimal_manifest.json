@@ -1,0 +1,12 @@
+{
+  "package_version": 2,
+  "schema_version": 4,
+  "models": [],
+  "aircraft": [],
+  "flights": [],
+  "raw_files": [],
+  "parsed_data": {
+    "format": "sqlite",
+    "path": "data/parsed.sqlite"
+  }
+}

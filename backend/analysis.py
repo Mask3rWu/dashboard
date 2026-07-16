@@ -8,7 +8,7 @@ import math
 from bisect import bisect_left
 from collections import Counter, defaultdict, OrderedDict
 from backend.database import get_db
-from backend.format_configs import get_table_name, get_columns_for_flight
+from backend.import_pipeline.format_configs import get_table_name, get_columns_for_flight
 
 
 def time_to_sec(t_str):
@@ -662,3 +662,43 @@ def get_compare(flight_ids, column_key):
         conn.close()
 
     return results
+
+
+def get_alerts(flight_id: int) -> dict:
+    conn = get_db()
+    try:
+        model_id = _get_model_id(conn, flight_id)
+        if model_id is None:
+            return {"alerts": []}
+        alert_dt_key, alert_table = _get_alert_data_type(conn, model_id)
+        if not alert_table:
+            return {"alerts": []}
+        alert_col_rows = conn.execute(
+            "SELECT column_name FROM column_registry "
+            "WHERE model_id=? AND data_type_key=? AND ordinal IS NOT NULL ORDER BY ordinal",
+            (model_id, alert_dt_key),
+        ).fetchall()
+        if not alert_col_rows:
+            return {"alerts": []}
+        col_names = [row["column_name"] for row in alert_col_rows]
+        try:
+            rows = conn.execute(
+                f"SELECT time_str, time_sec, {', '.join(col_names)} "
+                f"FROM {alert_table} WHERE flight_id=? ORDER BY time_sec",
+                (flight_id,),
+            ).fetchall()
+        except Exception:
+            return {"alerts": []}
+        data_tables = _get_available_data_tables(conn, model_id, flight_id)
+        _, _, axis_start_sec = _generate_flight_grid(conn, flight_id, data_tables)
+        desc_col = next((col for col in col_names if "desc" in col.lower()), col_names[0] if col_names else None)
+        extra_cols = [col for col in col_names if "extra" in col.lower()]
+        extra_col = extra_cols[0] if extra_cols else (col_names[-1] if len(col_names) > 1 else None)
+        return {"alerts": [{
+            "time_str": row["time_str"],
+            "time_sec": _time_offset_from_axis(row["time_str"], axis_start_sec) if axis_start_sec is not None else row["time_sec"],
+            "desc": str(row[desc_col]) if desc_col and row[desc_col] is not None else "",
+            "extra": str(row[extra_col]) if extra_col and row[extra_col] is not None else "",
+        } for row in rows]}
+    finally:
+        conn.close()

@@ -12,6 +12,9 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
+
+from backend.import_pipeline.file_reader import has_header, parse_lines
 
 logger = logging.getLogger(__name__)
 
@@ -295,8 +298,6 @@ def _discover_file_patterns(source_path):
     sample_counts = {}
 
     def read_pattern_sample(filepath):
-        from backend.scanner import has_header, parse_lines
-
         lines = parse_lines(filepath)
         if not lines:
             return None
@@ -371,7 +372,6 @@ def _detect_has_header(source_path, sample_patterns):
     for entry in sample_patterns:
         _name, filepath = entry[0], entry[1]
         try:
-            from backend.scanner import has_header
             if has_header(filepath):
                 return True
         except Exception:
@@ -395,7 +395,6 @@ def _detect_has_uav_send_id(source_path, sample_patterns, has_header_flag):
     for entry in sample_patterns:
         _name, filepath = entry[0], entry[1]
         try:
-            from backend.scanner import parse_lines
             lines = parse_lines(filepath)
             if lines:
                 header_tokens = lines[0].split()
@@ -458,8 +457,7 @@ def _is_raw_dump(filepath):
     Returns:
         bool: True if the file looks like a raw byte dump.
     """
-    import re as _re
-    hex_token = _re.compile(r'^[0-9A-Fa-f]{1,2}$')
+    hex_token = re.compile(r'^[0-9A-Fa-f]{1,2}$')
 
     # ── Signal 1: binary content in the file head ──
     # NUL bytes are an unambiguous binary marker. For the share signal we count
@@ -479,7 +477,6 @@ def _is_raw_dump(filepath):
 
     # ── Signal 2: hex-dump token ratio across sampled data rows ──
     try:
-        from backend.scanner import parse_lines, has_header
         lines = parse_lines(filepath)
     except Exception:
         return False
@@ -513,11 +510,10 @@ def _detect_column_types(filepath, has_header, has_uav, num_columns):
     """
     types = ['REAL'] * num_columns
     try:
-        from backend.scanner import parse_lines, has_header as _has_header
         lines = parse_lines(filepath)
         if not lines:
             return types
-        start = 1 if _has_header(filepath) else 0
+        start = 1 if has_header(filepath) else 0
         if start >= len(lines):
             return types
         tokens = lines[start].split()
@@ -825,8 +821,6 @@ def get_columns_for_model(conn, model_id):
     Returns:
         [{table, label, columns: [{key, label, unit}]}]
     """
-    from collections import OrderedDict
-
     rows = conn.execute(
         """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
                   cr.column_name, cr.display_label as col_label, cr.unit,
@@ -862,8 +856,6 @@ def get_columns_for_flight(conn, flight_id):
     """Get available columns for a specific flight, grouped by data type.
     Only returns data types that actually have data for this flight.
     """
-    from collections import OrderedDict
-
     # Get flight's model_id
     flight = conn.execute(
         "SELECT a.model_id FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.id = ?",

@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import * as echarts from 'echarts';
-import { getColumns, getCompare, listAircraft, type Flight, type ColumnGroup, type AircraftModel, type Aircraft } from '../api';
+import { getColumns, getCompare, type ColumnGroup, type CompareSeries } from '../api/analysis';
+import type { Flight } from '../api/flights';
+import { listAircraft, type AircraftModel, type Aircraft } from '../api/models';
 import { syncStateClass, syncStateLabel } from '../syncStatus';
+import { bindDoubleClickZoom } from '../features/analysis/chartInteraction';
 
 interface Props {
   flights: Flight[];
@@ -93,62 +96,12 @@ export default function ComparePage({
     }
   };
 
-  const renderChart = (series: { name: string; times_sec: number[]; values: number[]; label: string; unit: string }[]) => {
+  const renderChart = (series: CompareSeries[]) => {
     if (!chartRef.current) return;
     if (chartInstance.current) { chartInstance.current.dispose(); }
     chartInstance.current = echarts.init(chartRef.current);
 
-    // Double-click to zoom in centered on click position (X+Y)
-    // Use zrender-level event to avoid ECharts dataZoom-inside interception
-    const zr = chartInstance.current.getZr();
-    zr.on('dblclick', (e: any) => {
-      const ZOOM = 2;
-      const MIN_RANGE = 2;
-      const opt = chartInstance.current?.getOption();
-      const dzList = (opt?.dataZoom as any[]) || [];
-      const xSlider = dzList.find((d: any) => d.type === 'slider' && d.yAxisIndex === undefined);
-      const ySlider = dzList.find((d: any) => d.type === 'slider' && (d.yAxisIndex !== undefined));
-      const xStart: number = xSlider?.start ?? 0;
-      const xEnd: number = xSlider?.end ?? 100;
-      const yStart: number = ySlider?.start ?? 0;
-      const yEnd: number = ySlider?.end ?? 100;
-
-      // Get grid pixel bounds to map click position → zoom center
-      const gridModel = (chartInstance.current as any)?.getModel().getComponent('grid', 0);
-      const rect = (gridModel as any)?.coordinateSystem?.getRect?.();
-      const fx = rect ? Math.max(0, Math.min(1, (e.offsetX - rect.x) / rect.width)) : 0.5;
-      const fy = rect ? 1 - Math.max(0, Math.min(1, (e.offsetY - rect.y) / rect.height)) : 0.5;
-      const xCenter = xStart + fx * (xEnd - xStart);
-      const yCenter = yStart + fy * (yEnd - yStart);
-
-      const xRange = xEnd - xStart;
-      if (xRange > MIN_RANGE) {
-        const newXRange = xRange / ZOOM;
-        const newXStart = Math.max(0, xCenter - newXRange / 2);
-        const newXEnd = Math.min(100, xCenter + newXRange / 2);
-        chartInstance.current?.dispatchAction({
-          type: 'dataZoom',
-          dataZoomIndex: 0,
-          start: newXStart,
-          end: newXEnd,
-        });
-      }
-
-      const yRange = yEnd - yStart;
-      if (yRange > MIN_RANGE) {
-        const newYRange = yRange / ZOOM;
-        const newYStart = Math.max(0, yCenter - newYRange / 2);
-        const newYEnd = Math.min(100, yCenter + newYRange / 2);
-        yZoomRef.current = { start: newYStart, end: newYEnd };
-        chartInstance.current?.dispatchAction({
-          type: 'dataZoom',
-          dataZoomId: 'ySlider',
-          start: newYStart,
-          end: newYEnd,
-        });
-      }
-    });
-
+    bindDoubleClickZoom(chartInstance.current, yZoomRef);
     const colors = ['#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#7c3aed', '#0891b2'];
 
     const option: echarts.EChartsOption = {

@@ -1,24 +1,18 @@
 import { useState, useEffect, useRef } from 'react';
-import { Pencil, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
-import * as echarts from 'echarts';
-import {
-  getFlight, getAlignedData, getStats, getCorrelation, getAnomaly,
-  listPresets, createPreset, deletePreset,
-  listFilterPresets, createFilterPreset, deleteFilterPreset,
-  updateFlight, deleteFlight, updateModelColumn,
-  listAircraft,
-  type Flight, type ColumnGroup, type AircraftModel, type Aircraft,
-  type AlignedData, type FlightStats, type Preset,
-  type FilterSpec, type FilterPreset, type DeleteScope,
-} from '../api';
+import { getAlignedData, getStats, getCorrelation, getAnomaly, listPresets, createPreset, deletePreset, listFilterPresets, createFilterPreset, deleteFilterPreset, type ColumnGroup, type AlignedData, type FlightStats, type Preset, type FilterSpec, type FilterPreset, type AnomalyData, type CorrelationData } from '../api/analysis';
+import { getFlight, updateFlight, deleteFlight, type Flight } from '../api/flights';
+import { updateModelColumn, type AircraftModel, type Aircraft, type DeleteScope } from '../api/models';
 import FilterBar from '../components/FilterBar';
-import { deleteActionLabel, deleteScopeFor, syncStateClass, syncStateLabel } from '../syncStatus';
+import { deleteActionLabel, deleteScopeFor } from '../syncStatus';
+import { AnomalyChart, CorrelationHeatmap } from '../features/analysis/AnalysisCharts';
+import FlightChart, { type FlightChartHandle } from '../features/analysis/FlightChart';
+import FlightTree from '../features/analysis/FlightTree';
 
 interface Props {
   active: boolean;
   flights: Flight[];
   selectedFlightId: number | null;
-  onSelectFlight: (id: number) => void;
+  onSelectFlight: (id: number | null) => void;
   onFlightsChanged: () => void;
   // Three-level selection
   models: AircraftModel[];
@@ -40,280 +34,6 @@ type ViewMode = 'chart' | 'correlation' | 'anomaly';
 // on every render. Computes a complete ECharts option from current
 // aligned data + normalization + per-column scale factors.
 // ═══════════════════════════════════════════════════════════════
-function buildChartOption(
-  aligned: AlignedData,
-  normalize: boolean,
-  scaleFactors: Record<string, number>,
-): echarts.EChartsOption {
-  const times = aligned.times || [];
-  const allSeries = Object.entries(aligned.series || {});
-  // Split: numeric series go to chart, text series are tooltip-only
-  const numericSeries = allSeries.filter(([, s]) => s.is_numeric !== false);
-  const textSeries = allSeries.filter(([, s]) => s.is_numeric === false);
-  const seriesList = numericSeries; // chart uses only numeric
-  const needsTextAnchor = seriesList.length === 0 && textSeries.length > 0;
-
-  const getValues = (vals: (number | null)[], key: string) => {
-    const sf = scaleFactors[key] ?? 1.0;
-    const scaled = vals.map((v) => (v !== null ? v * sf : null));
-    if (!normalize) return scaled;
-    const nums = scaled.filter((v) => v !== null) as number[];
-    if (nums.length === 0) return scaled;
-    const min = Math.min(...nums);
-    const max = Math.max(...nums);
-    const range = max - min || 1;
-    return scaled.map((v) => (v !== null ? (v - min) / range : null));
-  };
-
-  const colors = ['#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#7c3aed', '#0891b2', '#db2777', '#ea580c'];
-  const isNorm = normalize;
-
-  // Group series by semantic unit (e.g. ° → °_pos vs °_angle)
-  type UnitGroup = { unit: string; items: [string, typeof aligned.series[string]][] };
-  const unitMap = new Map<string, UnitGroup['items']>();
-  seriesList.forEach(([key, s]) => {
-    const raw = s.unit || '-';
-    let u = raw;
-    if (raw === '°') {
-      const col = key.split('.').pop()?.toLowerCase() || '';
-      if (col.includes('lat') || col.includes('lng')) u = '° (经纬度)';
-      else u = '° (角度)';
-    }
-    if (!unitMap.has(u)) unitMap.set(u, []);
-    unitMap.get(u)!.push([key, s]);
-  });
-  const unitGroups: UnitGroup[] = Array.from(unitMap.entries()).map(([unit, items]) => ({ unit, items }));
-
-  const seriesColor = (si: number) => colors[si % colors.length];
-  const unitColor = (gi: number) => colors[gi % colors.length];
-
-  const yAxes: any[] = [];
-  const keyToGroup = new Map<string, number>();
-
-  if (isNorm) {
-    yAxes.push({
-      type: 'value',
-      name: '归一化 (0~1)',
-      nameTextStyle: { color: '#6b7280', fontSize: 11 },
-      axisLabel: { color: '#9ca3af', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#f3f4f6' } },
-    });
-    seriesList.forEach(([key]) => keyToGroup.set(key, 0));
-  } else {
-    const AXIS_W = 50;
-    unitGroups.forEach((g, gi) => {
-      const side = gi % 2 === 0 ? 'left' : 'right';
-      const sameSide = unitGroups.filter((_, i) => i % 2 === gi % 2 && i < gi).length;
-      const color = unitColor(gi);
-      yAxes.push({
-        type: 'value',
-        name: g.unit,
-        nameTextStyle: { color, fontSize: 10, fontWeight: 'bold' as const },
-        axisLabel: { color: '#9ca3af', fontSize: 10 },
-        axisLine: { lineStyle: { color } },
-        position: side as 'left' | 'right',
-        offset: sameSide * AXIS_W,
-        splitLine: { show: gi === 0, lineStyle: { color: '#f3f4f6' } },
-      });
-      g.items.forEach(([key]) => keyToGroup.set(key, gi));
-    });
-  }
-
-  if (needsTextAnchor) {
-    yAxes.push({
-      type: 'value',
-      min: 0,
-      max: 1,
-      axisLabel: { show: false },
-      axisTick: { show: false },
-      axisLine: { show: false },
-      splitLine: { show: false },
-    });
-  }
-  const seriesYIndex = seriesList.map(([key]) => keyToGroup.get(key)!);
-
-  const leftUnits = isNorm ? 0 : unitGroups.filter((_, i) => i % 2 === 0).length;
-  const rightUnits = isNorm ? 0 : unitGroups.filter((_, i) => i % 2 === 1).length;
-  const AXIS_WIDTH = 50;
-  const YZOOM_W = 24;
-  const leftPad = isNorm ? 60 : 80 + (leftUnits > 0 ? (leftUnits - 1) * AXIS_WIDTH : 0);
-  const rightPad = (isNorm ? 40 : 80 + (rightUnits > 0 ? (rightUnits - 1) * AXIS_WIDTH : 0)) + YZOOM_W;
-
-  const segments = aligned.segments || [];
-  const hasFilter = segments.length > 0;
-  const dzIndicatorData = hasFilter
-    ? times.map((_, i) => (aligned.mask?.[i] ? 1 : 0))
-    : [];
-
-  // Always use array form for grid/xAxis/yAxis. Mixing object-form
-  // and array-form between consecutive setOption calls is one of the
-  // triggers for the "__ec_inner_*" / "group" undefined crashes
-  // in ECharts 6.1 — keeping the shape stable avoids the diff path.
-  const grid = hasFilter ? [
-    { left: leftPad, right: rightPad, top: 40, bottom: 60 },
-    { left: leftPad, right: rightPad, bottom: 6, height: 18 },
-  ] : [
-    { left: leftPad, right: rightPad, top: 40, bottom: 60 },
-  ];
-
-  const xAxisArr = hasFilter ? [
-    {
-      type: 'category' as const, data: times, gridIndex: 0,
-      axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
-      axisLine: { lineStyle: { color: '#e5e7eb' } },
-    },
-    {
-      type: 'category' as const, data: times, gridIndex: 1,
-      axisLabel: { show: false }, axisTick: { show: false },
-      axisLine: { show: false }, splitLine: { show: false },
-    },
-  ] : [
-    {
-      type: 'category' as const, data: times, gridIndex: 0,
-      axisLabel: { color: '#9ca3af', fontSize: 10, interval: Math.max(1, Math.floor(times.length / 20)) },
-      axisLine: { lineStyle: { color: '#e5e7eb' } },
-    },
-  ];
-
-  const mainYAxes = yAxes.map((a) => ({ ...a, gridIndex: 0 }));
-  const yAxisArr = hasFilter ? [
-    ...mainYAxes,
-    { type: 'value', gridIndex: 1, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
-    { type: 'value', gridIndex: 0, min: 0, max: 1, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
-  ] : mainYAxes;
-
-  // dataZoom must explicitly list the main yAxis indices.
-  // Using `yAxisIndex: 'all'` crashes ECharts when yAxis contains
-  // helper axes on a different grid.
-  // ECharts 6.1 has an additional quirk: a single-element array
-  // `yAxisIndex: [0]` triggers a different (apparently buggy)
-  // internal code path that crashes during render when other
-  // components (markLine, multi-grid xAxis) are present. Use a
-  // plain number when there's only one main yAxis.
-  const yAxisIndexForDZ: number | number[] = mainYAxes.length === 1
-    ? 0
-    : mainYAxes.map((_, i) => i);
-
-  return {
-    color: seriesList.map((_, i) => seriesColor(i)),
-    tooltip: {
-      trigger: 'axis',
-      backgroundColor: '#fff',
-      borderColor: '#e5e7eb',
-      textStyle: { color: '#374151', fontSize: 12 },
-      formatter: (params: any) => {
-        if (!Array.isArray(params)) return '';
-        const mainParams = params.filter((p: any) =>
-          p.seriesName !== '__dz_indicator__' && p.seriesName !== '__filter_bg__' && p.seriesName !== '__text_anchor__');
-        if (mainParams.length === 0 && textSeries.length === 0) return '';
-        const anchorParam = params.find((p: any) => p.seriesName === '__text_anchor__');
-        const timeIdx = mainParams[0]?.dataIndex ?? anchorParam?.dataIndex ?? -1;
-        const time = mainParams[0]?.name || anchorParam?.name || (timeIdx >= 0 ? (times[timeIdx] || '') : '');
-        let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
-        // Deduplicate by seriesName (ECharts may return the same series twice
-        // when multiple yAxes share data — filter keeps only the first occurrence)
-        const seenNames = new Set<string>();
-        mainParams.forEach((p: any) => {
-          if (!p.seriesName || seenNames.has(p.seriesName)) return;
-          seenNames.add(p.seriesName);
-          if (p.value?.[1] != null) {
-            const sIdx = p.seriesIndex;
-            const key = numericSeries[sIdx]?.[0] || '';
-            const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
-            const displayVal = Number(p.value[1]).toFixed(2);
-            html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
-            if (sf !== 1.0) {
-              const rawVal = (Number(p.value[1]) / sf).toFixed(3);
-              html += ` <span style="color:#9ca3af;font-size:10px">(原始: ${rawVal}×${sf})</span>`;
-            }
-            html += `</div>`;
-          }
-        });
-        if (timeIdx >= 0) {
-          textSeries.forEach(([, s]) => {
-            const textVal = s.text_values?.[timeIdx];
-            if (textVal != null && textVal !== '') {
-              html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#9ca3af;margin-right:4px"></span> ${s.label}: <strong>${textVal}</strong></div>`;
-            }
-          });
-        }
-        return html;
-      },
-    },
-    legend: {
-      type: 'scroll', top: 0,
-      textStyle: { color: '#6b7280', fontSize: 11 },
-      data: numericSeries.map(([, s]) => isNorm ? s.label : `${s.label} (${s.unit || '-'})`),
-    },
-    grid,
-    xAxis: xAxisArr,
-    yAxis: yAxisArr,
-    dataZoom: [
-      { type: 'slider', start: 0, end: 100, height: 18, bottom: 6,
-        backgroundColor: 'rgba(249,250,251,0.55)',
-      },
-      { type: 'inside', xAxisIndex: 0 },
-      { type: 'inside', yAxisIndex: yAxisIndexForDZ, zoomOnMouseWheel: 'ctrl', id: 'yInside' },
-      { type: 'slider', yAxisIndex: yAxisIndexForDZ, start: 0, end: 100, right: 2, width: 18,
-        backgroundColor: 'rgba(249,250,251,0.55)', id: 'ySlider',
-      },
-    ],
-    series: [
-      ...seriesList.map(([key, s], i) => {
-        const values = getValues(s.values, key);
-        return {
-          name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
-          type: 'line' as const,
-          yAxisIndex: seriesYIndex[i],
-          xAxisIndex: 0,
-          data: times.map((t, j) => [t, values[j]]),
-          smooth: true,
-          showSymbol: false,
-          z: 1,
-          lineStyle: { width: 1.5, color: seriesColor(i) },
-        };
-      }),
-      ...(needsTextAnchor ? [{
-        name: '__text_anchor__',
-        type: 'line' as const,
-        yAxisIndex: 0,
-        xAxisIndex: 0,
-        data: times.map((t) => [t, 0]),
-        showSymbol: false,
-        lineStyle: { opacity: 0 },
-        itemStyle: { opacity: 0 },
-        emphasis: { disabled: true },
-        z: -2,
-      }] : []),
-      ...(hasFilter ? [{
-        name: '__filter_bg__',
-        type: 'bar' as const,
-        xAxisIndex: 0,
-        yAxisIndex: mainYAxes.length + 1,
-        data: dzIndicatorData,
-        itemStyle: { color: 'rgba(147, 197, 253, 0.22)' },
-        barWidth: '100%',
-        barCategoryGap: '0%',
-        tooltip: { show: false },
-        silent: true,
-        z: -1,
-      }] : []),
-      ...(hasFilter ? [{
-        name: '__dz_indicator__',
-        type: 'bar' as const,
-        xAxisIndex: 1,
-        yAxisIndex: mainYAxes.length,
-        data: dzIndicatorData,
-        itemStyle: { color: '#3b82f6', borderColor: '#3b82f6', opacity: 0.5 },
-        barWidth: '100%',
-        tooltip: { show: false },
-        silent: true,
-        z: 0,
-      }] : []),
-    ],
-  };
-}
-
 export default function FlightView({
   active,
   flights, selectedFlightId, onSelectFlight, onFlightsChanged,
@@ -334,8 +54,8 @@ export default function FlightView({
   const [alignedLoading, setAlignedLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
   const [anomalyCol, setAnomalyCol] = useState('');
-  const [anomalyData, setAnomalyData] = useState<any>(null);
-  const [corrData, setCorrData] = useState<any>(null);
+  const [anomalyData, setAnomalyData] = useState<AnomalyData | null>(null);
+  const [corrData, setCorrData] = useState<CorrelationData | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [filterSpec, setFilterSpec] = useState<FilterSpec | null>(null);
@@ -357,82 +77,9 @@ export default function FlightView({
   const [editName, setEditName] = useState('');
   const [deletingFlightId, setDeletingFlightId] = useState<number | null>(null);
 
-  // ─── Tree selector state ─────────────────────────────────
-  const [treeOpen, setTreeOpen] = useState(false);
-  const [treeModelId, setTreeModelId] = useState<number | null>(null);
-  const [treeAircraftId, setTreeAircraftId] = useState<number | null>(null);
-  const [treeAircraftList, setTreeAircraftList] = useState<Aircraft[]>([]);
-  const treeRef = useRef<HTMLDivElement>(null);
 
-  // Close tree on outside click
-  useEffect(() => {
-    if (!treeOpen) return;
-    const onMouseDown = (e: MouseEvent) => {
-      if (treeRef.current && !treeRef.current.contains(e.target as Node)) {
-        setTreeOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, [treeOpen]);
-
-  const openTreeModel = async (modelId: number) => {
-    setTreeModelId(modelId);
-    setTreeAircraftId(null);
-    try {
-      const data = await listAircraft(modelId);
-      setTreeAircraftList(data.aircraft);
-    } catch { setTreeAircraftList([]); }
-  };
-
-  const openTreeAircraft = (acId: number) => {
-    setTreeAircraftId(acId);
-  };
-
-  const selectTreeFlight = (flightId: number) => {
-    const f = flights.find(fl => fl.id === flightId);
-    if (f) {
-      onSelectModel(f.model_id);
-      onSelectAircraft(f.aircraft_id);
-    }
-    onSelectFlight(flightId);
-    setTreeOpen(false);
-  };
-
-  // Search-matched flight IDs (for upward filtering of model/aircraft)
-  const searchMatchedIds = (() => {
-    if (!flightSearch.trim()) return null;
-    const s = flightSearch.toLowerCase();
-    return new Set(
-      flights.filter(f =>
-        f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s)
-      ).map(f => f.id)
-    );
-  })();
-
-  // Models with at least one flight matching search
-  const visibleModels = searchMatchedIds
-    ? models.filter(m => flights.some(f => f.model_id === m.id && searchMatchedIds.has(f.id)))
-    : models;
-
-  // Aircraft (for expanded model) with at least one flight matching search
-  const visibleTreeAircraft = searchMatchedIds
-    ? treeAircraftList.filter(a => flights.some(f => f.aircraft_id === a.id && searchMatchedIds.has(f.id)))
-    : treeAircraftList;
-
-  // Tree column flights filtered by selected aircraft + search
-  const treeFlightsList = (treeAircraftId
-    ? flights.filter(f => f.aircraft_id === treeAircraftId)
-    : []).filter(f => {
-      if (!flightSearch.trim()) return true;
-      const s = flightSearch.toLowerCase();
-      return f.name.toLowerCase().includes(s) || (f.aircraft_name || f.drone_id || '').toLowerCase().includes(s);
-    });
-
-  const chartRef = useRef<HTMLDivElement>(null);
-  const chartInst = useRef<echarts.ECharts | null>(null);
+  const flightChartRef = useRef<FlightChartHandle>(null);
   const presetNameRef = useRef<HTMLInputElement>(null);
-  const yZoomRef = useRef({ start: 0, end: 100 });
 
   // Derive current model_id from the selected flight
   const currentModelId = flights.find(f => f.id === selectedFlightId)?.model_id ?? null;
@@ -442,15 +89,18 @@ export default function FlightView({
   const alignedRequestRef = useRef(0);
 
   useEffect(() => {
-    setSelectedColumns([]);
-    setFilterSpec(null);
-    setColumnGroups([]);
-    setAligned(null);
-    setPresets([]);
-    setFilterPresets([]);
-    setCorrData(null);
-    setAnomalyData(null);
-    setAnomalyCol('');
+    const timer = window.setTimeout(() => {
+      setSelectedColumns([]);
+      setFilterSpec(null);
+      setColumnGroups([]);
+      setAligned(null);
+      setPresets([]);
+      setFilterPresets([]);
+      setCorrData(null);
+      setAnomalyData(null);
+      setAnomalyCol('');
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [currentModelId]);
 
   // ─── Load flight data ──────────────────────────────────
@@ -459,233 +109,98 @@ export default function FlightView({
     // when selectedFlightId becomes null (otherwise they'd write
     // data for a flight that is no longer selected).
     latestFlightRef.current = selectedFlightId;
+    let cancelled = false;
     if (!selectedFlightId) {
-      setAligned(null);
-      return;
+      const timer = window.setTimeout(() => setAligned(null), 0);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timer);
+      };
     }
-    setLoading(true);
-    setAligned(null);  // clear chart immediately when flight changes
-    Promise.all([
-      getFlight(selectedFlightId),
-      getStats(selectedFlightId),
-      currentModelId != null ? listPresets(currentModelId) : Promise.resolve({ presets: [] }),
-      currentModelId != null ? listFilterPresets(currentModelId) : Promise.resolve({ presets: [] }),
-    ]).then(([flightData, statsData, presetData, fpData]) => {
-      // Abort if flight changed during fetch
-      if (latestFlightRef.current !== selectedFlightId) return;
-      setColumnGroups(flightData.columns);
-      setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
-      // Initialize scale factors from column metadata
-      const sf: Record<string, number> = {};
-      flightData.columns.forEach((g: ColumnGroup) => {
-        g.columns.forEach((c: any) => {
-          sf[c.key] = c.scale_factor ?? 1.0;
+    const flightId = selectedFlightId;
+    const modelId = currentModelId;
+    const timer = window.setTimeout(() => {
+      if (cancelled || latestFlightRef.current !== flightId) return;
+      setLoading(true);
+      setAligned(null);  // clear chart immediately when flight changes
+      Promise.all([
+        getFlight(flightId),
+        getStats(flightId),
+        modelId != null ? listPresets(modelId) : Promise.resolve({ presets: [] }),
+        modelId != null ? listFilterPresets(modelId) : Promise.resolve({ presets: [] }),
+      ]).then(([flightData, statsData, presetData, fpData]) => {
+        if (cancelled || latestFlightRef.current !== flightId) return;
+        setColumnGroups(flightData.columns);
+        setCollapsedGroups(new Set(flightData.columns.map((g: ColumnGroup) => g.table)));
+        const sf: Record<string, number> = {};
+        flightData.columns.forEach((g: ColumnGroup) => {
+          g.columns.forEach((c) => {
+            sf[c.key] = c.scale_factor ?? 1.0;
+          });
         });
-      });
-      setScaleFactors(sf);
-      setStats(statsData);
-      setPresets(presetData.presets);
-      setFilterPresets(fpData.presets);
+        setScaleFactors(sf);
+        setStats(statsData);
+        setPresets(presetData.presets);
+        setFilterPresets(fpData.presets);
 
-      setSelectedColumns((prev) => {
-        const newKeys = new Set(
-          flightData.columns.flatMap((g) => g.columns.map((c) => c.key))
-        );
-        const kept = prev.filter((k) => newKeys.has(k));
-        if (kept.length > 0) return kept;
-        // First load: pick sensible defaults
-        const defaults = [
-          'pos.lat', 'pos.lng', 'gps.nava_alt',
-          'engine.engine_rpm', 'drone_state.battery_pct',
-        ];
-        return defaults.filter((d) => newKeys.has(d));
+        setSelectedColumns((prev) => {
+          const newKeys = new Set(flightData.columns.flatMap((g) => g.columns.map((c) => c.key)));
+          const kept = prev.filter((key) => newKeys.has(key));
+          if (kept.length > 0) return kept;
+          const defaults = ['pos.lat', 'pos.lng', 'gps.nava_alt', 'engine.engine_rpm', 'drone_state.battery_pct'];
+          return defaults.filter((key) => newKeys.has(key));
+        });
+        setCorrData(null);
+        setAnomalyData(null);
+      }).catch((error) => {
+        console.error('Failed to load flight data:', error);
+      }).finally(() => {
+        if (!cancelled && latestFlightRef.current === flightId) setLoading(false);
       });
-      setCorrData(null);
-      setAnomalyData(null);
-    }).catch((err) => {
-      console.error('Failed to load flight data:', err);
-    }).finally(() => {
-      if (latestFlightRef.current === selectedFlightId) {
-        setLoading(false);
-      }
-    });
-  }, [selectedFlightId]);
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedFlightId, currentModelId]);
 
   // ─── Fetch aligned data ────────────────────────────────
   useEffect(() => {
     const requestId = ++alignedRequestRef.current;
+    let cancelled = false;
     if (!selectedFlightId || selectedColumns.length === 0) {
-      setAligned(null);
-      setAlignedLoading(false);
-      return;
+      const timer = window.setTimeout(() => {
+        setAligned(null);
+        setAlignedLoading(false);
+      }, 0);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timer);
+      };
     }
     const flightId = selectedFlightId;
-    setAlignedLoading(true);
-    getAlignedData(flightId, selectedColumns, filterSpec ?? undefined)
-      .then((data) => {
-        // Abort if flight changed during fetch
-        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
-          setAligned(data);
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch aligned data:', err);
-        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
-          setAligned(null);
-        }
-      })
-      .finally(() => {
-        if (latestFlightRef.current === flightId && alignedRequestRef.current === requestId) {
-          setAlignedLoading(false);
-        }
-      });
-  }, [selectedFlightId, selectedColumns, filterSpec]);
-
-  // ─── Chart: lifecycle ──────────────────────────────────
-  //
-  // Why one effect, not two:
-  // Previously we had two effects — one for init/dispose (keyed on
-  // viewMode/active) and one for setOption (keyed on data). The split
-  // caused crashes ("Cannot read properties of undefined (reading
-  // 'group')" / "__ec_inner_*") because the update effect would call
-  // setOption on an instance whose internal component tree carried
-  // residue from the previous flight. ECharts 6.1 + notMerge=true
-  // doesn't handle dramatic shape changes (different yAxis count, unit
-  // groups, hasFilter on/off) cleanly.
-  //
-  // The fix: dispose and re-init the chart from scratch on every
-  // significant change. Implementation note: zrender dblclick handler
-  // is re-bound after each init (cheap, single listener).
-  //
-  // Container size handling: ResizeObserver still drives resize() on
-  // an existing instance, and re-init when the container first gains
-  // dimensions (deferred init for keep-alive tabs).
-  useEffect(() => {
-    if (!active || viewMode !== 'chart' || !chartRef.current) {
-      if (chartInst.current) {
-        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-        chartInst.current = null;
-      }
-      return;
-    }
-
-    const container = chartRef.current;
-
-    const bindDblClick = (inst: echarts.ECharts) => {
-      const zr = inst.getZr();
-      zr.on('dblclick', (e: any) => {
-        const ZOOM = 2;
-        const MIN_RANGE = 2;
-        const opt = inst.getOption();
-        const dzList = (opt?.dataZoom as any[]) || [];
-        const xSlider = dzList.find((d: any) => d.type === 'slider' && d.yAxisIndex === undefined);
-        const ySlider = dzList.find((d: any) => d.type === 'slider' && (d.yAxisIndex !== undefined));
-        const xStart: number = xSlider?.start ?? 0;
-        const xEnd: number = xSlider?.end ?? 100;
-        const yStart: number = ySlider?.start ?? 0;
-        const yEnd: number = ySlider?.end ?? 100;
-
-        const gridModel = (inst as any)?.getModel().getComponent('grid', 0);
-        const rect = (gridModel as any)?.coordinateSystem?.getRect?.();
-        const fx = rect ? Math.max(0, Math.min(1, (e.offsetX - rect.x) / rect.width)) : 0.5;
-        const fy = rect ? 1 - Math.max(0, Math.min(1, (e.offsetY - rect.y) / rect.height)) : 0.5;
-        const xCenter = xStart + fx * (xEnd - xStart);
-        const yCenter = yStart + fy * (yEnd - yStart);
-
-        const xRange = xEnd - xStart;
-        if (xRange > MIN_RANGE) {
-          const newXRange = xRange / ZOOM;
-          inst.dispatchAction({
-            type: 'dataZoom',
-            dataZoomIndex: 0,
-            start: Math.max(0, xCenter - newXRange / 2),
-            end: Math.min(100, xCenter + newXRange / 2),
-          });
-        }
-
-        const yRange = yEnd - yStart;
-        if (yRange > MIN_RANGE) {
-          const newYRange = yRange / ZOOM;
-          yZoomRef.current = {
-            start: Math.max(0, yCenter - newYRange / 2),
-            end: Math.min(100, yCenter + newYRange / 2),
-          };
-          inst.dispatchAction({
-            type: 'dataZoom',
-            dataZoomId: 'ySlider',
-            start: yZoomRef.current.start,
-            end: yZoomRef.current.end,
-          });
-        }
-      });
-    };
-
-    // Build option for the current data state. Computed inside the
-    // effect so it captures the latest aligned/normalize/scaleFactors
-    // without needing a separate effect.
-    const buildAndApply = (inst: echarts.ECharts) => {
-      if (!aligned) return;
-      try {
-        const option = buildChartOption(aligned, normalize, scaleFactors);
-        inst.setOption(option, true);
-        // WebView2 quirk: canvas size sometimes lags one frame behind
-        // layout when the container has just become visible. Force a
-        // resize on the next frame so ECharts paints against the
-        // now-flushed dimensions.
-        requestAnimationFrame(() => {
-          try { inst.resize(); } catch (e) { /* ignore */ }
+    const columns = selectedColumns;
+    const filter = filterSpec ?? undefined;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      setAlignedLoading(true);
+      getAlignedData(flightId, columns, filter)
+        .then((data) => {
+          if (!cancelled && latestFlightRef.current === flightId && alignedRequestRef.current === requestId) setAligned(data);
+        })
+        .catch((error) => {
+          console.error('Failed to fetch aligned data:', error);
+          if (!cancelled && latestFlightRef.current === flightId && alignedRequestRef.current === requestId) setAligned(null);
+        })
+        .finally(() => {
+          if (!cancelled && latestFlightRef.current === flightId && alignedRequestRef.current === requestId) setAlignedLoading(false);
         });
-      } catch (e) {
-        console.error('setOption failed:', e);
-      }
-    };
-
-    // Create a fresh instance every time this effect runs. This is the
-    // cornerstone of the fix: ECharts 6.1 cannot reliably diff between
-    // option shapes that differ in yAxis count / unit groups / hasFilter,
-    // so we never reuse an instance across data changes.
-    const createInstance = () => {
-      if (container.clientWidth === 0 || container.clientHeight === 0) return null;
-      try {
-        const inst = echarts.init(container);
-        bindDblClick(inst);
-        return inst;
-      } catch (e) {
-        console.error('ECharts init failed:', e);
-        return null;
-      }
-    };
-
-    // Dispose any existing instance from a previous effect run
-    // (shouldn't normally happen — cleanup below handles it — but
-    // defensive against StrictMode double-invoke).
-    if (chartInst.current) {
-      try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-      chartInst.current = null;
-    }
-
-    chartInst.current = createInstance();
-    if (chartInst.current) buildAndApply(chartInst.current);
-
-    const ro = new ResizeObserver(() => {
-      if (!chartInst.current) {
-        // Deferred init for keep-alive: container just gained dimensions.
-        chartInst.current = createInstance();
-        if (chartInst.current) buildAndApply(chartInst.current);
-      } else {
-        try { chartInst.current.resize(); } catch (e) { /* ignore */ }
-      }
-    });
-    ro.observe(container);
-
+    }, 0);
     return () => {
-      ro.disconnect();
-      if (chartInst.current) {
-        try { chartInst.current.dispose(); } catch (e) { /* ignore */ }
-        chartInst.current = null;
-      }
+      cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [viewMode, active, aligned, normalize, scaleFactors]);
+  }, [selectedFlightId, selectedColumns, filterSpec]);
 
   // ─── Column toggle ─────────────────────────────────────
   const toggleColumn = (key: string) => {
@@ -802,7 +317,7 @@ export default function FlightView({
       await deleteFlight(flight.id, deleteScopeFor(flight, serverOnline) as DeleteScope);
       if (selectedFlightId === flight.id) {
         const remaining = flights.filter((f) => f.id !== flight.id);
-        onSelectFlight(remaining.length > 0 ? remaining[0].id : null as any);
+        onSelectFlight(remaining.length > 0 ? remaining[0].id : null);
       }
       setDeletingFlightId(null);
       onFlightsChanged();
@@ -863,145 +378,24 @@ export default function FlightView({
     <div className="h-full flex flex-col">
       {/* ── Toolbar ────────────────────────────────────── */}
       <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-200 bg-gray-50/80 shrink-0 flex-wrap relative">
-        {/* Tree selector: Model → Aircraft → Flight */}
-        <div className="flex items-center gap-2" ref={treeRef}>
-          {/* Trigger button */}
-          <button
-            onClick={() => setTreeOpen(!treeOpen)}
-            className="flex items-center gap-1 bg-white border border-gray-300 rounded-lg pl-3 pr-2 py-1.5 text-sm hover:border-blue-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 min-w-[180px] max-w-[360px]"
-          >
-            {selectedFlightId ? (
-              <span className="text-gray-700 truncate">
-                {(() => {
-                  const f = flights.find(fl => fl.id === selectedFlightId);
-                  const m = models.find(mo => mo.id === selectedModelId);
-                  const a = aircraft.find(ac => ac.id === selectedAircraftId);
-                  if (f && m && a) return `${m.name} / ${a.name} / ${f.name}`;
-                  return f?.name || '选择架次...';
-                })()}
-              </span>
-            ) : (
-              <span className="text-gray-400">选择架次...</span>
-            )}
-            <ChevronDown className={`w-4 h-4 text-gray-400 ml-auto shrink-0 transition-transform ${treeOpen ? 'rotate-180' : ''}`} />
-          </button>
-
-          {/* Tree popover */}
-          {treeOpen && (
-            <div className="absolute top-full left-4 mt-1 z-50 flex bg-white border border-gray-200 rounded-lg shadow-lg max-h-[320px]">
-              {/* Column 1: Models */}
-              <div className="w-44 border-r border-gray-100 overflow-y-auto py-1">
-                <div className="px-3 py-1.5 text-xs text-gray-400 font-medium sticky top-0 bg-white">机型</div>
-                {visibleModels.length === 0 ? (
-                  <div className="px-3 py-2 text-xs text-gray-400">无匹配机型</div>
-                ) : (
-                  visibleModels.map((m) => (
-                    <button
-                      key={m.id}
-                      onMouseEnter={() => openTreeModel(m.id)}
-                      className={`w-full text-left px-3 py-1.5 text-sm flex items-center justify-between ${
-                        treeModelId === m.id
-                          ? 'bg-blue-50 text-blue-700'
-                          : 'text-gray-700 hover:bg-gray-50'
-                      }`}
-                    >
-                      <span className="truncate">{m.name}</span>
-                      <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
-                    </button>
-                  ))
-                )}
-              </div>
-
-              {/* Column 2: Aircraft (visible when model selected) */}
-              {treeModelId && (
-                <div className="w-44 border-r border-gray-100 overflow-y-auto py-1">
-                  <div className="px-3 py-1.5 text-xs text-gray-400 font-medium sticky top-0 bg-white">飞机</div>
-                  {visibleTreeAircraft.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-gray-400">无匹配飞机</div>
-                  ) : (
-                    visibleTreeAircraft.map((a) => (
-                      <button
-                        key={a.id}
-                        onMouseEnter={() => openTreeAircraft(a.id)}
-                        className={`w-full text-left px-3 py-1.5 text-sm flex items-center justify-between ${
-                          treeAircraftId === a.id
-                            ? 'bg-blue-50 text-blue-700'
-                            : 'text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        <span className="truncate">{a.name}</span>
-                        <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-
-              {/* Column 3: Flights (visible when aircraft selected) */}
-              {treeAircraftId && (
-                <div className="w-52 overflow-y-auto py-1">
-                  <div className="px-3 py-1.5 text-xs text-gray-400 font-medium sticky top-0 bg-white">架次</div>
-                  {treeFlightsList.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-gray-400">无架次</div>
-                  ) : (
-                    treeFlightsList.map((f) => (
-                      <button
-                        key={f.id}
-                        onClick={() => selectTreeFlight(f.id)}
-                        className={`w-full text-left px-3 py-1.5 text-sm ${
-                          f.id === selectedFlightId
-                            ? 'bg-blue-50 text-blue-700'
-                            : 'text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2 min-w-0">
-                          <span className="truncate">{f.name}</span>
-                          <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded border ${syncStateClass(f.sync_state)}`}>
-                            {syncStateLabel(f.sync_state)}
-                          </span>
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Search */}
-          <input
-            type="text"
-            value={flightSearch}
-            onChange={(e) => setFlightSearch(e.target.value)}
-            placeholder="搜索架次..."
-            className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-500 w-32"
-          />
-
-          {/* Rename button */}
-          {selectedFlightId && editingFlightId !== selectedFlightId && (
-            <button
-              onClick={() => {
-                const f = flights.find((fl) => fl.id === selectedFlightId);
-                if (f) startRename(f);
-              }}
-              className="text-gray-400 hover:text-blue-500 text-xs px-1.5 py-1 rounded hover:bg-gray-100 shrink-0"
-              title="重命名"
-            >
-              <Pencil className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* Delete button */}
-          {selectedFlightId && canDeleteFlights && deletingFlightId !== selectedFlightId && (
-            <button
-              onClick={() => setDeletingFlightId(selectedFlightId)}
-              className="text-gray-400 hover:text-red-500 px-1.5 py-1 rounded hover:bg-red-50 shrink-0 flex items-center"
-              title="删除"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-        </div>
+        <FlightTree
+          flights={flights}
+          models={models}
+          aircraft={aircraft}
+          selectedFlightId={selectedFlightId}
+          selectedModelId={selectedModelId}
+          selectedAircraftId={selectedAircraftId}
+          search={flightSearch}
+          editingFlightId={editingFlightId}
+          deletingFlightId={deletingFlightId}
+          canDeleteFlights={canDeleteFlights}
+          onSearchChange={setFlightSearch}
+          onSelectFlight={onSelectFlight}
+          onSelectModel={onSelectModel}
+          onSelectAircraft={onSelectAircraft}
+          onStartRename={startRename}
+          onRequestDelete={setDeletingFlightId}
+        />
 
         {/* Inline rename input */}
         {editingFlightId && (
@@ -1088,19 +482,7 @@ export default function FlightView({
 
         <button
           onClick={() => {
-            yZoomRef.current = { start: 0, end: 100 };
-            chartInst.current?.dispatchAction({
-              type: 'dataZoom',
-              dataZoomIndex: 0,
-              start: 0,
-              end: 100,
-            });
-            chartInst.current?.dispatchAction({
-              type: 'dataZoom',
-              dataZoomId: 'ySlider',
-              start: 0,
-              end: 100,
-            });
+            flightChartRef.current?.resetZoom();
           }}
           className="px-2 py-0.5 text-xs rounded border border-gray-300 text-gray-500 hover:bg-gray-100 transition-colors"
           title="双击图表可放大，点击此按钮重置缩放"
@@ -1379,22 +761,15 @@ export default function FlightView({
         <div className="flex-1 flex flex-col min-w-0 relative">
           {/* Chart Tab */}
           {viewMode === 'chart' && (
-            <>
-              <div ref={chartRef} className="flex-1 min-h-0" />
-              {chartEmptyState && (
-                <EmptyState
-                  title={chartEmptyState.title}
-                  description={chartEmptyState.description}
-                />
-              )}
-              <ChartDebugBadge
-                active={active}
-                chartRef={chartRef}
-                chartInst={chartInst}
-                aligned={aligned}
-                selectedColumns={selectedColumns}
-              />
-            </>
+            <FlightChart
+              ref={flightChartRef}
+              active={active}
+              aligned={aligned}
+              normalize={normalize}
+              scaleFactors={scaleFactors}
+              selectedColumns={selectedColumns}
+              emptyState={chartEmptyState}
+            />
           )}
 
           {/* Correlation Tab */}
@@ -1450,144 +825,3 @@ export default function FlightView({
 
 // ═══════════════════════════════════════════════════════════
 // Sub-components
-// ═══════════════════════════════════════════════════════════
-
-function EmptyState({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-      <div className="max-w-md px-6 py-5 text-center">
-        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-gray-400">
-          !
-        </div>
-        <div className="text-sm font-medium text-gray-700">{title}</div>
-        <div className="mt-1 text-xs leading-5 text-gray-500">{description}</div>
-      </div>
-    </div>
-  );
-}
-
-// In-app debug HUD — no DevTools needed.
-// Sticks to the bottom-right of the chart area, updates ~4×/sec,
-// shows the values needed to diagnose the "chart blank after tab
-// switch" bug: container dimensions, instance liveness, data
-// presence, etc. Click to force a resize.
-function ChartDebugBadge({
-  active,
-  chartRef,
-  chartInst,
-  aligned,
-  selectedColumns,
-}: {
-  active: boolean;
-  chartRef: React.RefObject<HTMLDivElement | null>;
-  chartInst: React.MutableRefObject<echarts.ECharts | null>;
-  aligned: AlignedData | null;
-  selectedColumns: string[];
-}) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 250);
-    return () => clearInterval(id);
-  }, []);
-
-  const el = chartRef.current;
-  const w = el?.clientWidth ?? 0;
-  const h = el?.clientHeight ?? 0;
-  const visible = el ? (el.offsetParent !== null) : false;
-  const inst = chartInst.current;
-  const instW = inst ? (inst.getWidth?.() ?? -1) : -1;
-  const instH = inst ? (inst.getHeight?.() ?? -1) : -1;
-  const seriesCount = aligned ? Object.keys(aligned.series || {}).length : 0;
-  const timesCount = aligned?.times?.length ?? 0;
-
-  const forceResize = () => {
-    if (inst) {
-      try { inst.resize(); } catch { /* ignore */ }
-    }
-  };
-
-  return (
-    <div
-      onClick={forceResize}
-      title="Click to force chart.resize()"
-      className="absolute bottom-2 right-2 z-50 bg-black/75 text-white text-[10px] font-mono px-2 py-1 rounded leading-tight cursor-pointer hover:bg-black/90 select-none"
-      style={{ pointerEvents: 'auto' }}
-    >
-      <div>active:{String(active)} vis:{String(visible)}</div>
-      <div>DOM:{w}×{h} inst:{inst ? `${instW}×${instH}` : 'null'}</div>
-      <div>data:{seriesCount}s/{timesCount}p cols:{selectedColumns.length}</div>
-      <div>tick:{tick} (click→resize)</div>
-    </div>
-  );
-}
-
-function CorrelationHeatmap({ data }: { data: { labels: string[]; matrix: number[][] } }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!ref.current) return;
-    const chart = echarts.init(ref.current);
-    chart.setOption({
-      tooltip: { formatter: (p: any) => `${p.name}: <strong>${p.value?.[2]?.toFixed(3)}</strong>` },
-      grid: { left: 120, right: 60, top: 20, bottom: 80 },
-      xAxis: {
-        type: 'category', data: data.labels,
-        axisLabel: { color: '#6b7280', fontSize: 10, rotate: 45 },
-      },
-      yAxis: {
-        type: 'category', data: data.labels,
-        axisLabel: { color: '#6b7280', fontSize: 10 },
-      },
-      visualMap: {
-        min: -1, max: 1,
-        inRange: { color: ['#3b82f6', '#f9fafb', '#ef4444'] },
-        textStyle: { color: '#6b7280' },
-        orient: 'horizontal', bottom: 10,
-      },
-      series: [{
-        type: 'heatmap',
-        data: data.matrix.flatMap((row, i) =>
-          row.map((v, j) => [j, i, v])
-        ),
-        label: { show: false },
-      }],
-    });
-    return () => chart.dispose();
-  }, [data]);
-  return <div ref={ref} className="w-full h-full" />;
-}
-
-function AnomalyChart({ data }: { data: any }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!ref.current || !data.times || !data.values) return;
-    const chart = echarts.init(ref.current);
-    const anomalyPoints = data.anomaly_indices && data.values
-      ? data.anomaly_indices.map((i: number) => [i, data.values[i]])
-      : [];
-    chart.setOption({
-      tooltip: { trigger: 'axis' },
-      legend: { data: ['原始值', '上界', '下界', '异常点'], textStyle: { color: '#6b7280' } },
-      xAxis: { type: 'category', data: data.times, axisLabel: { show: false } },
-      yAxis: {
-        type: 'value', name: data.unit,
-        nameTextStyle: { color: '#6b7280' },
-        axisLabel: { color: '#9ca3af' },
-        splitLine: { lineStyle: { color: '#f3f4f6' } },
-      },
-      dataZoom: [{ type: 'slider' }, { type: 'inside' }],
-      series: [
-        { name: '原始值', type: 'line', data: data.values, smooth: true, showSymbol: false, lineStyle: { width: 1, color: '#2563eb' } },
-        { name: '上界', type: 'line', data: data.upper_bound, lineStyle: { type: 'dashed', color: '#f59e0b', width: 1 }, showSymbol: false },
-        { name: '下界', type: 'line', data: data.lower_bound, lineStyle: { type: 'dashed', color: '#f59e0b', width: 1 }, showSymbol: false },
-        {
-          name: '异常点', type: 'scatter',
-          data: anomalyPoints,
-          symbolSize: 6, itemStyle: { color: '#ef4444' },
-        },
-      ],
-    });
-    return () => chart.dispose();
-  }, [data]);
-  return <div ref={ref} className="w-full h-full" />;
-}
-

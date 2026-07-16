@@ -7,7 +7,7 @@ import uuid
 from fastapi import HTTPException
 
 from .auth import ensure_builtin_admin, extract_bearer_token, session_token_hash
-from . import permission_repository
+from .repositories import permissions as permission_repository
 
 
 VALID_ENVIRONMENTS = {"research", "field"}

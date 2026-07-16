@@ -14,6 +14,8 @@ import shutil
 import uuid
 from datetime import datetime
 
+from backend.sync.protocol import CURRENT_SCHEMA_VERSION
+
 logger = logging.getLogger(__name__)
 
 def _default_data_dir():
@@ -28,8 +30,6 @@ DATA_DIR = os.path.abspath(os.path.expanduser(os.environ.get('DATA_DIR') or _def
 
 DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").strip().lower() or "sqlite"
 DB_PATH = os.path.join(DATA_DIR, 'data.db')
-# Current medium-term schema starts from v2 and rebuilds incompatible old DBs.
-CURRENT_SCHEMA_VERSION = 4
 CORE_TABLES = {
     'schema_version', 'aircraft_models', 'aircraft', 'flights',
     'data_table_registry', 'column_registry', 'presets', 'filter_presets',

@@ -1,0 +1,12 @@
+import { request } from './client';
+import type { FlightRecordFields } from './flights';
+
+export interface SessionPreview { aircraft_serial: string; session_key: string; flight_date?: string | null; data_types: Record<string, number>; file_count: number; record_defaults?: FlightRecordFields; record_source?: string; record_defaults_error?: string; import_status: 'new' | 'imported'; existing_flight_id?: number; existing_flight_name?: string; aircraft_id?: number; conflicting_aircraft?: { aircraft_serial: string; flight_id: number; flight_name: string }[]; }
+export interface DiscoveredType { data_type_key: string; display_label: string; is_alert: boolean; is_raw: boolean; column_count: number; }
+export interface ScanResult { source_path: string; folder_name: string; format_detected?: boolean; model: { id: number; name: string; is_new: boolean; match_confidence: number | null } | null; suggested_model_id?: number; suggested_model_name?: string; suggested_name?: string; discovered_types?: DiscoveredType[]; matching_models?: { id: number; name: string; score: number }[]; sessions: SessionPreview[]; error?: string; }
+export interface ImportSessionResult { flight_id: number; aircraft_id: number; session_key: string; name: string; rows: number; details: Record<string, number | string>; raw_files?: number; raw_warnings?: { file?: string; path?: string; error: string }[]; error?: string; }
+export const scanFolder = (sourcePath: string) => request<ScanResult>('/flights/scan', { method: 'POST', body: JSON.stringify({ source_path: sourcePath }) });
+export const importSession = (sourcePath: string, aircraftId: number, sessionKey: string, record: FlightRecordFields & { flight_date?: string | null } = {}) => request<ImportSessionResult>('/flights/import', { method: 'POST', body: JSON.stringify({ source_path: sourcePath, aircraft_id: aircraftId, session_key: sessionKey, ...record }) });
+export const browseFolder = () => request<{ path: string; cancelled?: boolean }>('/folders/browse');
+export const browseFile = (opts: { title?: string; filetypes?: string } = {}) => { const qs = new URLSearchParams(); if (opts.title) qs.set('title', opts.title); if (opts.filetypes) qs.set('filetypes', opts.filetypes); const text = qs.toString(); return request<{ path: string; cancelled?: boolean }>(`/files/browse${text ? `?${text}` : ''}`); };
+export const listSubdirs = (path: string) => request<{ path: string; subdirs: string[] }>(`/folders/subdirs?path=${encodeURIComponent(path)}`);

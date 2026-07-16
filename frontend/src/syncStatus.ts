@@ -1,4 +1,4 @@
-import type { Flight } from './api';
+import type { Flight } from './api/flights';
 
 export type SyncStateFilter =
   | 'all'

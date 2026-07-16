@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import type { FilterCondition, FilterSpec, FilterPreset, ColumnGroup } from '../api';
+import { useState, useEffect, useEffectEvent, useMemo, useRef } from 'react';
+import type { FilterCondition, FilterSpec, FilterPreset, ColumnGroup } from '../api/analysis';
 
 interface Props {
   /** Only columns currently selected in the chart (grouped by data type) */
@@ -35,32 +35,42 @@ export default function FilterBar({
   );
   const presetNameRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
   const suppressEmitRef = useRef(false);
+  const emitChange = useEffectEvent(onChange);
 
   // Build flat lookup: key -> {label, unit}
-  const colMap = new Map<string, { label: string; unit: string }>();
-  columnGroups.forEach((g) => g.columns.forEach((c) => colMap.set(c.key, { label: c.label, unit: c.unit })));
-  const availableColumnKey = columnGroups
+  const colMap = useMemo(() => {
+    const result = new Map<string, { label: string; unit: string }>();
+    columnGroups.forEach((g) => g.columns.forEach((c) => result.set(c.key, { label: c.label, unit: c.unit })));
+    return result;
+  }, [columnGroups]);
+  const availableColumnKey = useMemo(() => columnGroups
     .flatMap((g) => g.columns.map((c) => c.key))
-    .join('\u0001');
+    .join('\u0001'), [columnGroups]);
+  const validConditions = useEffectEvent((items: FilterCondition[]) => items.filter((condition) => {
+    if (!condition.column || !colMap.has(condition.column)) return false;
+    if (condition.op === 'between') return condition.min_val != null && condition.max_val != null;
+    return condition.value != null;
+  }));
 
   // Sync from parent when filterSpec changes externally (e.g. preset loaded)
   useEffect(() => {
     suppressEmitRef.current = true;
-    if (filterSpec) {
-      const validConditions = filterSpec.conditions.filter((c) => colMap.has(c.column));
-      setLogic(filterSpec.logic);
-      setConditions(validConditions);
-      if (validConditions.length !== filterSpec.conditions.length) {
-        onChangeRef.current(validConditions.length > 0 ? { logic: filterSpec.logic, conditions: validConditions } : null);
+    const timer = window.setTimeout(() => {
+      if (filterSpec) {
+        const nextConditions = filterSpec.conditions.filter((condition) => colMap.has(condition.column));
+        setLogic(filterSpec.logic);
+        setConditions(nextConditions);
+        if (nextConditions.length !== filterSpec.conditions.length) {
+          emitChange(nextConditions.length > 0 ? { logic: filterSpec.logic, conditions: nextConditions } : null);
+        }
+      } else {
+        setLogic('and');
+        setConditions([]);
       }
-    } else {
-      setLogic('and');
-      setConditions([]);
-    }
-  }, [filterSpec, availableColumnKey]);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [filterSpec, availableColumnKey, colMap]);
 
   // Emit valid conditions when state changes (replaces side effects in state updaters)
   useEffect(() => {
@@ -70,16 +80,11 @@ export default function FilterBar({
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      const valid = conditions.filter((c) => {
-        if (!c.column) return false;
-        if (!colMap.has(c.column)) return false;
-        if (c.op === 'between') return c.min_val != null && c.max_val != null;
-        return c.value != null;
-      });
+      const valid = validConditions(conditions);
       if (valid.length === 0) {
-        onChangeRef.current(null);
+        emitChange(null);
       } else {
-        onChangeRef.current({ logic, conditions: valid });
+        emitChange({ logic, conditions: valid });
       }
     }, 400);
   }, [conditions, logic]);

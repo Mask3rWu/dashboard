@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from backend.config import load_app_config
 from backend import runtime_context
-from backend import sync_client
+from backend.sync import client as sync_client
 
 
 DEFAULT_OUTPUT = ROOT / "backend" / "builtin_model_seeds.json"

@@ -1,0 +1,1 @@
+"""Stable local SQLite repositories."""
