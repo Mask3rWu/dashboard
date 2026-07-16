@@ -42,10 +42,10 @@ function PreviewHelp() {
 }
 
 export default function SyncPreviewDialog({ loading, error, preview, action, pullResolutions, onResolutionChange, onClose, onConfirm }: Props) {
-  const uploadBase = sortPreviewItems([...(preview?.upload?.models ?? []), ...(preview?.upload?.aircraft ?? [])]);
+  const uploadBase = sortPreviewItems([...(preview?.upload?.models ?? []), ...(preview?.upload?.aircraft ?? [])].filter((item) => item.action !== 'existing'));
   const pullBase = sortPreviewItems([...(preview?.pull?.models ?? []), ...(preview?.pull?.aircraft ?? [])].filter((item) => item.action !== 'existing'));
-  const uploadItems = sortPreviewItems(preview?.upload?.items ?? []);
-  const pullItems = sortPreviewItems(preview?.pull?.items ?? []);
+  const uploadItems = sortPreviewItems((preview?.upload?.items ?? []).filter((item) => item.action !== 'existing'));
+  const pullItems = sortPreviewItems((preview?.pull?.items ?? []).filter((item) => item.action !== 'existing'));
   const uploadHasConflict = [...(preview?.upload?.models ?? []), ...(preview?.upload?.aircraft ?? []), ...(preview?.upload?.items ?? [])].some((item) => item.action === 'conflict');
   const pullBaseHasConflict = pullBase.some((item) => item.action === 'conflict');
   const canConfirm = !!preview && !loading && !error && !uploadHasConflict && !pullBaseHasConflict;
