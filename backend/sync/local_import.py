@@ -753,6 +753,26 @@ def _find_local_by_server_id(conn, table: str, server_id: int):
     ).fetchone()
 
 
+def _find_local_by_sync_identity(
+    conn,
+    table: str,
+    server_id: int,
+    client_uid: str | None,
+):
+    """Match a pulled entity by server mapping first, then its stable client identity."""
+    existing = _find_local_by_server_id(conn, table, server_id)
+    if existing:
+        return existing, "server_id"
+    if client_uid:
+        existing = conn.execute(
+            f"SELECT * FROM {_q(table)} WHERE client_uid=?",
+            (str(client_uid),),
+        ).fetchone()
+        if existing:
+            return existing, "client_uid"
+    return None, None
+
+
 def _build_config_from_pull_rows(manifest: dict, source_model_id: int, parsed: sqlite3.Connection) -> dict:
     config = _read_model_config_from_zip(manifest["_package_path"], source_model_id)
     if config:
@@ -813,7 +833,9 @@ def _upsert_pull_models(
     source_node_id = manifest.get("source_node_id") or "server"
     for row in manifest.get("models") or []:
         server_id = int(row["id"])
-        existing = _find_local_by_server_id(conn, "aircraft_models", server_id)
+        existing, _ = _find_local_by_sync_identity(
+            conn, "aircraft_models", server_id, row.get("client_uid")
+        )
         config = _build_config_from_pull_rows(manifest, server_id, parsed)
         target_name = row.get("name") or f"server_model_{server_id}"
         if existing:
@@ -905,7 +927,9 @@ def _upsert_pull_aircraft(conn, manifest: dict, model_map: dict[int, int], repor
         if not local_model_id:
             report["warnings"].append({"scope": "aircraft", "server_id": server_id, "message": "model not available"})
             continue
-        existing = _find_local_by_server_id(conn, "aircraft", server_id)
+        existing, _ = _find_local_by_sync_identity(
+            conn, "aircraft", server_id, row.get("client_uid")
+        )
         target_name = row.get("name") or f"server_aircraft_{server_id}"
         if existing:
             local_id = int(existing["id"])
@@ -1010,7 +1034,9 @@ def _upsert_pull_flights(
     for row in manifest.get("flights") or []:
         server_id = int(row["id"])
         deleted_at = row.get("deleted_at")
-        existing = _find_local_by_server_id(conn, "flights", server_id)
+        existing, matched_by = _find_local_by_sync_identity(
+            conn, "flights", server_id, row.get("client_uid")
+        )
         if deleted_at:
             if existing:
                 local_id = int(existing["id"])
@@ -1055,6 +1081,7 @@ def _upsert_pull_flights(
                    WHERE aircraft_id=? AND flight_date IS ? AND session_key=?""",
                 (local_aircraft_id, row.get("flight_date"), row.get("session_key") or ""),
             ).fetchone()
+            matched_by = "business_key" if existing else None
             if existing and existing["server_id"] not in (None, server_id):
                 conn.execute(
                     "UPDATE flights SET sync_state='conflict', sync_error_json=? WHERE id=?",
@@ -1083,7 +1110,7 @@ def _upsert_pull_flights(
         ]
         if existing:
             local_id = int(existing["id"])
-            if existing["server_id"] is None and existing["sync_state"] in {
+            if matched_by == "business_key" and existing["server_id"] is None and existing["sync_state"] in {
                 "pending_upload",
                 "upload_failed",
                 "conflict",
@@ -1308,7 +1335,9 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
     aircraft_map: dict[int, int] = {}
     for row in manifest.get("aircraft") or []:
         server_id = int(row.get("id") or 0)
-        existing = _find_local_by_server_id(conn, "aircraft", server_id)
+        existing, _ = _find_local_by_sync_identity(
+            conn, "aircraft", server_id, row.get("client_uid")
+        )
         if existing:
             aircraft_map[server_id] = int(existing["id"])
 
@@ -1316,7 +1345,9 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
     aircraft_items = []
     for row in manifest.get("models") or []:
         server_id = int(row.get("id") or 0)
-        existing = _find_local_by_server_id(conn, "aircraft_models", server_id)
+        existing, matched_by = _find_local_by_sync_identity(
+            conn, "aircraft_models", server_id, row.get("client_uid")
+        )
         action = "create"
         reason = None
         local = None
@@ -1345,14 +1376,16 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
             "deleted_at": row.get("deleted_at"),
             "action": action,
             "reason": reason,
-            "matched_by": "server_id" if existing else None,
+            "matched_by": matched_by,
             "transfer_kind": transfer_kind,
             "local": local,
         })
 
     for row in manifest.get("aircraft") or []:
         server_id = int(row.get("id") or 0)
-        existing = _find_local_by_server_id(conn, "aircraft", server_id)
+        existing, matched_by = _find_local_by_sync_identity(
+            conn, "aircraft", server_id, row.get("client_uid")
+        )
         server_model_name = model_names.get(int(row.get("model_id") or 0), "-")
         action = "create"
         reason = None
@@ -1382,7 +1415,7 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
             "deleted_at": row.get("deleted_at"),
             "action": action,
             "reason": reason,
-            "matched_by": "server_id" if existing else None,
+            "matched_by": matched_by,
             "transfer_kind": transfer_kind,
             "local": local,
         })
@@ -1393,8 +1426,9 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
     for row in manifest.get("flights") or []:
         server_id = int(row["id"])
         deleted_at = row.get("deleted_at")
-        existing = _find_local_by_server_id(conn, "flights", server_id)
-        matched_by = "server_id" if existing else None
+        existing, matched_by = _find_local_by_sync_identity(
+            conn, "flights", server_id, row.get("client_uid")
+        )
         server_aircraft_id = int(row.get("aircraft_id") or 0)
         server_aircraft = aircraft_info.get(server_aircraft_id, {})
         local_aircraft_id = aircraft_map.get(server_aircraft_id)
@@ -1425,7 +1459,7 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
             elif deleted_at and existing["sync_state"] == "dirty":
                 action = "conflict"
                 reason = "server_deleted_dirty_local"
-            elif existing["server_id"] is None and existing["sync_state"] in {
+            elif matched_by == "business_key" and existing["server_id"] is None and existing["sync_state"] in {
                 "pending_upload",
                 "upload_failed",
                 "conflict",

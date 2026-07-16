@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 import zipfile
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from backend.sync import local_import as sync_import
 from backend.sync import package as sync_package
 from backend.sync import server as server_sync
+from backend.sync import workflow as sync_workflow
 
 
 @pytest.mark.parametrize("module", [sync_package, sync_import])
@@ -121,3 +123,88 @@ def test_server_pull_bundle_uses_current_local_schema_version(monkeypatch, tmp_p
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
 
     assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
+
+
+def test_pull_preview_and_metadata_attach_records_by_client_uid(isolated_data_dir):
+    from backend.database import get_db, init_db
+
+    init_db()
+    suffix = uuid.uuid4().hex
+    model_uid = f"model-{suffix}"
+    aircraft_uid = f"aircraft-{suffix}"
+    flight_uid = f"flight-{suffix}"
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO aircraft_models (client_uid, name) VALUES (?, ?)",
+            (model_uid, f"Model {suffix}"),
+        )
+        model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO aircraft (client_uid, model_id, name) VALUES (?, ?, ?)",
+            (aircraft_uid, model_id, f"Aircraft {suffix}"),
+        )
+        aircraft_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO flights
+               (client_uid, aircraft_id, name, source_path, session_key, flight_date)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (flight_uid, aircraft_id, f"Flight {suffix}", "local://flight", "115610", "2026-07-13"),
+        )
+        flight_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        manifest = {
+            "source_node_id": "server",
+            "server_cursor": "42",
+            "models": [{"id": 101, "client_uid": model_uid, "name": f"Model {suffix}", "version": 1}],
+            "aircraft": [{"id": 201, "client_uid": aircraft_uid, "model_id": 101, "name": f"Aircraft {suffix}", "version": 1}],
+            "flights": [{
+                "id": 301,
+                "client_uid": flight_uid,
+                "aircraft_id": 201,
+                "name": f"Flight {suffix}",
+                "source_path": "sync://server/301",
+                "session_key": "115610",
+                "flight_date": "2026-07-13",
+                "version": 1,
+            }],
+            "raw_files": [],
+        }
+
+        preview = sync_import.preview_pull_manifest(conn, manifest)
+        assert preview["models"][0]["local"]["id"] == model_id
+        assert preview["models"][0]["matched_by"] == "client_uid"
+        assert preview["aircraft"][0]["local"]["id"] == aircraft_id
+        assert preview["aircraft"][0]["matched_by"] == "client_uid"
+        assert preview["items"][0]["local"]["id"] == flight_id
+        assert preview["items"][0]["matched_by"] == "client_uid"
+        assert preview["items"][0]["action"] == "attach_existing"
+
+        report = sync_import.apply_pull_manifest_metadata(conn, manifest)
+        assert report["status"] == "success"
+        assert conn.execute("SELECT server_id FROM aircraft_models WHERE id=?", (model_id,)).fetchone()[0] == 101
+        assert conn.execute("SELECT server_id FROM aircraft WHERE id=?", (aircraft_id,)).fetchone()[0] == 201
+        assert conn.execute("SELECT server_id FROM flights WHERE id=?", (flight_id,)).fetchone()[0] == 301
+    finally:
+        conn.close()
+
+
+def test_run_preview_excludes_server_rows_planned_for_upload_update():
+    manifest = {
+        "models": [{"id": 101}, {"id": 102}],
+        "aircraft": [{"id": 201}, {"id": 202}],
+        "flights": [{"id": 301}, {"id": 302}],
+        "raw_files": [{"flight_id": 301}, {"flight_id": 302}],
+    }
+    preflight = {
+        "models": [{"action": "update_metadata", "server_id": 101}],
+        "aircraft": [{"action": "existing", "server_id": 201}],
+        "flights": [{"action": "update_metadata", "server_id": 301}],
+    }
+
+    filtered = sync_workflow._exclude_planned_upload_changes(manifest, preflight)
+
+    assert [row["id"] for row in filtered["models"]] == [102]
+    assert [row["id"] for row in filtered["aircraft"]] == [201, 202]
+    assert [row["id"] for row in filtered["flights"]] == [302]
+    assert [row["flight_id"] for row in filtered["raw_files"]] == [302]

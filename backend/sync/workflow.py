@@ -226,11 +226,48 @@ def _preview_upload(conn, flight_ids: list[int] | None, token: str | None) -> di
     }
 
 
-def _preview_pull(conn, since: str | None, token: str | None) -> dict:
+def _exclude_planned_upload_changes(manifest: dict, preflight: dict | None) -> dict:
+    """Remove pull rows that a successful upload will have just changed on the server."""
+    if not preflight or preflight.get("conflicts"):
+        return manifest
+
+    planned_ids = {"models": set(), "aircraft": set(), "flights": set()}
+    for key in planned_ids:
+        for item in preflight.get(key) or []:
+            if item.get("action") not in {"update_metadata", "restore"}:
+                continue
+            server_id = item.get("server_id")
+            if server_id is not None:
+                planned_ids[key].add(int(server_id))
+    if not any(planned_ids.values()):
+        return manifest
+
+    filtered = dict(manifest)
+    for key, ids in planned_ids.items():
+        if ids:
+            filtered[key] = [
+                row for row in manifest.get(key) or []
+                if int(row.get("id") or 0) not in ids
+            ]
+    if planned_ids["flights"]:
+        filtered["raw_files"] = [
+            row for row in manifest.get("raw_files") or []
+            if int(row.get("flight_id") or 0) not in planned_ids["flights"]
+        ]
+    return filtered
+
+
+def _preview_pull(
+    conn,
+    since: str | None,
+    token: str | None,
+    planned_upload: dict | None = None,
+) -> dict:
     server_base_url = client.normalize_base_url(runtime_context.get_server_base_url(conn))
     if since is None:
         since = repository.get_setting(conn, "last_pull_cursor", "")
     manifest = client.pull_preview(server_base_url, since, token=token)
+    manifest = _exclude_planned_upload_changes(manifest, planned_upload)
     return preview_pull_manifest(conn, manifest)
 
 
@@ -249,7 +286,12 @@ def preview(
         if mode in {"run", "push"}:
             result["upload"] = _preview_upload(conn, flight_ids, token)
         if mode in {"run", "pull"}:
-            result["pull"] = _preview_pull(conn, since, token)
+            result["pull"] = _preview_pull(
+                conn,
+                since,
+                token,
+                result["upload"].get("preflight") if result["upload"] else None,
+            )
         return result
     except client.SyncClientError as exc:
         raise WorkflowError(502, exc.to_error_json("preview")) from exc
