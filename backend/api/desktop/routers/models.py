@@ -164,7 +164,10 @@ def update_model_column(model_id: int, request: Request, data_type_key: str = Qu
         raise HTTPException(400, "At least one of display_label, unit, or scale_factor must be provided")
     conn = get_db()
     try:
-        require_capability_or_server(conn, request, "update_columns")
+        # Scale factors affect chart presentation only, so ordinary users may
+        # update them. Labels and units remain administrator-managed.
+        if req.display_label is not None or req.unit is not None:
+            require_capability_or_server(conn, request, "update_columns")
         return update_column_metadata(conn, model_id, data_type_key, column_name, display_label=req.display_label, unit=req.unit, scale_factor=req.scale_factor)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc

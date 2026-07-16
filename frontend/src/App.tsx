@@ -315,7 +315,6 @@ export default function App() {
                   selectedAircraftId={selectedAircraftId}
                   onSelectAircraft={setSelectedAircraftId}
                   canDeleteFlights={hasCapability('delete_flights')}
-                  canEditColumns={hasCapability('update_columns')}
                   serverOnline={serverOnline}
                 />
               </ErrorBoundary>

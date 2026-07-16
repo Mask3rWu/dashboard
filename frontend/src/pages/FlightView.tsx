@@ -22,7 +22,6 @@ interface Props {
   selectedAircraftId: number | null;
   onSelectAircraft: (id: number) => void;
   canDeleteFlights: boolean;
-  canEditColumns: boolean;
   serverOnline?: boolean;
 }
 
@@ -40,7 +39,6 @@ export default function FlightView({
   models, selectedModelId, onSelectModel,
   aircraft, selectedAircraftId, onSelectAircraft,
   canDeleteFlights,
-  canEditColumns,
   serverOnline = true,
 }: Props) {
   // ─── State ─────────────────────────────────────────────
@@ -211,7 +209,6 @@ export default function FlightView({
 
   // ─── Scale factor persistence (debounced) ──────────────────
   const handleScaleChange = (key: string, value: number) => {
-    if (!canEditColumns) return;
     const safeVal = isNaN(value) || value === 0 ? 1.0 : value;
     setScaleFactors((prev) => ({ ...prev, [key]: safeVal }));
 
@@ -631,7 +628,7 @@ export default function FlightView({
                           const hasScale = scale !== 1.0;
 
                           // Show input when: actively editing, OR hovered (with no scale), OR scale is set
-                          const showInput = canEditColumns && (isEditing || (isHovered && !hasScale) || hasScale);
+                          const showInput = isEditing || (isHovered && !hasScale) || hasScale;
                           // Show badge when: scale is set AND not currently editing
                           const showBadge = hasScale && !isEditing;
 
@@ -724,7 +721,7 @@ export default function FlightView({
                             )}
 
                             {/* Badge: click to edit */}
-                            {showBadge && (canEditColumns ? (
+                            {showBadge && (
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -736,11 +733,7 @@ export default function FlightView({
                               >
                                 ×{Number(scale.toFixed(2))}
                               </button>
-                            ) : (
-                              <span className="text-blue-600 text-[10px] font-medium bg-blue-50 px-1 rounded shrink-0">
-                                ×{Number(scale.toFixed(2))}
-                              </span>
-                            ))}
+                            )}
 
                             {!showInput && col.unit && (
                               <span className="text-gray-400 text-[10px] shrink-0">{col.unit}</span>
