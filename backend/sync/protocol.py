@@ -11,6 +11,7 @@ from typing import Any
 
 PACKAGE_VERSION = 2
 SYNC_PROTOCOL_VERSION = 1
+CURRENT_SCHEMA_VERSION = 4
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _LOCAL_REQUIRED_FIELDS = (

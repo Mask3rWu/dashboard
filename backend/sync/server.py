@@ -17,6 +17,7 @@ from typing import Any
 
 from backend import server_database as db
 from .protocol import (
+    CURRENT_SCHEMA_VERSION,
     safe_zip_path as _safe_zip_path,
     sha256_file as _sha256_file,
     validate_server_manifest,
@@ -1819,7 +1820,7 @@ def build_pull_bundle(
             "package_id": package_id,
             "bundle_kind": "pull_bundle",
             "app_version": "2.0.0",
-            "schema_version": 2,
+            "schema_version": CURRENT_SCHEMA_VERSION,
             "source_node_id": source_node_id,
             "source_environment": "server",
             "exported_at": db.utcnow().isoformat(timespec="seconds"),

@@ -8,6 +8,7 @@ import pytest
 
 from backend.sync import local_import as sync_import
 from backend.sync import package as sync_package
+from backend.sync import server as server_sync
 
 
 @pytest.mark.parametrize("module", [sync_package, sync_import])
@@ -93,3 +94,30 @@ def test_minimal_export_package_contract(isolated_data_dir):
         }
     finally:
         conn.close()
+
+
+def test_server_pull_bundle_uses_current_local_schema_version(monkeypatch, tmp_path):
+    from backend.database import CURRENT_SCHEMA_VERSION
+
+    monkeypatch.setattr(
+        server_sync,
+        "_changed_entity_ids",
+        lambda *args, **kwargs: {"models": set(), "aircraft": set(), "flights": set()},
+    )
+    monkeypatch.setattr(server_sync, "_max_cursor", lambda conn: 0)
+    monkeypatch.setattr(server_sync, "_select_rows_by_ids", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server_sync, "_server_raw_manifest_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server_sync.db, "SERVER_DATA_DIR", str(tmp_path))
+
+    def write_parsed_sqlite(conn, ids, path):
+        with open(path, "wb") as file:
+            file.write(b"empty parsed sqlite fixture")
+        return 0
+
+    monkeypatch.setattr(server_sync, "_write_server_parsed_sqlite", write_parsed_sqlite)
+
+    result = server_sync.build_pull_bundle(object(), since=0)
+    with zipfile.ZipFile(result["path"], "r") as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+
+    assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
