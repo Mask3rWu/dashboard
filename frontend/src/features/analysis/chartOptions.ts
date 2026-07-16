@@ -1,6 +1,50 @@
 import * as echarts from 'echarts';
 import type { AlignedData } from '../../api/analysis';
 
+const LINE_TYPES = ['solid', 'dashed', 'dotted'] as const;
+
+function hashString(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+// A field keeps its color when other fields are added or removed. Using a
+// fractional hue gives substantially more distinct colors than a short list
+// that wraps after a few series.
+function stableColor(identity: string): string {
+  const hash = hashString(identity);
+  const hue = (hash % 36000) / 100;
+  const saturation = 66 + ((hash >>> 9) % 15);
+  const lightness = 35 + ((hash >>> 17) % 11);
+  const normalizedSaturation = saturation / 100;
+  const normalizedLightness = lightness / 100;
+  const chroma = (1 - Math.abs(2 * normalizedLightness - 1)) * normalizedSaturation;
+  const hueSegment = hue / 60;
+  const second = chroma * (1 - Math.abs((hueSegment % 2) - 1));
+  const match = normalizedLightness - chroma / 2;
+  const [red, green, blue] = hueSegment < 1 ? [chroma, second, 0]
+    : hueSegment < 2 ? [second, chroma, 0]
+      : hueSegment < 3 ? [0, chroma, second]
+        : hueSegment < 4 ? [0, second, chroma]
+          : hueSegment < 5 ? [second, 0, chroma]
+            : [chroma, 0, second];
+  const toHex = (channel: number) => Math.round((channel + match) * 255).toString(16).padStart(2, '0');
+  return `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 export function buildChartOption(
   aligned: AlignedData,
   normalize: boolean,
@@ -26,7 +70,6 @@ export function buildChartOption(
     return scaled.map((v) => (v !== null ? (v - min) / range : null));
   };
 
-  const colors = ['#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#7c3aed', '#0891b2', '#db2777', '#ea580c'];
   const isNorm = normalize;
 
   // Group series by semantic unit (e.g. ° → °_pos vs °_angle)
@@ -45,8 +88,8 @@ export function buildChartOption(
   });
   const unitGroups: UnitGroup[] = Array.from(unitMap.entries()).map(([unit, items]) => ({ unit, items }));
 
-  const seriesColor = (si: number) => colors[si % colors.length];
-  const unitColor = (gi: number) => colors[gi % colors.length];
+  const seriesColor = (key: string) => stableColor(`series:${key}`);
+  const unitColor = (unit: string) => stableColor(`unit:${unit}`);
 
   const yAxes: echarts.YAXisComponentOption[] = [];
   const keyToGroup = new Map<string, number>();
@@ -65,7 +108,7 @@ export function buildChartOption(
     unitGroups.forEach((g, gi) => {
       const side = gi % 2 === 0 ? 'left' : 'right';
       const sameSide = unitGroups.filter((_, i) => i % 2 === gi % 2 && i < gi).length;
-      const color = unitColor(gi);
+      const color = unitColor(g.unit);
       yAxes.push({
         type: 'value',
         name: g.unit,
@@ -156,12 +199,16 @@ export function buildChartOption(
     : mainYAxes.map((_, i) => i);
 
   return {
-    color: seriesList.map((_, i) => seriesColor(i)),
+    color: seriesList.map(([key]) => seriesColor(key)),
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#fff',
+      renderMode: 'html',
+      confine: true,
+      enterable: true,
+      backgroundColor: 'rgba(255,255,255,0.84)',
       borderColor: '#e5e7eb',
       textStyle: { color: '#374151', fontSize: 12 },
+      extraCssText: 'box-sizing:border-box;max-width:420px;max-height:min(480px,calc(100vh - 32px));overflow-y:auto;overflow-x:hidden;padding:8px 10px;line-height:18px;backdrop-filter:blur(2px);',
       formatter: (params: echarts.TooltipComponentFormatterCallbackParams) => {
         if (!Array.isArray(params)) return '';
         const tooltipItems = params as echarts.DefaultLabelFormatterCallbackParams[];
@@ -171,7 +218,7 @@ export function buildChartOption(
         const anchorParam = tooltipItems.find((p) => p.seriesName === '__text_anchor__');
         const timeIdx = mainParams[0]?.dataIndex ?? anchorParam?.dataIndex ?? -1;
         const time = mainParams[0]?.name || anchorParam?.name || (timeIdx >= 0 ? (times[timeIdx] || '') : '');
-        let html = `<div class="text-xs font-mono text-gray-500">${time}</div>`;
+        let html = `<div style="position:sticky;top:-8px;z-index:1;margin:-8px -10px 5px;padding:8px 10px 5px;background:rgba(255,255,255,0.92);border-bottom:1px solid #f3f4f6;color:#6b7280;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">${escapeHtml(time)}</div>`;
         // Deduplicate by seriesName (ECharts may return the same series twice
         // when multiple yAxes share data — filter keeps only the first occurrence)
         const seenNames = new Set<string>();
@@ -184,10 +231,10 @@ export function buildChartOption(
             const key = numericSeries[sIdx]?.[0] || '';
             const sf = key ? (scaleFactors[key] ?? 1.0) : 1.0;
             const displayVal = Number(pointValue).toFixed(2);
-            html += `<div>${p.marker} ${p.seriesName}: <strong>${displayVal}</strong>`;
+            html += `<div style="display:flex;gap:4px;align-items:baseline"><span style="flex:none">${p.marker}</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(p.seriesName)}">${escapeHtml(p.seriesName)}:</span><strong style="margin-left:auto;white-space:nowrap">${displayVal}</strong>`;
             if (sf !== 1.0) {
               const rawVal = (Number(pointValue) / sf).toFixed(3);
-              html += ` <span style="color:#9ca3af;font-size:10px">(原始: ${rawVal}×${sf})</span>`;
+              html += ` <span style="color:#9ca3af;font-size:10px;white-space:nowrap">(原始: ${rawVal}&times;${sf})</span>`;
             }
             html += `</div>`;
           }
@@ -196,7 +243,7 @@ export function buildChartOption(
           textSeries.forEach(([, s]) => {
             const textVal = s.text_values?.[timeIdx];
             if (textVal != null && textVal !== '') {
-              html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#9ca3af;margin-right:4px"></span> ${s.label}: <strong>${textVal}</strong></div>`;
+              html += `<div style="display:flex;gap:4px;align-items:baseline"><span style="display:inline-block;flex:none;width:8px;height:8px;border-radius:2px;background:#9ca3af"></span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s.label)}">${escapeHtml(s.label)}:</span><strong style="margin-left:auto;white-space:nowrap">${escapeHtml(textVal)}</strong></div>`;
             }
           });
         }
@@ -233,7 +280,7 @@ export function buildChartOption(
           smooth: true,
           showSymbol: false,
           z: 1,
-          lineStyle: { width: 1.5, color: seriesColor(i) },
+          lineStyle: { width: 1.5, type: LINE_TYPES[Math.floor(i / 12) % LINE_TYPES.length], color: seriesColor(key) },
         };
       }),
       ...(needsTextAnchor ? [{
