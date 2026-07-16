@@ -418,7 +418,12 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
                 action = "restore"
                 reason = "server_deleted"
             else:
-                action = "update_metadata"
+                values = _flight_metadata_values(
+                    flight,
+                    _as_int(server_aircraft.get("id")) if server_aircraft else None,
+                    source_node_id,
+                )
+                action = "update_metadata" if _flight_metadata_changed(existing, values) else "existing"
 
         flight_plan.append(
             {

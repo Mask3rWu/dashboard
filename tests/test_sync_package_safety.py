@@ -189,6 +189,68 @@ def test_pull_preview_and_metadata_attach_records_by_client_uid(isolated_data_di
         conn.close()
 
 
+def test_preflight_flight_distinguishes_existing_from_update_metadata(monkeypatch):
+    """An identical flight should preflight as 'existing'; only a real metadata
+    change should be 'update_metadata'. Mirrors the model/aircraft behaviour and
+    the import-side _flight_metadata_changed check."""
+    suffix = uuid.uuid4().hex
+    flight_uid = f"flight-{suffix}"
+    base_flight = {
+        "id": 301,
+        "client_uid": flight_uid,
+        "aircraft_id": 201,
+        "name": f"Flight {suffix}",
+        "source_path": "local://flight",
+        "session_key": "115610",
+        "flight_date": "2026-07-13",
+        "record_location": "Site A",
+        "record_note": "baseline",
+    }
+
+    # Server already holds this flight (matched by client_uid) with the same
+    # metadata as the upload baseline.
+    def fake_find_flight_by_client_uid(conn, client_uid):
+        if client_uid == flight_uid:
+            return {
+                "id": 9001,
+                "client_uid": flight_uid,
+                "version": 1,
+                "deleted_at": None,
+                "name": base_flight["name"],
+                "record_location": base_flight["record_location"],
+                "record_note": base_flight["record_note"],
+            }
+        return None
+
+    monkeypatch.setattr(server_sync, "_find_flight_by_client_uid", fake_find_flight_by_client_uid)
+    monkeypatch.setattr(server_sync, "_find_flight_by_business", lambda *a, **k: None)
+    monkeypatch.setattr(server_sync, "_server_flight_raw_hashes", lambda conn, flight_id: set())
+    monkeypatch.setattr(server_sync, "existing_import_report", lambda *a, **k: None)
+    monkeypatch.setattr(server_sync, "_max_cursor", lambda conn: 0)
+
+    def manifest_for(flight):
+        return {
+            "package_version": sync_package.PACKAGE_VERSION,
+            "sync_protocol_version": sync_package.SYNC_PROTOCOL_VERSION,
+            "package_id": f"pkg-{suffix}",
+            "source_node_id": "node-A",
+            "bundle_kind": "push_batch",
+            "models": [],
+            "aircraft": [],
+            "flights": [flight],
+            "raw_files": [],
+            "parsed_data": {"format": "sqlite", "path": "data/parsed.sqlite"},
+        }
+
+    identical = server_sync.build_preflight_plan(object(), manifest_for(base_flight))
+    assert identical["flights"][0]["action"] == "existing"
+
+    changed = server_sync.build_preflight_plan(
+        object(), manifest_for(dict(base_flight, record_note="revised note"))
+    )
+    assert changed["flights"][0]["action"] == "update_metadata"
+
+
 def test_run_preview_excludes_server_rows_planned_for_upload_update():
     manifest = {
         "models": [{"id": 101}, {"id": 102}],
