@@ -536,9 +536,9 @@ export default function FlightView({
                 ? 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
                 : 'bg-blue-50 text-blue-600 font-medium'
             }`}
-            title={sidebarOpen ? '隐藏左侧筛选栏' : '显示左侧筛选栏'}
+            title={sidebarOpen ? '隐藏左侧数据项选择栏' : '显示数据项选择栏'}
           >
-            {sidebarOpen ? '◀ 收起筛选' : '▶ 展开筛选'}
+            {sidebarOpen ? '◀ 收起数据列' : '▶ 展开数据列'}
           </button>
           <span className="text-gray-500">时长: <strong className="text-gray-800">{Math.round(stats.duration_sec / 60)}min</strong></span>
         </div>
