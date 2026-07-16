@@ -8,6 +8,7 @@ flight_analyzer.ini
 __pycache__/
 *.pyc
 .venv/
+.venv-server/
 venv/
 
 # PyInstaller

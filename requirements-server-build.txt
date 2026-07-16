@@ -1,0 +1,3 @@
+# Minimal, isolated dependency set for building FlightAnalyzerServer.exe.
+-r requirements-server.txt
+pyinstaller>=6.0
