@@ -32,3 +32,7 @@ def test_server_key_request_schemas_are_stable():
         },
     )
     assert_schema(schemas.DeleteRequest, ["reason"], {"reason": None})
+    assert_schema(
+        schemas.MergeEntitiesRequest,
+        ["entity_type", "source_id", "target_id"],
+    )

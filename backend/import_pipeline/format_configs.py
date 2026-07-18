@@ -269,6 +269,12 @@ def update_column_metadata(conn, model_id, data_type_key, column_name,
            WHERE model_id=? AND data_type_key=? AND column_name=?""",
         (new_label, new_unit, new_scale, model_id, data_type_key, column_name)
     )
+    conn.execute(
+        """UPDATE aircraft_models
+           SET sync_state=CASE WHEN sync_state IN ('synced', 'server_cache') THEN 'dirty' ELSE sync_state END
+           WHERE id=?""",
+        (model_id,),
+    )
 
     conn.commit()
     logger.info(

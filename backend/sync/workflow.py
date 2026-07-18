@@ -9,12 +9,17 @@ from backend import runtime_context
 from backend.database import DATA_DIR, get_db
 from backend.repositories import flights as flight_repository
 from backend.sync import client, repository
+from backend.sync.cleanup import cleanup_files
 from backend.sync.local_import import (
     apply_pull_manifest_metadata,
     import_pull_bundle,
     preview_pull_manifest,
 )
-from backend.sync.package import export_package
+from backend.sync.package import (
+    build_lightweight_manifest,
+    export_package,
+    prepare_online_upload,
+)
 from backend.sync.progress import byte_callback, fail, percent, update
 
 
@@ -26,6 +31,143 @@ class WorkflowError(Exception):
 
 
 SERVER_BACKED_DELETE_STATES = {"synced", "server_cache", "dirty"}
+
+
+def _package_progress_callback(
+    operation_id: str | None,
+    progress_start: float,
+    progress_end: float,
+):
+    phase_ranges = {
+        "client_manifest": (10, 12, "生成同步清单", "正在读取同步实体"),
+        "client_parsed_export": (12, 19, "导出解析数据", "正在写入解析数据"),
+        "client_raw_validate": (19, 22, "校验原始文件", "正在校验原始文件"),
+        "client_zip": (22, 25, "压缩同步包", "正在压缩同步包"),
+    }
+
+    def report(item: dict) -> None:
+        phase_code = str(item.get("phase") or "")
+        local_start, local_end, phase, message = phase_ranges.get(
+            phase_code, (10, 25, "生成同步包", "正在生成同步包")
+        )
+        current = item.get("current")
+        total = item.get("total")
+        phase_value = (
+            float(current) / float(total) * 100
+            if isinstance(current, (int, float))
+            and isinstance(total, (int, float))
+            and total
+            else None
+        )
+        overall = local_start if phase_value is None else percent(local_start, local_end, phase_value)
+        update(
+            operation_id,
+            phase=phase,
+            message=message,
+            percent=percent(progress_start, progress_end, overall),
+            current=int(current) if isinstance(current, (int, float)) else None,
+            total=int(total) if isinstance(total, (int, float)) else None,
+            unit=item.get("unit"),
+            table_name=item.get("table_name"),
+            file_name=item.get("file_name"),
+            phase_percent=phase_value,
+        )
+
+    return report
+
+
+def _server_progress_callback(
+    operation_id: str | None,
+    progress_start: float,
+    progress_end: float,
+    kind: str,
+):
+    push_phases = {
+        "server_receive": (72, 74, "服务器接收", "服务器正在写入临时文件"),
+        "server_receive_objects": (35, 72, "服务器接收", "服务器正在接收内容对象"),
+        "server_extract_validate": (74, 77, "服务器校验", "服务器正在解压并校验同步包"),
+        "server_preflight": (77, 79, "服务器预检", "服务器正在匹配同步实体"),
+        "server_entities": (79, 82, "服务器导入", "服务器正在写入机型、飞机和架次"),
+        "server_dynamic_delete": (82, 83, "服务器导入", "服务器正在清理旧解析数据"),
+        "server_dynamic_insert": (83, 86, "服务器导入", "服务器正在写入解析数据"),
+        "server_raw_store": (86, 88, "服务器保存文件", "服务器正在保存原始文件"),
+        "server_archive": (88, 89, "服务器归档", "服务器正在归档同步包"),
+        "server_commit": (89, 90, "服务器提交", "服务器已提交导入事务"),
+        "server_session_import": (72, 79, "服务器导入", "服务器正在提交上传会话"),
+    }
+    pull_phases = {
+        "server_pull_query": (15, 20, "服务器查询", "服务器正在查询变更数据"),
+        "server_pull_parsed_export": (20, 40, "服务器导出", "服务器正在生成解析数据"),
+        "server_pull_hash": (40, 43, "服务器校验", "服务器正在校验解析数据"),
+        "server_pull_manifest": (43, 46, "服务器清单", "服务器正在生成拉取清单"),
+        "server_pull_zip": (46, 58, "服务器压缩", "服务器正在压缩拉取包"),
+        "server_pull_ready": (58, 60, "服务器完成", "服务器拉取包已就绪"),
+    }
+    ranges = push_phases if kind == "push" else pull_phases
+
+    def report(item: dict) -> None:
+        phase_code = str(item.get("phase") or "")
+        local_start, local_end, phase, message = ranges.get(
+            phase_code,
+            ((72, 90, "服务器处理", "服务器正在处理同步数据") if kind == "push" else (15, 60, "服务器处理", "服务器正在生成拉取数据")),
+        )
+        current = item.get("current")
+        total = item.get("total")
+        phase_value = (
+            float(current) / float(total) * 100
+            if isinstance(current, (int, float))
+            and isinstance(total, (int, float))
+            and total
+            else None
+        )
+        local_percent = local_start if phase_value is None else percent(local_start, local_end, phase_value)
+        update(
+            operation_id,
+            phase=phase,
+            message=message,
+            percent=percent(progress_start, progress_end, local_percent),
+            status="running",
+            current=int(current) if isinstance(current, (int, float)) else None,
+            total=int(total) if isinstance(total, (int, float)) else None,
+            unit=item.get("unit"),
+            table_name=item.get("table_name"),
+            file_name=item.get("file_name"),
+            rate=float(item["rate"]) if item.get("rate") is not None else None,
+            eta_seconds=(
+                float(item["eta_seconds"]) if item.get("eta_seconds") is not None else None
+            ),
+            phase_percent=phase_value,
+        )
+
+    return report
+
+
+def _local_import_progress_callback(
+    operation_id: str | None,
+    progress_start: float,
+    progress_end: float,
+    manifest: dict,
+):
+    table_rows = (manifest.get("parsed_data") or {}).get("table_rows") or {}
+    total_rows = sum(int(value or 0) for value in table_rows.values())
+
+    def report(item: dict) -> None:
+        current = int(item.get("current") or 0)
+        phase_value = current / total_rows * 100 if total_rows else None
+        local_percent = 72 if phase_value is None else percent(72, 96, phase_value)
+        update(
+            operation_id,
+            phase="导入解析数据",
+            message="正在分批写入本地解析数据",
+            percent=percent(progress_start, progress_end, local_percent),
+            current=current,
+            total=total_rows or None,
+            unit="rows",
+            table_name=item.get("table_name"),
+            phase_percent=phase_value,
+        )
+
+    return report
 
 
 def _delete_scope(row, requested_scope: str | None) -> str:
@@ -145,14 +287,12 @@ def _preview_upload(conn, flight_ids: list[int] | None, token: str | None) -> di
         return _empty_preview(False)
 
     server_base_url = client.normalize_base_url(runtime_context.get_server_base_url(conn))
-    bundle = export_package(
+    manifest = build_lightweight_manifest(
         conn,
         selected_ids,
         model_ids=model_ids,
         aircraft_ids=aircraft_ids,
-        bundle_kind="push_batch",
     )
-    manifest = client.read_bundle_manifest(bundle["path"])
     preflight = client.preflight(server_base_url, manifest, token=token)
     model_plan_by_source = {
         int(item["source_id"]): item
@@ -217,7 +357,15 @@ def _preview_upload(conn, flight_ids: list[int] | None, token: str | None) -> di
         "selected_models": selected_models,
         "selected_aircraft": selected_aircraft,
         "skipped_dirty": [],
-        "bundle": bundle,
+        "bundle": {
+            "lightweight": True,
+            "path": None,
+            "package_id": manifest.get("package_id"),
+            "entity_count": sum(
+                len(manifest.get(key) or []) for key in ("models", "aircraft", "flights")
+            ),
+            "raw_file_count": len(manifest.get("raw_files") or []),
+        },
         "preflight": preflight,
         "items": items,
         "models": model_items,
@@ -348,6 +496,7 @@ def push(
     selected_ids: list[int] = []
     selected_model_ids: list[int] = []
     selected_aircraft_ids: list[int] = []
+    prepared_path: str | None = None
     try:
         update(
             operation_id,
@@ -378,13 +527,25 @@ def push(
         )
         server_base_url = client.normalize_base_url(runtime_context.get_server_base_url(conn))
         run_id = repository.create_sync_run(conn, "push")
-        bundle = export_package(
+        prepared = prepare_online_upload(
             conn,
             selected_ids,
             model_ids=selected_model_ids,
             aircraft_ids=selected_aircraft_ids,
-            bundle_kind="push_batch",
+            operation_id=operation_id,
+            progress_callback=_package_progress_callback(
+                operation_id, progress_start, progress_end
+            ),
         )
+        prepared_path = prepared["parsed_path"]
+        manifest = prepared["manifest"]
+        bundle = {
+            "online": True,
+            "package_id": prepared["package_id"],
+            "parsed_size_bytes": int((manifest.get("parsed_data") or {}).get("size_bytes") or 0),
+            "object_count": len(prepared["objects"]),
+            "metrics": prepared.get("metrics"),
+        }
         conn.commit()
         update(
             operation_id,
@@ -395,8 +556,15 @@ def push(
             total=selected_total,
         )
 
-        manifest = client.read_bundle_manifest(bundle["path"])
-        preflight = client.preflight(server_base_url, manifest, token=token)
+        session = client.create_upload_session(
+            server_base_url,
+            manifest,
+            operation_id=operation_id,
+            token=token,
+        )
+        if session.get("session_id"):
+            bundle["session_id"] = session["session_id"]
+        preflight = session.get("preflight") or {}
         if preflight.get("status") == "conflict" or preflight.get("conflicts"):
             repository.mark_conflict(conn, selected_ids, preflight)
             repository.mark_base_conflict(conn, preflight)
@@ -414,11 +582,16 @@ def push(
                 error={"phase": "preflight", "report": preflight},
             )
             conn.commit()
+            if prepared_path:
+                try:
+                    os.remove(prepared_path)
+                except OSError:
+                    pass
+                prepared_path = None
             update(
                 operation_id,
                 phase="服务器预检",
                 message="服务器预检发现冲突，需要人工处理",
-                percent=percent(progress_start, progress_end, 100),
                 status="failed" if progress_finalize else "running",
                 current=0,
                 total=selected_total,
@@ -436,22 +609,37 @@ def push(
 
         update(
             operation_id,
-            phase="上传同步包",
-            message="服务器预检通过，开始上传同步包",
+            phase="上传内容对象",
+            message="服务器预检通过，开始上传缺失对象",
             percent=percent(progress_start, progress_end, 35),
             current=0,
-            total=selected_total,
+            total=sum(
+                int(item["size_bytes"]) - int(item.get("received_bytes") or 0)
+                for item in session.get("objects") or []
+                if item.get("status") != "complete"
+            ),
+            unit="bytes",
         )
-        server_report = client.push_bundle(
+        session = client.upload_session_objects(
             server_base_url,
-            bundle["path"],
+            session,
+            prepared["objects"],
             token=token,
             progress_callback=byte_callback(
                 operation_id,
                 percent(progress_start, progress_end, 35),
                 percent(progress_start, progress_end, 72),
-                "上传同步包",
+                "上传内容对象",
                 "已上传",
+            ),
+        )
+        server_report = client.commit_upload_session(
+            server_base_url,
+            str(session["session_id"]),
+            token=token,
+            operation_id=operation_id,
+            server_progress_callback=_server_progress_callback(
+                operation_id, progress_start, progress_end, "push"
             ),
         )
         update(
@@ -484,11 +672,16 @@ def push(
                 error=error,
             )
             conn.commit()
+            if prepared_path:
+                try:
+                    os.remove(prepared_path)
+                except OSError:
+                    pass
+                prepared_path = None
             update(
                 operation_id,
                 phase="服务器导入",
                 message="服务器未能完成导入，已标记本地上传失败",
-                percent=percent(progress_start, progress_end, 100),
                 status="failed" if progress_finalize else "running",
                 current=selected_total,
                 total=selected_total,
@@ -526,6 +719,12 @@ def push(
         }
         repository.finish_sync_run(conn, run_id, run_status, summary=response_summary)
         conn.commit()
+        if prepared_path:
+            try:
+                os.remove(prepared_path)
+            except OSError:
+                pass
+            prepared_path = None
         update(
             operation_id,
             phase="上传完成",
@@ -681,6 +880,7 @@ def pull(
 
         cache_dir = os.path.join(DATA_DIR, "sync_cache")
         os.makedirs(cache_dir, exist_ok=True)
+        cleanup_files(cache_dir, max_age_seconds=2 * 24 * 60 * 60)
         if package_path:
             cache_root = os.path.abspath(cache_dir)
             bundle_path = os.path.abspath(package_path)
@@ -715,6 +915,10 @@ def pull(
                     "下载同步包",
                     "已下载",
                 ),
+                operation_id=operation_id,
+                server_progress_callback=_server_progress_callback(
+                    operation_id, progress_start, progress_end, "pull"
+                ),
             )
         manifest_counts = {
             "models": len(manifest.get("models") or []),
@@ -734,7 +938,15 @@ def pull(
             total=manifest_counts["flights"],
         )
         report = import_pull_bundle(
-            conn, bundle_path, {"flight_resolutions": conflict_resolutions or {}}
+            conn,
+            bundle_path,
+            {
+                "flight_resolutions": conflict_resolutions or {},
+                "operation_id": operation_id,
+                "progress_callback": _local_import_progress_callback(
+                    operation_id, progress_start, progress_end, manifest
+                ),
+            },
         )
         ok = report.get("status") in {"success", "partial"}
         summary = {

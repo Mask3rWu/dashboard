@@ -90,6 +90,12 @@ export interface SyncProgress {
   percent: number;
   current?: number | null;
   total?: number | null;
+  unit?: 'rows' | 'files' | 'bytes' | 'entities' | string | null;
+  table_name?: string | null;
+  file_name?: string | null;
+  rate?: number | null;
+  eta_seconds?: number | null;
+  phase_percent?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -231,17 +237,17 @@ export interface SyncImportRequest {
   package_path: string;
   model_actions: {
     source_model_id: number;
-    action: 'use_existing' | 'create';
+    action: 'use_existing' | 'create' | 'create_independent';
     target_model_id?: number | null;
     name?: string | null;
   }[];
   aircraft_mappings: {
     source_aircraft_id: number;
-    action: 'use_existing' | 'create';
+    action: 'use_existing' | 'create' | 'create_independent';
     target_aircraft_id?: number | null;
     name?: string | null;
   }[];
-  conflict_policy: 'skip' | 'update_records';
+  metadata_strategy: 'package_wins' | 'target_wins';
 }
 
 export interface SyncImportReport {

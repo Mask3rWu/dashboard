@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import http.client
 import mimetypes
 import os
+import threading
+import time
 import uuid
 import zipfile
 import urllib.error
@@ -15,6 +18,8 @@ from typing import Any, Callable
 
 
 ProgressCallback = Callable[[int, int | None], None]
+OperationProgressCallback = Callable[[dict[str, Any]], None]
+UPLOAD_CHUNK_MAX_ATTEMPTS = 3
 
 
 class SyncClientError(RuntimeError):
@@ -254,6 +259,210 @@ def preflight(
     return _request_json(url, {"manifest": manifest, "client_cursor": manifest.get("base_server_cursor")}, token=token, timeout=timeout)
 
 
+def operation_progress(
+    base_url: str,
+    operation_id: str,
+    *,
+    token: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/sync/operations/{urllib.parse.quote(operation_id)}"
+    return _request_get_json(url, token=token, timeout=timeout)
+
+
+def create_upload_session(
+    base_url: str,
+    manifest: dict[str, Any],
+    *,
+    operation_id: str | None,
+    token: str | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/sync/sessions"
+    return _request_json(
+        url,
+        {"manifest": manifest, "operation_id": operation_id},
+        token=token,
+        timeout=timeout,
+    )
+
+
+def get_upload_session(
+    base_url: str,
+    session_id: str,
+    *,
+    token: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/sync/sessions/{urllib.parse.quote(session_id)}"
+    return _request_get_json(url, token=token, timeout=timeout)
+
+
+def upload_session_chunk(
+    base_url: str,
+    session_id: str,
+    object_kind: str,
+    object_sha256: str,
+    chunk_index: int,
+    offset_bytes: int,
+    payload: bytes,
+    *,
+    token: str | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    chunk_sha = hashlib.sha256(payload).hexdigest()
+    url = (
+        f"{normalize_base_url(base_url)}/sync/sessions/{urllib.parse.quote(session_id)}"
+        f"/objects/{urllib.parse.quote(object_kind)}/{object_sha256}/chunks/{int(chunk_index)}"
+    )
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(len(payload)),
+        "X-Chunk-Offset": str(int(offset_bytes)),
+        "X-Chunk-SHA256": chunk_sha,
+        "Accept": "application/json",
+        **_auth_headers(token),
+    }
+    request = urllib.request.Request(url, data=payload, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = _decode_response(response.read())
+    except urllib.error.HTTPError as exc:
+        parsed = _decode_response(exc.read())
+        message = parsed.get("detail") if isinstance(parsed, dict) else None
+        raise SyncClientError(
+            message or f"Server returned HTTP {exc.code}",
+            status_code=exc.code,
+            response=parsed,
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    if not isinstance(result, dict):
+        raise SyncClientError("Server returned a non-object chunk response", response=result)
+    return result
+
+
+def commit_upload_session(
+    base_url: str,
+    session_id: str,
+    *,
+    token: str | None = None,
+    timeout: float = 600.0,
+    operation_id: str | None = None,
+    server_progress_callback: OperationProgressCallback | None = None,
+) -> dict[str, Any]:
+    url = f"{normalize_base_url(base_url)}/sync/sessions/{urllib.parse.quote(session_id)}/commit"
+    stop, thread = _start_operation_poll(
+        base_url, operation_id, token, server_progress_callback
+    )
+    try:
+        return _request_json(url, {}, token=token, timeout=timeout)
+    finally:
+        _stop_operation_poll(stop, thread)
+
+
+def upload_session_objects(
+    base_url: str,
+    state: dict[str, Any],
+    local_objects: list[dict[str, Any]],
+    *,
+    token: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    session_id = str(state["session_id"])
+    local_by_identity = {
+        (str(item["kind"]), str(item["sha256"]).lower()): item
+        for item in local_objects
+    }
+    pending = [item for item in state.get("objects") or [] if item.get("status") != "complete"]
+    remaining_total = sum(
+        int(item["size_bytes"]) - int(item.get("received_bytes") or 0)
+        for item in pending
+    )
+    uploaded = 0
+    if progress_callback:
+        progress_callback(0, remaining_total)
+    latest = state
+    for remote in pending:
+        identity = (str(remote["object_kind"]), str(remote["sha256"]).lower())
+        local = local_by_identity.get(identity)
+        if not local:
+            raise SyncClientError(f"Local upload object is missing: {identity[0]}/{identity[1]}")
+        chunk_size = int(remote["chunk_size"])
+        total_chunks = int(remote["total_chunks"])
+        received = {int(item["chunk_index"]) for item in remote.get("received_chunks") or []}
+        with open(str(local["path"]), "rb") as source:
+            for chunk_index in range(total_chunks):
+                offset = chunk_index * chunk_size
+                expected_size = min(chunk_size, int(remote["size_bytes"]) - offset)
+                if chunk_index in received:
+                    continue
+                source.seek(offset)
+                payload = source.read(expected_size)
+                if len(payload) != expected_size:
+                    raise SyncClientError(f"Local upload object was truncated: {identity[1]}")
+                for attempt in range(UPLOAD_CHUNK_MAX_ATTEMPTS):
+                    try:
+                        latest = upload_session_chunk(
+                            base_url,
+                            session_id,
+                            identity[0],
+                            identity[1],
+                            chunk_index,
+                            offset,
+                            payload,
+                            token=token,
+                        )
+                        break
+                    except SyncClientError as exc:
+                        retryable = exc.status_code is None or exc.status_code in {408, 429} or (
+                            exc.status_code is not None and exc.status_code >= 500
+                        )
+                        if not retryable or attempt + 1 >= UPLOAD_CHUNK_MAX_ATTEMPTS:
+                            raise
+                        time.sleep(0.25 * (2**attempt))
+                uploaded += len(payload)
+                if progress_callback:
+                    progress_callback(uploaded, remaining_total)
+    return latest
+
+
+def _start_operation_poll(
+    base_url: str,
+    operation_id: str | None,
+    token: str | None,
+    callback: OperationProgressCallback | None,
+) -> tuple[threading.Event | None, threading.Thread | None]:
+    if not operation_id or callback is None:
+        return None, None
+    stop = threading.Event()
+
+    def poll() -> None:
+        while not stop.is_set():
+            try:
+                item = operation_progress(base_url, operation_id, token=token)
+                callback(item)
+                if item.get("status") in {"completed", "failed"}:
+                    return
+            except SyncClientError:
+                pass
+            stop.wait(0.25)
+
+    thread = threading.Thread(target=poll, name=f"sync-progress-{operation_id[:8]}", daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _stop_operation_poll(
+    stop: threading.Event | None,
+    thread: threading.Thread | None,
+) -> None:
+    if stop is not None:
+        stop.set()
+    if thread is not None:
+        thread.join(timeout=1.0)
+
+
 def delete_entity(
     base_url: str,
     entity_type: str,
@@ -298,6 +507,8 @@ def push_bundle(
     token: str | None = None,
     timeout: float = 300.0,
     progress_callback: ProgressCallback | None = None,
+    operation_id: str | None = None,
+    server_progress_callback: OperationProgressCallback | None = None,
 ) -> dict[str, Any]:
     url = f"{normalize_base_url(base_url)}/sync/push"
     boundary = f"----FlightAnalyzerSync{uuid.uuid4().hex}"
@@ -322,11 +533,17 @@ def push_bundle(
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Accept": "application/json",
         "Content-Length": str(total_size),
+        **({"X-Sync-Operation-Id": operation_id} if operation_id else {}),
         **_auth_headers(token),
     }
     conn_class = http.client.HTTPSConnection if parsed_url.scheme == "https" else http.client.HTTPConnection
     conn = conn_class(parsed_url.netloc, timeout=timeout)
     sent = 0
+    request_started = time.perf_counter()
+    upload_finished = request_started
+    response_finished = request_started
+    poll_stop = None
+    poll_thread = None
     try:
         if progress_callback:
             progress_callback(0, total_size)
@@ -352,9 +569,14 @@ def push_bundle(
         sent += len(suffix)
         if progress_callback:
             progress_callback(total_size, total_size)
+        upload_finished = time.perf_counter()
 
+        poll_stop, poll_thread = _start_operation_poll(
+            base_url, operation_id, token, server_progress_callback
+        )
         resp = conn.getresponse()
         raw = resp.read()
+        response_finished = time.perf_counter()
         parsed = _decode_response(raw)
         if resp.status >= 400:
             message = parsed.get("detail") if isinstance(parsed, dict) else None
@@ -366,9 +588,17 @@ def push_bundle(
     except (TimeoutError, OSError, http.client.HTTPException) as exc:
         raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
     finally:
+        _stop_operation_poll(poll_stop, poll_thread)
         conn.close()
     if not isinstance(parsed, dict):
         raise SyncClientError("Server returned a non-object JSON response", response=parsed)
+    upload_duration = max(upload_finished - request_started, 0.000001)
+    parsed["client_transport_metrics"] = {
+        "uploaded_bytes": total_size,
+        "upload_duration_seconds": round(upload_duration, 6),
+        "upload_bytes_per_second": round(total_size / upload_duration, 2),
+        "server_wait_seconds": round(max(0.0, response_finished - upload_finished), 6),
+    }
     return parsed
 
 
@@ -411,6 +641,8 @@ def download_bundle(
     exclude_source_node_id: str | None = None,
     timeout: float = 300.0,
     progress_callback: ProgressCallback | None = None,
+    operation_id: str | None = None,
+    server_progress_callback: OperationProgressCallback | None = None,
 ) -> dict[str, Any]:
     params = {}
     if since not in (None, ""):
@@ -421,14 +653,19 @@ def download_bundle(
     url = f"{normalize_base_url(base_url)}/sync/bundle{query}"
     headers = {
         "Accept": "application/octet-stream",
+        **({"X-Sync-Operation-Id": operation_id} if operation_id else {}),
         **_auth_headers(token),
     }
     req = urllib.request.Request(url, headers=headers, method="GET")
+    download_started = time.perf_counter()
+    received = 0
+    poll_stop, poll_thread = _start_operation_poll(
+        base_url, operation_id, token, server_progress_callback
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw_total = resp.headers.get("Content-Length")
             total = int(raw_total) if raw_total and raw_total.isdigit() else None
-            received = 0
             if progress_callback:
                 progress_callback(0, total)
             os.makedirs(os.path.dirname(os.path.abspath(destination_path)), exist_ok=True)
@@ -447,7 +684,15 @@ def download_bundle(
         raise SyncClientError(message or f"Server returned HTTP {exc.code}", status_code=exc.code, response=parsed) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise SyncClientError(f"Cannot reach sync server: {exc}") from exc
+    finally:
+        _stop_operation_poll(poll_stop, poll_thread)
     manifest = read_bundle_manifest(destination_path)
     if manifest.get("bundle_kind") != "pull_bundle":
         raise SyncClientError("Server returned a non-pull bundle", response=manifest)
+    download_duration = max(time.perf_counter() - download_started, 0.000001)
+    manifest["_transfer_metrics"] = {
+        "downloaded_bytes": received,
+        "download_duration_seconds": round(download_duration, 6),
+        "download_bytes_per_second": round(received / download_duration, 2),
+    }
     return manifest

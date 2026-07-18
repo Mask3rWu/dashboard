@@ -90,7 +90,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [syncImportPreview, setSyncImportPreview] = useState<SyncImportPreview | null>(null);
   const [syncModelActions, setSyncModelActions] = useState<Record<number, SyncModelAction>>({});
   const [syncAircraftMappings, setSyncAircraftMappings] = useState<Record<number, SyncAircraftMapping>>({});
-  const [syncConflictPolicy, setSyncConflictPolicy] = useState<'skip' | 'update_records'>('skip');
+  const [syncMetadataStrategy, setSyncMetadataStrategy] = useState<'package_wins' | 'target_wins'>('target_wins');
   const [syncImportLoading, setSyncImportLoading] = useState(false);
   const [syncImportBrowsing, setSyncImportBrowsing] = useState(false);
   const [syncImportError, setSyncImportError] = useState('');
@@ -202,7 +202,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
           : { action: 'create', target_aircraft_id: null, name: plan.create_name };
       });
       setSyncAircraftMappings(aircraftMappings);
-      setSyncConflictPolicy('skip');
+      setSyncMetadataStrategy('target_wins');
     } catch (e) {
       setSyncImportError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -261,7 +261,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
           source_aircraft_id: Number(source_aircraft_id),
           ...mapping,
         })),
-        conflict_policy: syncConflictPolicy,
+        metadata_strategy: syncMetadataStrategy,
       });
       setSyncImportReport(report);
       await loadModels();
@@ -799,12 +799,12 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
           models={models}
           modelActions={syncModelActions}
           aircraftMappings={syncAircraftMappings}
-          conflictPolicy={syncConflictPolicy}
+          metadataStrategy={syncMetadataStrategy}
           onBrowse={browseSyncPackage}
           onPreview={() => submitSyncImportPreview()}
           onModelActionChange={updateSyncModelAction}
           onAircraftMappingChange={updateSyncAircraftMapping}
-          onConflictPolicyChange={setSyncConflictPolicy}
+          onMetadataStrategyChange={setSyncMetadataStrategy}
           onClose={() => setSyncImportOpen(false)}
           onSubmit={submitSyncImport}
         />

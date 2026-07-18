@@ -8,6 +8,13 @@ from datetime import datetime
 
 UPLOAD_QUEUE_STATES = ("local_only", "pending_upload", "dirty", "upload_failed")
 VISIBLE_QUEUE_STATES = ("local_only", "pending_upload", "dirty", "upload_failed", "conflict")
+ID_QUERY_BATCH_SIZE = 500
+
+
+def batched_ids(values, batch_size: int = ID_QUERY_BATCH_SIZE):
+    clean = sorted({int(value) for value in values})
+    for start in range(0, len(clean), batch_size):
+        yield clean[start:start + batch_size]
 
 
 def now_text() -> str:
@@ -31,15 +38,19 @@ def set_setting(conn, key: str, value: str) -> None:
 def selected_ids(conn, flight_ids: list[int]) -> dict[str, set[int]]:
     if not flight_ids:
         raise ValueError("至少选择一个架次")
-    placeholders = ",".join("?" for _ in flight_ids)
-    rows = conn.execute(
-        f"""SELECT f.id as flight_id, a.id as aircraft_id, am.id as model_id
-            FROM flights f
-            JOIN aircraft a ON a.id = f.aircraft_id
-            JOIN aircraft_models am ON am.id = a.model_id
-            WHERE f.id IN ({placeholders})""",
-        flight_ids,
-    ).fetchall()
+    rows = []
+    for batch in batched_ids(flight_ids):
+        placeholders = ",".join("?" for _ in batch)
+        rows.extend(
+            conn.execute(
+                f"""SELECT f.id as flight_id, a.id as aircraft_id, am.id as model_id
+                    FROM flights f
+                    JOIN aircraft a ON a.id = f.aircraft_id
+                    JOIN aircraft_models am ON am.id = a.model_id
+                    WHERE f.id IN ({placeholders})""",
+                batch,
+            ).fetchall()
+        )
     found_flights = {r["flight_id"] for r in rows}
     missing = sorted(set(flight_ids) - found_flights)
     if missing:
@@ -54,12 +65,16 @@ def selected_ids(conn, flight_ids: list[int]) -> dict[str, set[int]]:
 def rows_by_ids(conn, quote_identifier, table: str, ids: set[int]) -> list[dict]:
     if not ids:
         return []
-    placeholders = ",".join("?" for _ in ids)
-    rows = conn.execute(
-        f"SELECT * FROM {quote_identifier(table)} WHERE id IN ({placeholders}) ORDER BY id",
-        sorted(ids),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    rows = []
+    for batch in batched_ids(ids):
+        placeholders = ",".join("?" for _ in batch)
+        rows.extend(
+            conn.execute(
+                f"SELECT * FROM {quote_identifier(table)} WHERE id IN ({placeholders}) ORDER BY id",
+                batch,
+            ).fetchall()
+        )
+    return sorted((dict(row) for row in rows), key=lambda row: int(row["id"]))
 
 
 def list_upload_queue(conn, states: tuple[str, ...] = VISIBLE_QUEUE_STATES) -> list[dict]:
@@ -191,9 +206,11 @@ def validate_uploadable_flights(conn, flight_ids: list[int]) -> list[dict]:
     clean_ids = sorted({int(fid) for fid in flight_ids})
     if not clean_ids:
         raise ValueError("至少选择一个待上传架次")
-    placeholders = ",".join("?" for _ in clean_ids)
-    rows = conn.execute(
-        f"""SELECT f.id, f.client_uid, f.server_id, f.source_node_id, f.sync_origin,
+    rows = []
+    for batch in batched_ids(clean_ids):
+        placeholders = ",".join("?" for _ in batch)
+        rows.extend(conn.execute(
+            f"""SELECT f.id, f.client_uid, f.server_id, f.source_node_id, f.sync_origin,
                   f.sync_state, f.server_version, f.last_sync_at, f.sync_error_json,
                   f.name, f.session_key, f.flight_date, f.start_time, f.duration_sec,
                   f.total_rows, f.import_time, f.updated_at,
@@ -214,8 +231,8 @@ def validate_uploadable_flights(conn, flight_ids: list[int]) -> list[dict]:
               AND f.deleted_at IS NULL
               AND f.server_deleted_at IS NULL
             ORDER BY f.id""",
-        clean_ids,
-    ).fetchall()
+            batch,
+        ).fetchall())
     found = {int(row["id"]): dict(row) for row in rows}
     missing = sorted(set(clean_ids) - set(found))
     if missing:
@@ -277,16 +294,17 @@ def mark_upload_failed(conn, flight_ids: list[int], error: dict) -> None:
     clean_ids = sorted({int(fid) for fid in flight_ids})
     if not clean_ids:
         return
-    placeholders = ",".join("?" for _ in clean_ids)
-    conn.execute(
-        f"""UPDATE flights
+    for batch in batched_ids(clean_ids):
+        placeholders = ",".join("?" for _ in batch)
+        conn.execute(
+            f"""UPDATE flights
             SET sync_state='upload_failed',
                 sync_error_json=?,
                 updated_at=updated_at
             WHERE id IN ({placeholders})
               AND sync_state IN ('local_only', 'pending_upload', 'dirty', 'upload_failed', 'syncing')""",
-        [_json_error(error), *clean_ids],
-    )
+            [_json_error(error), *batch],
+        )
 
 
 def mark_base_upload_failed(conn, model_ids: list[int], aircraft_ids: list[int], error: dict) -> None:
@@ -294,16 +312,17 @@ def mark_base_upload_failed(conn, model_ids: list[int], aircraft_ids: list[int],
         clean_ids = sorted({int(item_id) for item_id in ids})
         if not clean_ids:
             continue
-        placeholders = ",".join("?" for _ in clean_ids)
-        conn.execute(
-            f"""UPDATE {table}
+        for batch in batched_ids(clean_ids):
+            placeholders = ",".join("?" for _ in batch)
+            conn.execute(
+                f"""UPDATE {table}
                 SET sync_state='upload_failed',
                     sync_error_json=?,
                     updated_at=updated_at
                 WHERE id IN ({placeholders})
                   AND sync_state IN ('local_only', 'pending_upload', 'dirty', 'upload_failed', 'syncing')""",
-            [_json_error(error), *clean_ids],
-        )
+                [_json_error(error), *batch],
+            )
 
 
 def mark_conflict(conn, flight_ids: list[int], report: dict) -> None:
@@ -320,14 +339,15 @@ def mark_conflict(conn, flight_ids: list[int], report: dict) -> None:
     target_ids = sorted(set(clean_ids) & conflict_ids)
     if not target_ids:
         target_ids = clean_ids
-    placeholders = ",".join("?" for _ in target_ids)
-    conn.execute(
-        f"""UPDATE flights
+    for batch in batched_ids(target_ids):
+        placeholders = ",".join("?" for _ in batch)
+        conn.execute(
+            f"""UPDATE flights
             SET sync_state='conflict',
                 sync_error_json=?
             WHERE id IN ({placeholders})""",
-        [_json_error({"phase": "preflight", "report": report}), *target_ids],
-    )
+            [_json_error({"phase": "preflight", "report": report}), *batch],
+        )
 
 
 def mark_base_conflict(conn, report: dict) -> None:
@@ -345,14 +365,15 @@ def mark_base_conflict(conn, report: dict) -> None:
         ids = sorted(set(grouped[entity_type]))
         if not ids:
             continue
-        placeholders = ",".join("?" for _ in ids)
-        conn.execute(
-            f"""UPDATE {table}
+        for batch in batched_ids(ids):
+            placeholders = ",".join("?" for _ in batch)
+            conn.execute(
+                f"""UPDATE {table}
                 SET sync_state='conflict',
                     sync_error_json=?
                 WHERE id IN ({placeholders})""",
-            [_json_error({"phase": "preflight", "report": report}), *ids],
-        )
+                [_json_error({"phase": "preflight", "report": report}), *batch],
+            )
 
 
 def _apply_table_mappings(conn, table: str, mappings: list[dict], synced_at: str) -> int:

@@ -6,13 +6,13 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from hashlib import sha256
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine
 
 from .auth import hash_password, session_token_hash
+from .sync.protocol import model_structure_signature
 
 
 DEFAULT_SERVER_DB_URL = "mysql+pymysql://flight:flight@127.0.0.1:3306/flight_analyzer"
@@ -180,6 +180,16 @@ SCHEMA_DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
+    CREATE TABLE IF NOT EXISTS raw_objects (
+        sha256 CHAR(64) PRIMARY KEY,
+        size_bytes BIGINT NOT NULL,
+        storage_rel_path VARCHAR(255) NOT NULL UNIQUE,
+        created_at DATETIME(6) NOT NULL,
+        verified_at DATETIME(6) NOT NULL,
+        INDEX idx_raw_objects_size (size_bytes)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
     CREATE TABLE IF NOT EXISTS flight_raw_files (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         flight_id BIGINT NOT NULL,
@@ -236,6 +246,125 @@ SCHEMA_DDL = [
         last_pull_cursor BIGINT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_entity_mappings (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        client_node_id VARCHAR(64) NOT NULL,
+        entity_type VARCHAR(32) NOT NULL,
+        client_entity_uid VARCHAR(64) NOT NULL,
+        server_entity_id BIGINT NOT NULL,
+        matched_by VARCHAR(32) NOT NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL,
+        UNIQUE KEY uniq_sync_entity_source
+            (client_node_id, entity_type, client_entity_uid),
+        INDEX idx_sync_entity_target (entity_type, server_entity_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_entity_redirects (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        entity_type VARCHAR(32) NOT NULL,
+        source_server_entity_id BIGINT NOT NULL,
+        target_server_entity_id BIGINT NOT NULL,
+        change_cursor BIGINT NOT NULL,
+        created_by BIGINT NULL,
+        reason VARCHAR(255) NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL,
+        UNIQUE KEY uniq_sync_entity_redirect_source
+            (entity_type, source_server_entity_id),
+        INDEX idx_sync_entity_redirect_target
+            (entity_type, target_server_entity_id),
+        INDEX idx_sync_entity_redirect_cursor (change_cursor),
+        CONSTRAINT fk_sync_entity_redirect_user
+            FOREIGN KEY (created_by) REFERENCES users(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_operations (
+        operation_id VARCHAR(64) PRIMARY KEY,
+        operation_type VARCHAR(32) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        phase VARCHAR(64) NOT NULL,
+        message VARCHAR(512) NOT NULL,
+        current BIGINT NULL,
+        total BIGINT NULL,
+        unit VARCHAR(32) NULL,
+        table_name VARCHAR(255) NULL,
+        file_name VARCHAR(1024) NULL,
+        rate DOUBLE NULL,
+        eta_seconds DOUBLE NULL,
+        metrics_json JSON NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL,
+        expires_at DATETIME(6) NOT NULL,
+        INDEX idx_sync_operations_expiry (expires_at),
+        INDEX idx_sync_operations_status (status, updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_upload_sessions (
+        session_id VARCHAR(64) PRIMARY KEY,
+        resume_key CHAR(64) NOT NULL,
+        package_id VARCHAR(64) NOT NULL,
+        source_node_id VARCHAR(64) NOT NULL,
+        operation_id VARCHAR(64) NULL,
+        manifest_sha256 CHAR(64) NOT NULL,
+        manifest_json JSON NOT NULL,
+        preflight_json JSON NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        result_json JSON NULL,
+        error_json JSON NULL,
+        imported_by BIGINT NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL,
+        expires_at DATETIME(6) NOT NULL,
+        UNIQUE KEY uniq_sync_upload_resume (source_node_id, resume_key),
+        INDEX idx_sync_upload_expiry (expires_at),
+        INDEX idx_sync_upload_status (status, updated_at),
+        CONSTRAINT fk_sync_upload_user
+            FOREIGN KEY (imported_by) REFERENCES users(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_upload_objects (
+        session_id VARCHAR(64) NOT NULL,
+        object_kind VARCHAR(16) NOT NULL,
+        sha256 CHAR(64) NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        chunk_size INT NOT NULL,
+        total_chunks INT NOT NULL,
+        received_bytes BIGINT NOT NULL DEFAULT 0,
+        status VARCHAR(32) NOT NULL,
+        completed_path VARCHAR(1024) NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (session_id, object_kind, sha256),
+        INDEX idx_sync_upload_object_status (status, updated_at),
+        CONSTRAINT fk_sync_upload_object_session
+            FOREIGN KEY (session_id) REFERENCES sync_upload_sessions(session_id)
+            ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_upload_chunks (
+        session_id VARCHAR(64) NOT NULL,
+        object_kind VARCHAR(16) NOT NULL,
+        object_sha256 CHAR(64) NOT NULL,
+        chunk_index INT NOT NULL,
+        offset_bytes BIGINT NOT NULL,
+        size_bytes INT NOT NULL,
+        chunk_sha256 CHAR(64) NOT NULL,
+        storage_rel_path VARCHAR(1024) NOT NULL,
+        created_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (session_id, object_kind, object_sha256, chunk_index),
+        CONSTRAINT fk_sync_upload_chunk_object
+            FOREIGN KEY (session_id, object_kind, object_sha256)
+            REFERENCES sync_upload_objects(session_id, object_kind, sha256)
+            ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
 ]
 
 def text(statement: str):
@@ -280,6 +409,8 @@ def init_server_schema(engine: Engine | None = None) -> None:
         for ddl in SCHEMA_DDL:
             conn.execute(text(ddl))
         _ensure_flight_record_columns(conn)
+        _ensure_sync_mapping_columns(conn)
+        _refresh_model_config_signatures(conn)
         ensure_builtin_admin(conn)
         from .model_seeds import apply_builtin_model_seeds_to_server
 
@@ -304,6 +435,90 @@ def _ensure_flight_record_columns(conn: "Connection") -> None:
         conn.execute(text("ALTER TABLE flights ADD COLUMN record_wind_direction VARCHAR(255) NOT NULL DEFAULT ''"))
     if "record_temperature" not in columns:
         conn.execute(text("ALTER TABLE flights ADD COLUMN record_temperature DOUBLE NULL"))
+
+
+def _ensure_sync_mapping_columns(conn: "Connection") -> None:
+    columns = {
+        row[0]
+        for row in conn.execute(text("SHOW COLUMNS FROM sync_entity_mappings")).all()
+    }
+    if "matched_by" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE sync_entity_mappings "
+                "ADD COLUMN matched_by VARCHAR(32) NOT NULL DEFAULT 'legacy' "
+                "AFTER server_entity_id"
+            )
+        )
+
+
+def _refresh_model_config_signatures(conn: "Connection") -> None:
+    """Normalize signatures created before immutable model identities were defined."""
+    model_rows = conn.execute(
+        text(
+            """SELECT id, has_header, has_uav_send_id, extract_serial_from_path,
+                      config_signature
+               FROM aircraft_models"""
+        )
+    ).fetchall()
+    for model_row in model_rows:
+        model = dict(model_row._mapping)
+        model_id = int(model["id"])
+        config: dict[str, Any] = {
+            "has_header": bool(model.get("has_header", 1)),
+            "has_uav_send_id": bool(model.get("has_uav_send_id", 0)),
+            "extract_serial_from_path": bool(model.get("extract_serial_from_path", 0)),
+            "data_types": {},
+        }
+        data_type_rows = conn.execute(
+            text(
+                """SELECT data_type_key, file_patterns, is_alert
+                   FROM data_table_registry
+                   WHERE model_id=:model_id
+                   ORDER BY data_type_key"""
+            ),
+            {"model_id": model_id},
+        ).fetchall()
+        for data_type_row in data_type_rows:
+            data_type = dict(data_type_row._mapping)
+            patterns = data_type.get("file_patterns") or []
+            if isinstance(patterns, str):
+                try:
+                    patterns = json.loads(patterns)
+                except (TypeError, ValueError):
+                    patterns = []
+            key = str(data_type["data_type_key"])
+            column_rows = conn.execute(
+                text(
+                    """SELECT column_name, data_type, ordinal
+                       FROM column_registry
+                       WHERE model_id=:model_id AND data_type_key=:data_type_key
+                       ORDER BY ordinal, column_name"""
+                ),
+                {"model_id": model_id, "data_type_key": key},
+            ).fetchall()
+            config["data_types"][key] = {
+                "file_patterns": patterns if isinstance(patterns, list) else [],
+                "is_alert": bool(data_type.get("is_alert")),
+                "columns": [
+                    {
+                        "name": row._mapping.get("column_name"),
+                        "type": row._mapping.get("data_type") or "REAL",
+                        "ordinal": row._mapping.get("ordinal"),
+                    }
+                    for row in column_rows
+                ],
+            }
+        signature = model_structure_signature(config)
+        if signature and signature != model.get("config_signature"):
+            conn.execute(
+                text(
+                    """UPDATE aircraft_models
+                       SET config_signature=:config_signature
+                       WHERE id=:model_id"""
+                ),
+                {"config_signature": signature, "model_id": model_id},
+            )
 
 
 def ensure_server_data_dir() -> None:
@@ -604,8 +819,10 @@ def create_dynamic_table(
 
 
 def config_signature(model_payload: dict[str, Any]) -> str:
-    encoded = json.dumps(model_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return sha256(encoded.encode("utf-8")).hexdigest()
+    signature = model_structure_signature(model_payload)
+    if not signature:
+        raise ValueError("Model structure is required")
+    return signature
 
 
 def create_model(conn: Connection, payload: dict[str, Any]) -> dict[str, Any]:

@@ -271,8 +271,13 @@ def post_sync_import_preview(req: SyncImportPreviewRequest):
 
 @router.post("/api/sync/import")
 def post_sync_import(req: SyncImportRequest):
-    if req.conflict_policy not in ("skip", "update_records"):
+    if req.conflict_policy not in (None, "skip", "update_records"):
         raise HTTPException(400, "Unsupported conflict_policy")
+    metadata_strategy = req.metadata_strategy or (
+        "package_wins" if req.conflict_policy == "update_records" else "target_wins"
+    )
+    if metadata_strategy not in ("package_wins", "target_wins"):
+        raise HTTPException(400, "Unsupported metadata_strategy")
     conn = get_db()
     try:
         options = {
@@ -282,7 +287,7 @@ def post_sync_import(req: SyncImportRequest):
             "aircraft_mappings": [
                 model_dump(item, exclude_unset=True) for item in req.aircraft_mappings
             ],
-            "conflict_policy": req.conflict_policy,
+            "metadata_strategy": metadata_strategy,
         }
         return import_package(conn, req.package_path, options)
     except ValueError as exc:
