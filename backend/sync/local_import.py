@@ -402,6 +402,23 @@ def _metadata_values(row: dict) -> list[Any]:
     return [row.get(column) for column in _FLIGHT_METADATA_COLUMNS]
 
 
+def _metadata_values_differ(left: Any, right: Any) -> bool:
+    if left is None and right in (None, ""):
+        return False
+    if right is None and left in (None, ""):
+        return False
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) != float(right)
+    return str(left) != str(right)
+
+
+def _flight_metadata_changed(existing, source: dict) -> bool:
+    return any(
+        _metadata_values_differ(existing[column], source.get(column))
+        for column in _FLIGHT_METADATA_COLUMNS
+    )
+
+
 def preview_import(conn, package_path: str) -> dict:
     manifest, warnings = _load_manifest(package_path)
     _validate_manifest(manifest, require_compatible=False)
@@ -2149,12 +2166,16 @@ def preview_pull_manifest(conn, manifest: dict, package_path: str | None = None)
                 reason = "local_unsynced_business_key_conflict"
             elif deleted_at:
                 action = "server_deleted"
+            elif matched_by != "server_id":
+                action = "attach_existing"
+            elif _flight_metadata_changed(existing, row):
+                action = "update"
             else:
-                action = "update" if matched_by == "server_id" else "attach_existing"
+                action = "existing"
         transfer_kind = "bundle"
         if (
             existing
-            and action in {"update", "attach_existing"}
+            and action in {"update", "attach_existing", "existing"}
             and not deleted_at
             and content_identity_by_flight.get(server_id, ())
             == _local_flight_content_identity(conn, int(existing["id"]))
@@ -2337,6 +2358,8 @@ def apply_pull_manifest_metadata(conn, manifest: dict, options: dict | None = No
         server_id = int(item.get("server_id") or 0)
         row = rows_by_server_id.get(server_id)
         if not local_id or not row:
+            continue
+        if item.get("action") == "existing":
             continue
         assignments = ", ".join(f"{column}=?" for column in _FLIGHT_METADATA_COLUMNS)
         conn.execute(

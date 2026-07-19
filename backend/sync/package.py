@@ -450,7 +450,6 @@ def export_package(
     if bundle_kind not in {"manual_export", "push_batch", "pull_bundle"}:
         raise ValueError(f"Unsupported bundle_kind: {bundle_kind}")
     metrics = SyncMetrics("client_export", operation_id)
-    cleanup_files(EXPORT_DIR, max_age_seconds=7 * 24 * 60 * 60)
     ids = _selected_ids(conn, flight_ids, model_ids, aircraft_ids)
     source_node_id = sync_repository.get_setting(
         conn, "local_node_id", sync_repository.get_setting(conn, "node_id", "field-unknown")

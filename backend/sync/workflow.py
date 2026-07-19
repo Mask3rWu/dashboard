@@ -9,7 +9,6 @@ from backend import runtime_context
 from backend.database import DATA_DIR, get_db
 from backend.repositories import flights as flight_repository
 from backend.sync import client, repository
-from backend.sync.cleanup import cleanup_files
 from backend.sync.local_import import (
     apply_pull_manifest_metadata,
     import_pull_bundle,
@@ -410,11 +409,17 @@ def _preview_pull(
     since: str | None,
     token: str | None,
     planned_upload: dict | None = None,
+    exclude_source_node_id: str | None = None,
 ) -> dict:
     server_base_url = client.normalize_base_url(runtime_context.get_server_base_url(conn))
     if since is None:
         since = repository.get_setting(conn, "last_pull_cursor", "")
-    manifest = client.pull_preview(server_base_url, since, token=token)
+    manifest = client.pull_preview(
+        server_base_url,
+        since,
+        token=token,
+        exclude_source_node_id=exclude_source_node_id,
+    )
     manifest = _exclude_planned_upload_changes(manifest, planned_upload)
     return preview_pull_manifest(conn, manifest)
 
@@ -434,11 +439,21 @@ def preview(
         if mode in {"run", "push"}:
             result["upload"] = _preview_upload(conn, flight_ids, token)
         if mode in {"run", "pull"}:
+            upload_preview = result["upload"]
+            exclude_source_node_id = None
+            if (
+                mode == "run"
+                and upload_preview
+                and upload_preview.get("ok")
+                and upload_preview.get("preflight") is not None
+            ):
+                exclude_source_node_id = runtime_context.get_local_node_id(conn)
             result["pull"] = _preview_pull(
                 conn,
                 since,
                 token,
-                result["upload"].get("preflight") if result["upload"] else None,
+                upload_preview.get("preflight") if upload_preview else None,
+                exclude_source_node_id=exclude_source_node_id,
             )
         return result
     except client.SyncClientError as exc:
@@ -880,7 +895,6 @@ def pull(
 
         cache_dir = os.path.join(DATA_DIR, "sync_cache")
         os.makedirs(cache_dir, exist_ok=True)
-        cleanup_files(cache_dir, max_age_seconds=2 * 24 * 60 * 60)
         if package_path:
             cache_root = os.path.abspath(cache_dir)
             bundle_path = os.path.abspath(package_path)

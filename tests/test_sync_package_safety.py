@@ -16,6 +16,7 @@ from backend.sync import package as sync_package
 from backend.sync import server as server_sync
 from backend.sync import workflow as sync_workflow
 from backend.sync import cleanup as sync_cleanup
+from backend.sync import progress as sync_progress
 from backend.sync import repository as sync_repository
 from backend.sync import upload_sessions
 from backend.sync.protocol import model_structure_signature
@@ -1725,6 +1726,114 @@ def test_pull_direction_overwrites_dirty_metadata_from_server(isolated_data_dir)
         conn.close()
 
 
+def test_pull_preview_hides_identical_flight_metadata(isolated_data_dir):
+    from backend.database import get_db, init_db
+
+    init_db()
+    conn = get_db()
+    suffix = uuid.uuid4().hex
+    config = _offline_model_config()
+    raw_sha = "a" * 64
+    try:
+        model_name = f"Same Model {suffix}"
+        aircraft_name = f"Same Aircraft {suffix}"
+        flight_name = f"Same Flight {suffix}"
+        model_id = sync_import._create_model_from_config(
+            conn, model_name, config, f"local-model-{suffix}"
+        )
+        aircraft_id = sync_import._create_aircraft(
+            conn, model_id, aircraft_name, f"local-aircraft-{suffix}"
+        )
+        conn.execute(
+            "UPDATE aircraft_models SET server_id=101, sync_state='synced' WHERE id=?",
+            (model_id,),
+        )
+        conn.execute(
+            "UPDATE aircraft SET server_id=202, sync_state='synced' WHERE id=?",
+            (aircraft_id,),
+        )
+        conn.execute(
+            """INSERT INTO flights
+               (client_uid, server_id, source_node_id, aircraft_id, name, source_path, session_key,
+                flight_date, record_location, record_note, sync_origin, sync_state,
+                server_version, updated_at)
+               VALUES (?, 303, 'node-local', ?, ?, 'local://same', 'A', '2026-07-19',
+                       'Hong Kong', '', 'server', 'synced', 1, '2026-07-19 10:00:00')""",
+            (f"local-flight-{suffix}", aircraft_id, flight_name),
+        )
+        flight_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """INSERT INTO flight_raw_files
+               (flight_id, original_name, original_rel_path, storage_rel_path,
+                sha256, size_bytes, data_type_key, sync_state)
+               VALUES (?, 'a.csv', 'a.csv', 'same/a.csv', ?, 10, 'telemetry', 'synced')""",
+            (flight_id, raw_sha),
+        )
+        manifest = {
+            "source_node_id": "server",
+            "server_cursor": 20,
+            "models": [{
+                "id": 101,
+                "client_uid": f"server-model-{suffix}",
+                "name": model_name,
+                "version": 2,
+                "config": config,
+            }],
+            "aircraft": [{
+                "id": 202,
+                "client_uid": f"server-aircraft-{suffix}",
+                "model_id": 101,
+                "name": aircraft_name,
+                "version": 2,
+            }],
+            "flights": [{
+                "id": 303,
+                "client_uid": f"different-server-flight-{suffix}",
+                "aircraft_id": 202,
+                "name": flight_name,
+                "session_key": "A",
+                "flight_date": "2026-07-19",
+                "record_location": "Hong Kong",
+                "record_note": None,
+                "version": 9,
+                "updated_at": "2026-07-19 11:00:00",
+            }],
+            "raw_files": [{
+                "flight_id": 303,
+                "sha256": raw_sha,
+                "data_type_key": "telemetry",
+            }],
+            "entity_redirects": [],
+        }
+
+        preview = sync_import.preview_pull_manifest(conn, manifest)
+        assert preview["items"][0]["action"] == "existing"
+        assert preview["summary"]["metadata_only"] == 3
+        assert preview["summary"]["bundle_required"] == 0
+
+        changed_manifest = {
+            **manifest,
+            "flights": [{**manifest["flights"][0], "record_note": "server changed"}],
+        }
+        changed_preview = sync_import.preview_pull_manifest(conn, changed_manifest)
+        assert changed_preview["items"][0]["action"] == "update"
+
+        report = sync_import.apply_pull_manifest_metadata(conn, manifest)
+        flight = conn.execute(
+            "SELECT record_location, record_note, server_version, updated_at FROM flights WHERE id=?",
+            (flight_id,),
+        ).fetchone()
+        assert report["updated"]["flights"] == 0
+        assert dict(flight) == {
+            "record_location": "Hong Kong",
+            "record_note": "",
+            "server_version": 1,
+            "updated_at": "2026-07-19 10:00:00",
+        }
+    finally:
+        conn.close()
+
+
 def test_pull_blocks_same_model_identity_with_different_structure(isolated_data_dir):
     from backend.database import get_db, init_db
 
@@ -1776,6 +1885,51 @@ def test_run_preview_excludes_server_rows_planned_for_upload_update():
     assert [row["id"] for row in filtered["aircraft"]] == [201, 202]
     assert [row["id"] for row in filtered["flights"]] == [302]
     assert [row["flight_id"] for row in filtered["raw_files"]] == [302]
+
+
+def test_run_preview_excludes_current_node_changes_after_planned_upload(monkeypatch):
+    captured = {}
+
+    class Connection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sync_workflow, "get_db", lambda: Connection())
+    monkeypatch.setattr(
+        sync_workflow,
+        "_preview_upload",
+        lambda conn, flight_ids, token: {
+            "ok": True,
+            "preflight": {"status": "ready", "conflicts": []},
+        },
+    )
+    monkeypatch.setattr(
+        sync_workflow.runtime_context,
+        "get_local_node_id",
+        lambda conn: "node-current",
+    )
+
+    def fake_preview_pull(
+        conn,
+        since,
+        token,
+        planned_upload=None,
+        exclude_source_node_id=None,
+    ):
+        captured["exclude_source_node_id"] = exclude_source_node_id
+        return {"ok": True}
+
+    monkeypatch.setattr(sync_workflow, "_preview_pull", fake_preview_pull)
+
+    result = sync_workflow.preview(
+        "run",
+        flight_ids=[1],
+        since="12",
+        token="token",
+    )
+
+    assert result["pull"] == {"ok": True}
+    assert captured["exclude_source_node_id"] == "node-current"
 
 
 def test_upload_preview_uses_lightweight_manifest_without_exporting_bundle(
@@ -1861,9 +2015,9 @@ def test_large_id_queries_are_split_into_bounded_batches():
     assert rows[-1]["id"] == 1201
 
 
-def test_generated_package_cleanup_respects_age_and_suffix(tmp_path):
-    old_bundle = tmp_path / "old.fapkg"
-    fresh_bundle = tmp_path / "fresh.fapkg"
+def test_online_cache_cleanup_respects_age_and_suffix(tmp_path):
+    old_bundle = tmp_path / "old.sqlite"
+    fresh_bundle = tmp_path / "fresh.sqlite"
     unrelated = tmp_path / "old.txt"
     for path in (old_bundle, fresh_bundle, unrelated):
         path.write_bytes(b"payload")
@@ -1871,12 +2025,58 @@ def test_generated_package_cleanup_respects_age_and_suffix(tmp_path):
     os.utime(old_bundle, (old_timestamp, old_timestamp))
     os.utime(unrelated, (old_timestamp, old_timestamp))
 
-    result = sync_cleanup.cleanup_files(str(tmp_path), max_age_seconds=3600)
+    result = sync_cleanup.cleanup_files(
+        str(tmp_path),
+        max_age_seconds=3600,
+        suffixes=(".sqlite",),
+    )
 
     assert result == {"removed_files": 1, "removed_bytes": 7}
     assert not old_bundle.exists()
     assert fresh_bundle.exists()
     assert unrelated.exists()
+
+
+def test_sync_progress_derives_current_phase_percent_from_counts():
+    operation_id = f"progress-{uuid.uuid4().hex}"
+
+    sync_progress.update(
+        operation_id,
+        phase="导出解析数据",
+        message="正在写入",
+        percent=20,
+        current=250,
+        total=1000,
+        unit="rows",
+    )
+
+    item = sync_progress.get(operation_id)
+    assert item is not None
+    assert item["percent"] == 20
+    assert item["phase_percent"] == 25
+
+
+def test_sync_progress_clears_phase_percent_for_indeterminate_new_phase():
+    operation_id = f"progress-{uuid.uuid4().hex}"
+    sync_progress.update(
+        operation_id,
+        phase="上传内容对象",
+        message="正在上传",
+        current=5,
+        total=10,
+    )
+
+    sync_progress.update(
+        operation_id,
+        phase="服务器提交",
+        message="等待服务器提交",
+        percent=90,
+    )
+
+    item = sync_progress.get(operation_id)
+    assert item is not None
+    assert item["phase"] == "服务器提交"
+    assert item["phase_percent"] is None
 
 
 def test_upload_resume_key_ignores_volatile_manifest_fields():

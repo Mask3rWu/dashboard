@@ -46,6 +46,15 @@ def update(
         existing = _PROGRESS.get(operation_id, {})
         phase_changed = existing.get("phase") != phase
 
+        resolved_phase_percent = phase_percent
+        if (
+            resolved_phase_percent is None
+            and current is not None
+            and total is not None
+            and total > 0
+        ):
+            resolved_phase_percent = current / total * 100
+
         def value_or_existing(value, key: str):
             if value is not None:
                 return value
@@ -76,8 +85,8 @@ def update(
             "rate": value_or_existing(rate, "rate"),
             "eta_seconds": value_or_existing(eta_seconds, "eta_seconds"),
             "phase_percent": (
-                round(max(0.0, min(100.0, phase_percent)), 1)
-                if phase_percent is not None
+                round(max(0.0, min(100.0, resolved_phase_percent)), 1)
+                if resolved_phase_percent is not None
                 else (None if phase_changed else existing.get("phase_percent"))
             ),
             "created_at": existing.get("created_at") or now,

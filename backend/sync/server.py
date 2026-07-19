@@ -20,7 +20,6 @@ from typing import Any
 from backend import server_database as db
 from .metrics import SyncMetrics
 from . import server_operations
-from .cleanup import cleanup_files
 from . import upload_sessions
 from .protocol import (
     CURRENT_SCHEMA_VERSION,
@@ -2337,7 +2336,6 @@ def _record_import(
 def _copy_bundle_archive(bundle_path: str, package_id: str, source_node_id: str) -> None:
     bundles_dir = os.path.join(db.SERVER_DATA_DIR, "bundles")
     os.makedirs(bundles_dir, exist_ok=True)
-    cleanup_files(bundles_dir, max_age_seconds=7 * 24 * 60 * 60)
     safe_package = re.sub(r"[^A-Za-z0-9_.-]+", "_", package_id)
     safe_node = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_node_id)
     destination = os.path.join(bundles_dir, f"{safe_node}_{safe_package}.fapkg")
@@ -2805,7 +2803,6 @@ def build_pull_bundle(
 
         bundles_dir = os.path.join(db.SERVER_DATA_DIR, "bundles")
         os.makedirs(bundles_dir, exist_ok=True)
-        cleanup_files(bundles_dir, max_age_seconds=7 * 24 * 60 * 60)
         bundle_path = os.path.join(bundles_dir, f"server_pull_{current_cursor}_{package_id}.fapkg")
         manifest_path = os.path.join(tmp_dir, "manifest.json")
         with open(manifest_path, "w", encoding="utf-8") as f:

@@ -10,7 +10,7 @@ def cleanup_files(
     directory: str,
     *,
     max_age_seconds: float,
-    suffixes: tuple[str, ...] = (".fapkg",),
+    suffixes: tuple[str, ...],
     keep_paths: tuple[str, ...] = (),
 ) -> dict[str, int]:
     root = os.path.abspath(directory)

@@ -9,6 +9,10 @@ interface Props {
 
 export default function SyncProgress({ progress, busy }: Props) {
   const percent = Math.max(0, Math.min(100, progress.percent ?? 0));
+  const hasPhasePercent = typeof progress.phase_percent === 'number';
+  const phasePercent = hasPhasePercent
+    ? Math.max(0, Math.min(100, progress.phase_percent ?? 0))
+    : null;
   const formatCount = (value: number) => new Intl.NumberFormat('zh-CN').format(value);
   const formatRate = (value: number, unit?: string | null) => {
     if (unit === 'bytes') {
@@ -33,15 +37,36 @@ export default function SyncProgress({ progress, busy }: Props) {
           </div>
           <div className="mt-1 truncate text-gray-600">{progress.message}</div>
         </div>
-        <div className="shrink-0 font-mono text-sm">{percent.toFixed(1)}%</div>
       </div>
-      <div className="mt-2 h-2 overflow-hidden rounded-full bg-white border border-blue-100">
+      <div className="mt-2 flex items-center justify-between gap-3 text-[11px] font-medium">
+        <span>总体进度</span>
+        <span className="font-mono text-sm">{percent.toFixed(1)}%</span>
+      </div>
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-white border border-blue-100">
         <div className={`h-full transition-all duration-300 ${progress.status === 'failed' ? 'bg-red-500' : 'bg-blue-600'}`} style={{ width: `${percent}%` }} />
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-3 text-[11px] font-medium">
+        <span>当前阶段</span>
+        <span className="font-mono">
+          {phasePercent === null ? '处理中' : `${phasePercent.toFixed(1)}%`}
+        </span>
+      </div>
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-white border border-emerald-100">
+        <div
+          className={`h-full transition-all duration-300 ${
+            progress.status === 'failed'
+              ? 'bg-red-400'
+              : phasePercent === null
+                ? 'w-full animate-pulse bg-emerald-300'
+                : 'bg-emerald-600'
+          }`}
+          style={phasePercent === null ? undefined : { width: `${phasePercent}%` }}
+        />
       </div>
       {typeof progress.current === 'number' && (
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
           <span>
-            当前阶段：{formatCount(progress.current)}
+            已处理：{formatCount(progress.current)}
             {typeof progress.total === 'number' ? ` / ${formatCount(progress.total)}` : ''}
             {progress.unit === 'rows' ? ' 行' : progress.unit === 'files' ? ' 个文件' : progress.unit === 'bytes' ? ' 字节' : ' 项'}
           </span>
