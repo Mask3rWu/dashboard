@@ -1,5 +1,7 @@
 """Collaboration-server request schemas."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -53,3 +55,14 @@ class CreateModelRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     reason: str | None = None
+
+
+class MergeEntitiesRequest(BaseModel):
+    entity_type: str
+    source_id: int
+    target_id: int
+
+
+class CreateUploadSessionRequest(BaseModel):
+    manifest: dict[str, Any]
+    operation_id: str | None = None

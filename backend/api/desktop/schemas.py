@@ -113,7 +113,8 @@ class SyncImportRequest(BaseModel):
     package_path: str
     model_actions: list[SyncModelAction] = []
     aircraft_mappings: list[SyncAircraftMapping] = []
-    conflict_policy: str = "skip"
+    metadata_strategy: str | None = None
+    conflict_policy: str | None = None
 
 
 class ImportRequest(BaseModel):

@@ -2,13 +2,13 @@ import type { AircraftModel } from '../../api/models';
 import type { SyncImportPreview, SyncImportReport } from '../../api/sync';
 
 export interface SyncModelAction {
-  action: 'use_existing' | 'create';
+  action: 'use_existing' | 'create' | 'create_independent';
   target_model_id?: number | null;
   name?: string | null;
 }
 
 export interface SyncAircraftMapping {
-  action: 'use_existing' | 'create';
+  action: 'use_existing' | 'create' | 'create_independent';
   target_aircraft_id?: number | null;
   name?: string | null;
 }
@@ -24,17 +24,17 @@ interface Props {
   models: AircraftModel[];
   modelActions: Record<number, SyncModelAction>;
   aircraftMappings: Record<number, SyncAircraftMapping>;
-  conflictPolicy: 'skip' | 'update_records';
+  metadataStrategy: 'package_wins' | 'target_wins';
   onBrowse: () => void;
   onPreview: () => void;
   onModelActionChange: (sourceModelId: number, patch: Partial<SyncModelAction>) => void;
   onAircraftMappingChange: (sourceAircraftId: number, patch: Partial<SyncAircraftMapping>) => void;
-  onConflictPolicyChange: (value: 'skip' | 'update_records') => void;
+  onMetadataStrategyChange: (value: 'package_wins' | 'target_wins') => void;
   onClose: () => void;
   onSubmit: () => void;
 }
 
-export default function ModelImportDialog({ path, onPathChange, browsing, loading, error, preview, report, models, modelActions, aircraftMappings, conflictPolicy, onBrowse, onPreview, onModelActionChange, onAircraftMappingChange, onConflictPolicyChange, onClose, onSubmit }: Props) {
+export default function ModelImportDialog({ path, onPathChange, browsing, loading, error, preview, report, models, modelActions, aircraftMappings, metadataStrategy, onBrowse, onPreview, onModelActionChange, onAircraftMappingChange, onMetadataStrategyChange, onClose, onSubmit }: Props) {
   return (
     <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6">
       <div className="w-full max-w-4xl max-h-[86vh] bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col">
@@ -66,15 +66,15 @@ export default function ModelImportDialog({ path, onPathChange, browsing, loadin
                   return (
                     <div key={plan.source_model_id} className="rounded border border-gray-200 px-3 py-2 flex items-center gap-3 text-xs">
                       <span className="font-medium text-gray-800 w-40 truncate">{plan.source_name}</span>
-                      {plan.matched_model ? <span className="text-green-700">匹配到机型：{plan.matched_model.name}</span> : (
-                        <>
-                          <select value={action.action} onChange={(event) => onModelActionChange(plan.source_model_id, { action: event.target.value as SyncModelAction['action'] })} className="bg-white border border-gray-300 rounded px-2 py-1"><option value="create">新建机型</option><option value="use_existing">指定已有机型</option></select>
-                          {action.action === 'create' ? (
-                            <input value={action.name ?? plan.create_name} onChange={(event) => onModelActionChange(plan.source_model_id, { name: event.target.value })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1" />
-                          ) : (
-                            <select value={action.target_model_id ?? ''} onChange={(event) => onModelActionChange(plan.source_model_id, { target_model_id: event.target.value ? Number(event.target.value) : null })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"><option value="">选择机型...</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select>
-                          )}
-                        </>
+                      <select value={action.action} onChange={(event) => onModelActionChange(plan.source_model_id, { action: event.target.value as SyncModelAction['action'] })} className="bg-white border border-gray-300 rounded px-2 py-1">
+                        {!plan.matched_model && <option value="create">新建并继承同步身份</option>}
+                        <option value="use_existing">使用已有机型</option>
+                        <option value="create_independent">新建独立副本</option>
+                      </select>
+                      {action.action === 'use_existing' ? (
+                        <select value={action.target_model_id ?? ''} onChange={(event) => onModelActionChange(plan.source_model_id, { target_model_id: event.target.value ? Number(event.target.value) : null })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"><option value="">选择机型...</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select>
+                      ) : (
+                        <input value={action.name ?? plan.create_name} onChange={(event) => onModelActionChange(plan.source_model_id, { name: event.target.value })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1" />
                       )}
                     </div>
                   );
@@ -88,15 +88,15 @@ export default function ModelImportDialog({ path, onPathChange, browsing, loadin
                   return (
                     <div key={plan.source_aircraft_id} className="rounded border border-gray-200 px-3 py-2 flex items-center gap-3 text-xs">
                       <span className="font-medium text-gray-800 w-40 truncate">{plan.source_name}</span>
-                      {plan.matched_aircraft ? <span className="text-green-700">匹配到飞机：{plan.matched_aircraft.name}</span> : (
-                        <>
-                          <select value={mapping.action} onChange={(event) => onAircraftMappingChange(plan.source_aircraft_id, { action: event.target.value as SyncAircraftMapping['action'] })} className="bg-white border border-gray-300 rounded px-2 py-1"><option value="create">新建飞机</option><option value="use_existing">指定已有飞机</option></select>
-                          {mapping.action === 'create' ? (
-                            <input value={mapping.name ?? plan.create_name} onChange={(event) => onAircraftMappingChange(plan.source_aircraft_id, { name: event.target.value })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1" />
-                          ) : (
-                            <select value={mapping.target_aircraft_id ?? ''} onChange={(event) => onAircraftMappingChange(plan.source_aircraft_id, { target_aircraft_id: event.target.value ? Number(event.target.value) : null })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"><option value="">选择飞机...</option>{plan.existing_aircraft.map((aircraft) => <option key={aircraft.id} value={aircraft.id}>{aircraft.name}</option>)}</select>
-                          )}
-                        </>
+                      <select value={mapping.action} onChange={(event) => onAircraftMappingChange(plan.source_aircraft_id, { action: event.target.value as SyncAircraftMapping['action'] })} className="bg-white border border-gray-300 rounded px-2 py-1">
+                        {!plan.matched_aircraft && <option value="create">新建并继承同步身份</option>}
+                        <option value="use_existing">使用已有飞机</option>
+                        <option value="create_independent">新建独立副本</option>
+                      </select>
+                      {mapping.action === 'use_existing' ? (
+                        <select value={mapping.target_aircraft_id ?? ''} onChange={(event) => onAircraftMappingChange(plan.source_aircraft_id, { target_aircraft_id: event.target.value ? Number(event.target.value) : null })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1"><option value="">选择飞机...</option>{plan.existing_aircraft.map((aircraft) => <option key={aircraft.id} value={aircraft.id}>{aircraft.name}</option>)}</select>
+                      ) : (
+                        <input value={mapping.name ?? plan.create_name} onChange={(event) => onAircraftMappingChange(plan.source_aircraft_id, { name: event.target.value })} className="bg-white border border-gray-300 rounded px-2 py-1 flex-1" />
                       )}
                     </div>
                   );
@@ -104,8 +104,8 @@ export default function ModelImportDialog({ path, onPathChange, browsing, loadin
               </div>
 
               <div className="rounded border border-gray-200 px-3 py-2 text-xs space-y-2">
-                <div className="flex items-center justify-between gap-3"><span className="font-medium text-gray-800">重复架次</span><span className="text-gray-500">{preview.duplicates.length} 个自动匹配重复项</span></div>
-                <select value={conflictPolicy} onChange={(event) => onConflictPolicyChange(event.target.value as 'skip' | 'update_records')} className="bg-white border border-gray-300 rounded px-2 py-1"><option value="skip">保持现状，不更新记录字段</option><option value="update_records">更新已有架次名称和飞行记录字段</option></select>
+                <div className="flex items-center justify-between gap-3"><span className="font-medium text-gray-800">整包元数据策略</span><span className="text-gray-500">{preview.duplicates.length} 个重复架次</span></div>
+                <select value={metadataStrategy} onChange={(event) => onMetadataStrategyChange(event.target.value as 'package_wins' | 'target_wins')} className="bg-white border border-gray-300 rounded px-2 py-1"><option value="target_wins">保留本地已有元数据</option><option value="package_wins">使用包内元数据覆盖本地</option></select>
               </div>
             </>
           )}

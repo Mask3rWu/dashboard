@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import zipfile
 from pathlib import PurePosixPath
@@ -51,6 +52,87 @@ def sha256_file(path: str) -> str:
         while chunk := file.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def model_structure_payload(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the immutable parsing structure used to identify an aircraft model."""
+    if not isinstance(config, dict):
+        return None
+    data_types: dict[str, Any] = {}
+    raw_data_types = config.get("data_types") or {}
+    if not isinstance(raw_data_types, dict):
+        return None
+    for raw_key, raw_definition in sorted(raw_data_types.items(), key=lambda item: str(item[0])):
+        key = str(raw_key)
+        definition = raw_definition if isinstance(raw_definition, dict) else {}
+        raw_columns = definition.get("columns") or []
+        columns = []
+        for column in sorted(
+            (item for item in raw_columns if isinstance(item, dict)),
+            key=lambda item: (
+                item.get("ordinal") is None,
+                item.get("ordinal") if item.get("ordinal") is not None else 0,
+                str(item.get("name") or ""),
+            ),
+        ):
+            ordinal = column.get("ordinal")
+            try:
+                ordinal = int(ordinal) if ordinal is not None else None
+            except (TypeError, ValueError):
+                ordinal = None
+            columns.append(
+                {
+                    "name": str(column.get("name") or ""),
+                    "type": str(column.get("type") or column.get("data_type") or "REAL").upper(),
+                    "ordinal": ordinal,
+                }
+            )
+        data_types[key] = {
+            "file_patterns": sorted(str(value) for value in (definition.get("file_patterns") or [])),
+            "is_alert": bool(definition.get("is_alert")),
+            "columns": columns,
+        }
+    return {
+        "has_header": bool(config.get("has_header", True)),
+        "has_uav_send_id": bool(config.get("has_uav_send_id", False)),
+        "extract_serial_from_path": bool(config.get("extract_serial_from_path", False)),
+        "data_types": data_types,
+    }
+
+
+def model_structure_signature(config: dict[str, Any] | None) -> str | None:
+    payload = model_structure_payload(config)
+    if payload is None:
+        return None
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def model_mutable_metadata_payload(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(config, dict):
+        return None
+    raw_data_types = config.get("data_types") or {}
+    if not isinstance(raw_data_types, dict):
+        return None
+    data_types: dict[str, Any] = {}
+    for raw_key, raw_definition in sorted(raw_data_types.items(), key=lambda item: str(item[0])):
+        key = str(raw_key)
+        definition = raw_definition if isinstance(raw_definition, dict) else {}
+        columns: dict[str, Any] = {}
+        for column in definition.get("columns") or []:
+            if not isinstance(column, dict):
+                continue
+            name = str(column.get("name") or "")
+            columns[name] = {
+                "display_label": str(column.get("label") or column.get("display_label") or name),
+                "unit": str(column.get("unit") or ""),
+                "scale_factor": float(column.get("scale_factor") or 1.0),
+            }
+        data_types[key] = {
+            "display_label": str(definition.get("display_label") or key),
+            "columns": columns,
+        }
+    return {"data_types": data_types}
 
 
 def is_local_manifest_compatible(manifest: dict, schema_version: int) -> bool:

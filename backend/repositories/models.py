@@ -89,6 +89,12 @@ def update_data_type_label(conn, model_id: int, data_type_key: str, display_labe
     if not row:
         return False
     conn.execute("UPDATE data_table_registry SET display_label=? WHERE model_id=? AND data_type_key=?", (display_label, model_id, data_type_key))
+    conn.execute(
+        """UPDATE aircraft_models
+           SET sync_state=CASE WHEN sync_state IN ('synced', 'server_cache') THEN 'dirty' ELSE sync_state END
+           WHERE id=?""",
+        (model_id,),
+    )
     return True
 
 

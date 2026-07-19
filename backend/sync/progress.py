@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime
 
 
@@ -14,11 +15,11 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def percent(start: float, end: float, local_percent: float) -> int:
+def percent(start: float, end: float, local_percent: float) -> float:
     value = float(start) + (
         float(end) - float(start)
     ) * max(0.0, min(100.0, float(local_percent))) / 100.0
-    return int(round(max(0.0, min(100.0, value))))
+    return round(max(0.0, min(100.0, value)), 1)
 
 
 def update(
@@ -31,12 +32,34 @@ def update(
     current: int | None = None,
     total: int | None = None,
     detail: str | None = None,
+    unit: str | None = None,
+    table_name: str | None = None,
+    file_name: str | None = None,
+    rate: float | None = None,
+    eta_seconds: float | None = None,
+    phase_percent: float | None = None,
 ) -> None:
     if not operation_id:
         return
     now = _now()
     with _LOCK:
         existing = _PROGRESS.get(operation_id, {})
+        phase_changed = existing.get("phase") != phase
+
+        resolved_phase_percent = phase_percent
+        if (
+            resolved_phase_percent is None
+            and current is not None
+            and total is not None
+            and total > 0
+        ):
+            resolved_phase_percent = current / total * 100
+
+        def value_or_existing(value, key: str):
+            if value is not None:
+                return value
+            return None if phase_changed else existing.get(key)
+
         _PROGRESS[operation_id] = {
             **existing,
             "operation_id": operation_id,
@@ -44,17 +67,28 @@ def update(
             "phase": phase,
             "message": message,
             "detail": detail,
-            "percent": int(
+            "percent": round(
                 max(
                     0,
                     min(
                         100,
-                        round(percent if percent is not None else existing.get("percent", 0)),
+                        float(percent if percent is not None else existing.get("percent", 0)),
                     ),
-                )
+                ),
+                1,
             ),
-            "current": current if current is not None else existing.get("current"),
-            "total": total if total is not None else existing.get("total"),
+            "current": value_or_existing(current, "current"),
+            "total": value_or_existing(total, "total"),
+            "unit": value_or_existing(unit, "unit"),
+            "table_name": value_or_existing(table_name, "table_name"),
+            "file_name": value_or_existing(file_name, "file_name"),
+            "rate": value_or_existing(rate, "rate"),
+            "eta_seconds": value_or_existing(eta_seconds, "eta_seconds"),
+            "phase_percent": (
+                round(max(0.0, min(100.0, resolved_phase_percent)), 1)
+                if resolved_phase_percent is not None
+                else (None if phase_changed else existing.get("phase_percent"))
+            ),
             "created_at": existing.get("created_at") or now,
             "updated_at": now,
         }
@@ -66,7 +100,6 @@ def fail(operation_id: str | None, *, phase: str, message: str) -> None:
         phase=phase,
         message=message,
         status="failed",
-        percent=100,
     )
 
 
@@ -92,8 +125,18 @@ def _format_bytes(value: int | None) -> str:
 
 
 def byte_callback(operation_id: str | None, start: float, end: float, phase: str, verb: str):
+    started = time.perf_counter()
+    last_update = [0.0]
+
     def report(done: int, total: int | None) -> None:
+        now = time.perf_counter()
+        if done != total and now - last_update[0] < 0.2:
+            return
+        last_update[0] = now
         local_percent = 0 if not total else (done / total) * 100
+        elapsed = max(now - started, 0.000001)
+        rate = done / elapsed
+        eta = (total - done) / rate if total and rate > 0 else None
         update(
             operation_id,
             phase=phase,
@@ -101,6 +144,10 @@ def byte_callback(operation_id: str | None, start: float, end: float, phase: str
             percent=percent(start, end, local_percent),
             current=done,
             total=total,
+            unit="bytes",
+            rate=round(rate, 2),
+            eta_seconds=round(eta, 1) if eta is not None else None,
+            phase_percent=local_percent if total else None,
         )
 
     return report

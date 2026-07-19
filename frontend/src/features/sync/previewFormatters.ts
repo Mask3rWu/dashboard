@@ -39,6 +39,7 @@ export function previewActionLabel(item: SyncPreviewItem) {
   if (item.action === 'update_metadata') return '更新信息';
   if (item.action === 'update') return '更新本地';
   if (item.action === 'attach_existing') return '匹配本地';
+  if (item.action === 'merge') return '合并重复实体';
   if (item.action === 'server_deleted') return '服务器已删除';
   if (item.action === 'conflict') return '冲突';
   return item.action || '-';
@@ -55,14 +56,32 @@ export function previewReasonLabel(reason?: string | null) {
     dirty_aircraft: '本地飞机号也有改动',
     server_deleted_dirty_local: '服务器已删除但本地有改动',
     server_changed_since_last_sync: '服务器已有更新，需先处理冲突',
+    model_config_mismatch: '机型不可变结构不一致',
+    model_structure_ambiguous: '服务器存在多个相同结构机型',
     model_name_conflict: '机型名称已被占用',
+    aircraft_model_mismatch: '飞机所属机型不一致',
+    aircraft_overlap_multiple_targets: '重合架次指向多个服务器飞机',
     aircraft_name_conflict: '飞机号名称已被占用',
+    flight_aircraft_mismatch: '架次所属飞机不一致',
+    flight_raw_hash_mismatch: '完整原始文件集合不一致',
+    flight_raw_set_ambiguous: '完整原始文件集合匹配到多个架次',
+    flight_business_key_raw_mismatch: '同日期和架次键的原始文件集合不同',
+    aircraft_name_collision_without_overlap: '同名飞机缺少可验证的重合架次',
+    target_deleted_business_key_collision: '目标飞机存在占用相同架次键的已删除记录',
+    local_changes_block_redirect: '本地仍有未上传修改，无法应用服务器合并',
   };
   return labels[reason] || reason;
 }
 
 export function previewMatchedByLabel(value?: string | null) {
   if (value === 'client_uid') return '同一同步记录';
+  if (value === 'entity_mapping') return '客户端身份映射';
+  if (value === 'structure_signature') return '机型结构一致';
+  if (value === 'overlapping_flight') return '存在重合架次';
+  if (value === 'raw_file_set') return '完整原始文件集合一致';
+  if (value === 'overlapping_flight_merge') return '重合架次确认合并';
+  if (value === 'planned_aircraft_merge') return '随飞机合并';
+  if (value === 'entity_redirect') return '服务器合并重定向';
   if (value === 'business_key') return '同机型/飞机号/日期/架次';
   if (value === 'server_id') return '已关联服务器';
   return value || '';
@@ -94,6 +113,7 @@ export function baseChangeSummary(item: SyncPreviewItem, direction: 'upload' | '
   if (item.action === 'conflict') return previewReasonLabel(item.reason) || '需要处理冲突';
   if (item.action === 'create') return direction === 'upload' ? '新增到服务器' : '新增到本地';
   if (item.action === 'update_metadata') return direction === 'upload' ? '用本地信息更新服务器' : '用服务器信息更新本地';
+  if (item.action === 'merge') return '合并服务器重复飞机并保留本地信息';
   if (item.action === 'existing') return '无需变更';
   return previewActionLabel(item);
 }

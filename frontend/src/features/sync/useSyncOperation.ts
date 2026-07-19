@@ -46,19 +46,19 @@ export function useSyncOperation() {
     const nextOperationId = createOperationId();
     setBusy(kind);
     setOperationId(nextOperationId);
-    setProgress({ operation_id: nextOperationId, status: 'running', phase: '准备开始', message: `${operationLabel(kind)}正在启动`, percent: 0, created_at: '', updated_at: '' });
+    setProgress({ operation_id: nextOperationId, status: 'running', phase: '准备开始', message: `${operationLabel(kind)}正在启动`, percent: 0, phase_percent: 0, created_at: '', updated_at: '' });
     setError('');
     setMessage('');
     try {
       const result = await action(nextOperationId);
       const resultMessage = operationMessage(result);
       setMessage(resultMessage);
-      setProgress((prev) => prev ? { ...prev, status: result.ok ? 'completed' : 'failed', phase: result.ok ? '操作完成' : '操作失败', message: resultMessage, percent: 100 } : prev);
+      setProgress((prev) => prev ? { ...prev, status: result.ok ? 'completed' : 'failed', phase: result.ok ? '操作完成' : '操作失败', message: resultMessage, percent: result.ok ? 100 : prev.percent, phase_percent: result.ok ? 100 : prev.phase_percent } : prev);
       await callbacks.onSuccess();
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       setError(detail);
-      setProgress((prev) => prev ? { ...prev, status: 'failed', phase: `${operationLabel(kind)}失败`, message: detail, percent: 100 } : prev);
+      setProgress((prev) => prev ? { ...prev, status: 'failed', phase: `${operationLabel(kind)}失败`, message: detail } : prev);
       await callbacks.onFailure();
     } finally {
       setBusy(null);

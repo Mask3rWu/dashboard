@@ -55,10 +55,28 @@ def set_app_context(conn, updates: dict) -> dict:
         node_id = str(node_id).strip()
         if not node_id:
             raise ValueError("node_id must not be empty")
+        current_node_id = (
+            permission_repository.get_setting(conn, "local_node_id")
+            or permission_repository.get_setting(conn, "node_id")
+        )
+        if current_node_id and node_id != current_node_id and _node_identity_is_in_use(conn):
+            raise ValueError("node_id cannot be changed after synchronization has started")
         permission_repository.set_setting(conn, "node_id", node_id)
         permission_repository.set_setting(conn, "local_node_id", node_id)
 
     return get_app_context(conn)
+
+
+def _node_identity_is_in_use(conn) -> bool:
+    if any(
+        permission_repository.get_setting(conn, key)
+        for key in ("last_successful_push_at", "last_successful_pull_at", "last_pull_cursor")
+    ):
+        return True
+    for table in ("aircraft_models", "aircraft", "flights"):
+        if conn.execute(f"SELECT 1 FROM {table} WHERE server_id IS NOT NULL LIMIT 1").fetchone():
+            return True
+    return bool(conn.execute("SELECT 1 FROM sync_imports LIMIT 1").fetchone())
 
 
 def get_current_user(conn, request):
