@@ -1,28 +1,28 @@
-; Copy this file to flight_analyzer.ini in the project root before packaging.
-; Normal deployments use the settings embedded at build time and need no INI file.
-; Environment variables or an external INI can still override exceptional deployments.
+; 打包前将此文件复制为项目根目录下的 flight_analyzer.ini。
+; 常规部署使用构建时嵌入的设置，无需提供 INI 文件。
+; 对于特殊部署场景，仍可使用环境变量或外部 INI 文件覆盖设置。
 
 [local]
-; Local desktop/offline data cache. Leave blank to use the default app data dir.
+; 本地桌面端/离线数据缓存目录。留空则使用应用默认数据目录。
 data_dir =
 
-; The collaboration server API address reachable from this computer.
-; Keep the /api suffix because server endpoints are mounted under /api.
+; 此计算机可访问的协作服务器 API 地址。
+; 请保留 /api 后缀，因为服务器接口挂载在 /api 下。
 server_base_url = http://SERVER_IP_OR_HOSTNAME:9000/api
 
 [server_auth]
-; Used by script/generate_builtin_model_seeds.py before packaging.
-; This is the Flight Analyzer server login, not the MySQL account.
+; 打包前由 script/generate_builtin_model_seeds.py 使用。
+; 这是 Flight Analyzer 服务器的登录账号，不是 MySQL 账号。
 username = admin
 password = CHANGE_ME
 ; token =
 
 [server]
-; Use 0.0.0.0 on the server so other machines in the research network can connect.
+; 服务器使用 0.0.0.0，使研究网络中的其他计算机可以连接。
 host = 0.0.0.0
 port = 9000
 
-; Stores uploaded raw-file objects and generated sync bundles.
+; 用于存储上传的原始文件对象和生成的同步包。
 data_dir = D:\FlightAnalyzerServer\data
 
 [mysql]
@@ -31,18 +31,18 @@ port = 3306
 database = flight_analyzer
 user = flight
 password = CHANGE_ME
-; MySQL account host. Keep 127.0.0.1 when the server EXE runs on the MySQL host.
+; MySQL 账号允许连接的主机。服务器 EXE 与 MySQL 在同一主机运行时请保持为 127.0.0.1。
 user_host = 127.0.0.1
 charset = utf8mb4
 collation = utf8mb4_unicode_ci
 
-; Optional full SQLAlchemy URL. If set, it overrides the host/user/password fields above.
+; 可选的完整 SQLAlchemy URL。设置后将覆盖上面的主机、用户和密码字段。
 ; url = mysql+pymysql://flight:CHANGE_ME@127.0.0.1:3306/flight_analyzer?charset=utf8mb4
 
 [dev]
-; Controls whether packaged local installs preload backend/builtin_model_seeds.json.
-; The same file contains built-in model definitions and the preseeded server-account cache.
+; 控制打包后的本地安装是否预加载 backend/builtin_model_seeds.json。
+; 该文件同时包含内置模型定义和预置服务器账号缓存。
 load_local = true
 
-; Controls whether server startup applies built-in model seeds to MySQL.
+; 控制服务器启动时是否将内置模型种子应用到 MySQL。
 load_server = true
