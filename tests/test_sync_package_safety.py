@@ -25,6 +25,34 @@ from backend.import_pipeline.format_configs import update_column_metadata
 from backend.repositories import models as model_repository
 
 
+def test_server_raw_storage_uses_model_and_aircraft_hierarchy(monkeypatch):
+    monkeypatch.setattr(
+        server_sync,
+        "_server_flight_context",
+        lambda conn, flight_id: {
+            "model_id": 7,
+            "model_name": "Test Model",
+            "aircraft_id": 11,
+            "aircraft_name": "Tail 01",
+            "flight_date": "2026-07-15",
+        },
+    )
+
+    path = server_sync._server_storage_rel_path(
+        None,
+        13,
+        {
+            "original_name": "telemetry.txt",
+            "original_rel_path": "Tail 01/ParserData/telemetry.txt",
+        },
+    )
+
+    assert path == (
+        "机型_Test Model_7/飞机_Tail 01_11/ParserData/"
+        "20260715_telemetry.txt"
+    )
+
+
 @pytest.mark.parametrize("module", [sync_package, sync_import])
 def test_safe_zip_paths_and_sha256(module, tmp_path):
     assert module._safe_zip_path("data/parsed.sqlite") == "data/parsed.sqlite"

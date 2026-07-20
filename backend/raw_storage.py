@@ -68,6 +68,15 @@ def _safe_rel_parts(path: str) -> list[str]:
     return parts
 
 
+def _without_leading_aircraft_directory(path: str, aircraft_name: str | None) -> str:
+    parts = str(path or "").replace("\\", "/").split("/")
+    parts = [part for part in parts if part and part != "."]
+    safe_aircraft_name = _safe_part(aircraft_name, "aircraft")
+    if len(parts) > 1 and _safe_part(parts[0]).casefold() == safe_aircraft_name.casefold():
+        parts = parts[1:]
+    return _rel_to_posix(PurePosixPath(*parts)) if parts else ""
+
+
 def _date_prefix(flight_date: str | None) -> str:
     digits = re.sub(r"\D+", "", str(flight_date or ""))
     return digits[:8] if len(digits) >= 8 else "undated"
@@ -81,18 +90,22 @@ def _prefix_filename(filename: str, date_prefix: str) -> str:
 
 
 def _model_base_rel(flight: dict) -> str:
-    model = f"{_safe_part(flight.get('model_name'), 'model')}__model_{flight['model_id']}"
+    model = f"机型_{_safe_part(flight.get('model_name'), 'model')}_{flight['model_id']}"
     return _rel_to_posix(PurePosixPath(model))
 
 
 def _aircraft_base_rel(flight: dict) -> str:
-    aircraft = f"{_safe_part(flight.get('aircraft_name'), 'aircraft')}__aircraft_{flight['aircraft_id']}"
+    aircraft = f"飞机_{_safe_part(flight.get('aircraft_name'), 'aircraft')}_{flight['aircraft_id']}"
     return _rel_to_posix(PurePosixPath(_model_base_rel(flight), aircraft))
 
 
 def _raw_file_rel_path(flight: dict, original_name: str, original_rel_path: str) -> str:
     date = _date_prefix(flight.get("flight_date"))
-    parts = _safe_rel_parts(original_rel_path or original_name)
+    canonical_rel_path = _without_leading_aircraft_directory(
+        original_rel_path or original_name,
+        flight.get("aircraft_name"),
+    )
+    parts = _safe_rel_parts(canonical_rel_path or original_name)
     if not parts:
         parts = [_safe_part(original_name, "raw_file")]
     parts[-1] = _prefix_filename(parts[-1], date)
@@ -251,6 +264,10 @@ def attach_raw_files_to_flight(
             continue
         try:
             original_rel_path = _rel_to_posix(os.path.relpath(filepath, source_root))
+            original_rel_path = _without_leading_aircraft_directory(
+                original_rel_path,
+                info.get("aircraft_serial"),
+            )
             store_raw_file_for_flight(
                 conn,
                 flight_id,

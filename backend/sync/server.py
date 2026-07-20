@@ -1660,14 +1660,18 @@ def _server_flight_context(conn, flight_id: int) -> dict[str, Any]:
 def _server_storage_rel_path(conn, flight_id: int, raw: dict[str, Any]) -> str:
     flight = _server_flight_context(conn, flight_id)
     date = _date_prefix(flight.get("flight_date"))
-    aircraft = f"{_safe_part(flight.get('aircraft_name'), 'aircraft')}__aircraft_{flight['aircraft_id']}"
+    model = f"机型_{_safe_part(flight.get('model_name'), 'model')}_{flight['model_id']}"
+    aircraft = f"飞机_{_safe_part(flight.get('aircraft_name'), 'aircraft')}_{flight['aircraft_id']}"
     original = str(raw.get("original_rel_path") or raw.get("original_name") or raw.get("sha256") or "raw_file").replace("\\", "/")
     parts = [_safe_part(part) for part in original.split("/") if part and part != "."]
     if not parts:
         parts = [_safe_part(raw.get("original_name") or "raw_file")]
+    aircraft_name = _safe_part(flight.get("aircraft_name"), "aircraft")
+    if len(parts) > 1 and parts[0].casefold() == aircraft_name.casefold():
+        parts = parts[1:]
     if not parts[-1].startswith(f"{date}_"):
         parts[-1] = f"{date}_{parts[-1]}"
-    return PurePosixPath(aircraft, *parts).as_posix()
+    return PurePosixPath(model, aircraft, *parts).as_posix()
 
 
 def _unique_server_storage_rel_path(conn, desired_rel: str, flight_id: int) -> str:
