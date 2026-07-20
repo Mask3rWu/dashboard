@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import mimetypes
+
+from fastapi.testclient import TestClient
+
 import main
 
+from backend.api.desktop.app import create_app
 from backend.api.desktop import schemas
 from tests.contract_helpers import api_route_contract, assert_schema, load_contract
 
@@ -69,3 +74,15 @@ def test_desktop_key_request_schemas_are_stable():
         ],
         {"since": None, "package_path": None, "conflict_resolutions": None},
     )
+
+
+def test_frontend_modules_ignore_windows_js_file_associations(tmp_path, monkeypatch):
+    """Managed Windows images can incorrectly map JavaScript to text/plain."""
+    monkeypatch.setitem(mimetypes.types_map, ".js", "text/plain")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "app.js").write_text("export {};", encoding="utf-8")
+
+    response = TestClient(create_app(str(tmp_path))).get("/assets/app.js")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/javascript")

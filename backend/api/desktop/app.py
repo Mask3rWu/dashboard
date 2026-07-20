@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import traceback
+import mimetypes
 from datetime import datetime
 
 from fastapi import FastAPI, Request
@@ -31,6 +32,17 @@ from backend.database import DATA_DIR
 STARTUP_LOG_PATH = os.path.join(DATA_DIR, "startup.log")
 
 
+def configure_frontend_mime_types() -> None:
+    """Make Vite module assets independent of Windows registry MIME mappings.
+
+    ``mimetypes`` imports file associations from Windows. Some managed desktop
+    environments register ``.js`` as ``text/plain``; Chromium then rejects the
+    Vite bundle because module scripts require a JavaScript MIME type.
+    """
+    mimetypes.add_type("application/javascript", ".js", strict=True)
+    mimetypes.add_type("application/javascript", ".mjs", strict=True)
+
+
 def startup_log(message: str) -> None:
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -48,6 +60,7 @@ def include_routes(app: FastAPI, *routers) -> None:
 
 
 def create_app(frontend_dir: str) -> FastAPI:
+    configure_frontend_mime_types()
     app = FastAPI(title="Flight Analyzer", version="2.0.0")
     app.state.frontend_dir = frontend_dir
     app.add_middleware(
