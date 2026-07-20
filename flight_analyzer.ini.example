@@ -1,5 +1,6 @@
-; Copy this file to flight_analyzer.ini and fill in real values.
-; Environment variables still override values in this file.
+; Copy this file to flight_analyzer.ini in the project root before packaging.
+; Normal deployments use the settings embedded at build time and need no INI file.
+; Environment variables or an external INI can still override exceptional deployments.
 
 [local]
 ; Local desktop/offline data cache. Leave blank to use the default app data dir.
@@ -30,7 +31,10 @@ port = 3306
 database = flight_analyzer
 user = flight
 password = CHANGE_ME
+; MySQL account host. Keep 127.0.0.1 when the server EXE runs on the MySQL host.
+user_host = 127.0.0.1
 charset = utf8mb4
+collation = utf8mb4_unicode_ci
 
 ; Optional full SQLAlchemy URL. If set, it overrides the host/user/password fields above.
 ; url = mysql+pymysql://flight:CHANGE_ME@127.0.0.1:3306/flight_analyzer?charset=utf8mb4

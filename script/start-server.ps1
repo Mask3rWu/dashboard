@@ -11,12 +11,11 @@ $ErrorActionPreference = "Stop"
 if (-not $ServerExe) {
     $ServerExe = Join-Path $PSScriptRoot "FlightAnalyzerServer.exe"
 }
-if (-not $ConfigPath) {
-    $ConfigPath = Join-Path $PSScriptRoot "flight_analyzer.ini"
-}
 
 $ServerExe = (Resolve-Path -LiteralPath $ServerExe -ErrorAction Stop).Path
-$ConfigPath = (Resolve-Path -LiteralPath $ConfigPath -ErrorAction Stop).Path
+if ($ConfigPath) {
+    $ConfigPath = (Resolve-Path -LiteralPath $ConfigPath -ErrorAction Stop).Path
+}
 
 if ($MySqlServiceName) {
     $mysql = Get-Service -Name $MySqlServiceName -ErrorAction Stop
@@ -39,13 +38,16 @@ try {
 }
 
 $workingDirectory = Split-Path -Parent $ServerExe
-$argument = "--config=`"$ConfigPath`""
+$startProcessArgs = @{
+    FilePath = $ServerExe
+    WorkingDirectory = $workingDirectory
+    PassThru = $true
+}
+if ($ConfigPath) {
+    $startProcessArgs.ArgumentList = "--config=`"$ConfigPath`""
+}
 Write-Host "Starting Flight Analyzer Server..."
-$process = Start-Process `
-    -FilePath $ServerExe `
-    -ArgumentList $argument `
-    -WorkingDirectory $workingDirectory `
-    -PassThru
+$process = Start-Process @startProcessArgs
 
 $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
 do {

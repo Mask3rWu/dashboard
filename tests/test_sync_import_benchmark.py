@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "script" / "benchmark_sync_import.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "tools" / "benchmarks" / "benchmark_sync_import.py"
 SPEC = importlib.util.spec_from_file_location("benchmark_sync_import", SCRIPT_PATH)
 benchmark = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
