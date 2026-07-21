@@ -3,6 +3,8 @@ import type { AlignedData } from '../../api/analysis';
 
 const LINE_TYPES = ['solid', 'dashed', 'dotted'] as const;
 
+type NumericValues = (number | null)[];
+
 function hashString(value: string): number {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i += 1) {
@@ -58,7 +60,7 @@ export function buildChartOption(
   const seriesList = numericSeries; // chart uses only numeric
   const needsTextAnchor = seriesList.length === 0 && textSeries.length > 0;
 
-  const getValues = (vals: (number | null)[], key: string) => {
+  const getValues = (vals: NumericValues, key: string): NumericValues => {
     const sf = scaleFactors[key] ?? 1.0;
     const scaled = vals.map((v) => (v !== null ? v * sf : null));
     if (!normalize) return scaled;
@@ -68,6 +70,32 @@ export function buildChartOption(
     const max = Math.max(...nums);
     const range = max - min || 1;
     return scaled.map((v) => (v !== null ? (v - min) / range : null));
+  };
+
+  const plottedValues = new Map<string, NumericValues>(
+    seriesList.map(([key, series]) => [key, getValues(series.values, key)]),
+  );
+
+  const getNiceExtent = (items: UnitGroup['items']): [number, number] => {
+    let dataMin = Infinity;
+    let dataMax = -Infinity;
+    items.forEach(([key]) => {
+      plottedValues.get(key)?.forEach((value) => {
+        if (value === null || !Number.isFinite(value)) return;
+        dataMin = Math.min(dataMin, value);
+        dataMax = Math.max(dataMax, value);
+      });
+    });
+    if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return [0, 1];
+
+    // ECharts dataZoom maps percentages against the raw data extent, while an
+    // automatic value axis is displayed with a nice-expanded extent. Freezing
+    // that nice extent makes every Y axis use the same normalized viewport.
+    const scale = echarts.helper.createScale(
+      [Math.min(0, dataMin), Math.max(0, dataMax)],
+      { type: 'value' },
+    );
+    return scale.getExtent() as [number, number];
   };
 
   const isNorm = normalize;
@@ -98,6 +126,8 @@ export function buildChartOption(
     yAxes.push({
       type: 'value',
       name: '归一化 (0~1)',
+      min: 0,
+      max: 1,
       nameTextStyle: { color: '#6b7280', fontSize: 11 },
       axisLabel: { color: '#9ca3af', fontSize: 10 },
       splitLine: { lineStyle: { color: '#f3f4f6' } },
@@ -109,9 +139,12 @@ export function buildChartOption(
       const side = gi % 2 === 0 ? 'left' : 'right';
       const sameSide = unitGroups.filter((_, i) => i % 2 === gi % 2 && i < gi).length;
       const color = unitColor(g.unit);
+      const [axisMin, axisMax] = getNiceExtent(g.items);
       yAxes.push({
         type: 'value',
         name: g.unit,
+        min: axisMin,
+        max: axisMax,
         nameTextStyle: { color, fontSize: 10, fontWeight: 'bold' as const },
         axisLabel: { color: '#9ca3af', fontSize: 10 },
         axisLine: { lineStyle: { color } },
@@ -264,14 +297,14 @@ export function buildChartOption(
         backgroundColor: 'rgba(249,250,251,0.55)',
       },
       { type: 'inside', xAxisIndex: 0 },
-      { type: 'inside', yAxisIndex: yAxisIndexForDZ, zoomOnMouseWheel: 'ctrl', id: 'yInside' },
+      { type: 'inside', yAxisIndex: yAxisIndexForDZ, zoomOnMouseWheel: 'ctrl', filterMode: 'none', id: 'yInside' },
       { type: 'slider', yAxisIndex: yAxisIndexForDZ, start: 0, end: 100, right: 2, width: 18,
-        backgroundColor: 'rgba(249,250,251,0.55)', id: 'ySlider',
+        backgroundColor: 'rgba(249,250,251,0.55)', filterMode: 'none', id: 'ySlider',
       },
     ],
     series: [
       ...seriesList.map(([key, s], i) => {
-        const values = getValues(s.values, key);
+        const values = plottedValues.get(key) ?? [];
         return {
           name: s.label + (isNorm ? '' : s.unit ? ` (${s.unit})` : ''),
           type: 'line' as const,

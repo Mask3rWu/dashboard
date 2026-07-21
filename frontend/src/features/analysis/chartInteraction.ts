@@ -32,6 +32,20 @@ function zoomOptions(value: unknown): ZoomOption[] {
   return Array.isArray(value) ? value.filter((item): item is ZoomOption => typeof item === 'object' && item !== null) : [];
 }
 
+function centeredWindow(center: number, range: number): { start: number; end: number } {
+  let start = center - range / 2;
+  let end = center + range / 2;
+  if (start < 0) {
+    end -= start;
+    start = 0;
+  }
+  if (end > 100) {
+    start -= end - 100;
+    end = 100;
+  }
+  return { start: Math.max(0, start), end: Math.min(100, end) };
+}
+
 export function bindDoubleClickZoom(
   instance: echarts.ECharts,
   yZoomRef: MutableRefObject<{ start: number; end: number }>,
@@ -58,19 +72,19 @@ export function bindDoubleClickZoom(
     const xRange = xEnd - xStart;
     if (xRange > minRange) {
       const nextRange = xRange / zoom;
+      const nextWindow = centeredWindow(xCenter, nextRange);
       instance.dispatchAction({
         type: 'dataZoom',
         dataZoomIndex: 0,
-        start: Math.max(0, xCenter - nextRange / 2),
-        end: Math.min(100, xCenter + nextRange / 2),
+        start: nextWindow.start,
+        end: nextWindow.end,
       });
     }
 
     const yRange = yEnd - yStart;
     if (yRange > minRange) {
       const nextRange = yRange / zoom;
-      const start = Math.max(0, yCenter - nextRange / 2);
-      const end = Math.min(100, yCenter + nextRange / 2);
+      const { start, end } = centeredWindow(yCenter, nextRange);
       yZoomRef.current = { start, end };
       instance.dispatchAction({ type: 'dataZoom', dataZoomId: 'ySlider', start, end });
     }
