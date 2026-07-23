@@ -22,6 +22,7 @@ from backend.api.desktop.routers.flights import (
 from backend.api.desktop.routers.imports import browse_router as import_browse_router
 from backend.api.desktop.routers.imports import router as imports_router
 from backend.api.desktop.routers.models import router as models_router
+from backend.api.desktop.routers.remote_data import router as remote_data_router
 from backend.api.desktop.routers.runtime import bootstrap_router
 from backend.api.desktop.routers.runtime import router as runtime_router
 from backend.api.desktop.routers.sync import router as sync_router
@@ -92,6 +93,7 @@ def create_app(frontend_dir: str) -> FastAPI:
         import_browse_router,
         models_router,
         flight_listing_router,
+        remote_data_router,
         runtime_router,
         flight_raw_router,
         sync_router,

@@ -3,7 +3,7 @@ import type { Flight } from './flights';
 
 export type DeleteScope = 'auto' | 'local_cache' | 'local_unsynced' | 'server';
 const deleteBody = (scope: DeleteScope = 'auto') => ({ scope });
-export interface AircraftModel { id: number; name: string; created_at: string; client_uid?: string | null; server_id?: number | null; sync_origin?: string | null; sync_state?: Flight['sync_state']; server_version?: number | null; server_deleted_at?: string | null; aircraft_count?: number; total_flights?: number; total_flight_hours?: number; }
+export interface AircraftModel { id: number; name: string; created_at: string; client_uid?: string | null; server_id?: number | null; sync_origin?: string | null; sync_state?: Flight['sync_state']; server_version?: number | null; server_deleted_at?: string | null; aircraft_count?: number; total_flights?: number; total_flight_hours?: number; model_synced?: boolean; local_model_id?: number | null; }
 export interface Aircraft { id: number; model_id: number; name: string; created_at: string; client_uid?: string | null; server_id?: number | null; sync_origin?: string | null; sync_state?: Flight['sync_state']; server_version?: number | null; server_deleted_at?: string | null; flight_count?: number; }
 export interface ColumnDetail { column_name: string; display_label: string; unit: string; scale_factor: number; data_type: string; ordinal: number; is_numeric: boolean; }
 export interface DataTypeGroup { data_type_key: string; table: string; label: string; columns: ColumnDetail[]; }

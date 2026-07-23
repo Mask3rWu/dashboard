@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import uuid
 import zipfile
@@ -173,6 +174,32 @@ def test_server_pull_bundle_uses_current_local_schema_version(monkeypatch, tmp_p
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
 
     assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
+
+
+def test_selected_server_pull_bundle_is_cache_only_and_has_no_cursor(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        server_sync,
+        "_selected_flight_entity_ids",
+        lambda *args, **kwargs: {"models": set(), "aircraft": set(), "flights": {7}},
+    )
+    monkeypatch.setattr(server_sync, "_select_rows_by_ids", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server_sync, "_server_raw_manifest_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server_sync.db, "SERVER_DATA_DIR", str(tmp_path))
+
+    def write_parsed_sqlite(conn, ids, path):
+        with open(path, "wb") as file:
+            file.write(b"selected parsed sqlite fixture")
+        return 0
+
+    monkeypatch.setattr(server_sync, "_write_server_parsed_sqlite", write_parsed_sqlite)
+
+    result = server_sync.build_pull_bundle(object(), flight_ids=[7])
+    with zipfile.ZipFile(result["path"], "r") as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+
+    assert manifest["cache_only"] is True
+    assert manifest["server_cursor"] is None
+    assert result["current_cursor"] is None
 
 
 def test_server_pull_bundle_writes_shared_raw_object_once(monkeypatch, tmp_path):
@@ -1002,6 +1029,45 @@ def test_offline_created_entities_inherit_package_client_uids(isolated_data_dir,
             "SELECT client_uid FROM flights WHERE id=?", (flight_map[33],)
         ).fetchone()[0] == f"package-flight-{suffix}"
     finally:
+        conn.close()
+
+
+def test_selected_pull_requires_explicitly_synced_server_model(isolated_data_dir, tmp_path):
+    from backend.database import get_db, init_db
+
+    init_db()
+    conn = get_db()
+    package_path = tmp_path / "selected-pull.fapkg"
+    config = _offline_model_config("remote_value")
+    _write_offline_model_package(package_path, 701, config)
+    manifest = {
+        "_package_path": str(package_path),
+        "source_node_id": "server",
+        "cache_only": True,
+        "models": [{
+            "id": 701,
+            "client_uid": "server-model-701",
+            "name": "Remote Only Model",
+            "version": 1,
+        }],
+    }
+    report = {
+        "created": {"models": 0, "aircraft": 0, "flights": 0},
+        "updated": {"models": 0, "aircraft": 0, "flights": 0},
+        "tombstones": {"models": 0, "aircraft": 0, "flights": 0},
+        "conflicts": [],
+        "warnings": [],
+    }
+    parsed = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(ValueError, match="尚未同步"):
+            sync_import._upsert_pull_models(conn, manifest, parsed, report)
+        assert conn.execute(
+            "SELECT 1 FROM aircraft_models WHERE server_id=701"
+        ).fetchone() is None
+        assert report["created"]["models"] == 0
+    finally:
+        parsed.close()
         conn.close()
 
 

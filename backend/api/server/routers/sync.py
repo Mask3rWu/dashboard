@@ -311,7 +311,15 @@ def sync_preview(since: str | None = Query(default=None), exclude_source_node_id
 
 
 @router.get("/api/sync/bundle")
-def sync_bundle(request: Request, since: str | None = Query(default=None), exclude_source_node_id: str | None = Query(default=None), user=Depends(require_user), conn=Depends(connection)):
+def sync_bundle(
+    request: Request,
+    since: str | None = Query(default=None),
+    exclude_source_node_id: str | None = Query(default=None),
+    flight_ids: list[int] | None = Query(default=None),
+    model_id: int | None = Query(default=None),
+    user=Depends(require_user),
+    conn=Depends(connection),
+):
     db.require_capability(user, "sync_pull")
     operation_id = request.headers.get("X-Sync-Operation-Id") or uuid.uuid4().hex
     server_operations.start(operation_id, "pull", "Generating pull bundle")
@@ -321,6 +329,8 @@ def sync_bundle(request: Request, since: str | None = Query(default=None), exclu
             since,
             exclude_source_node_id=exclude_source_node_id,
             operation_id=operation_id,
+            flight_ids=flight_ids,
+            model_id=model_id,
         )
         server_operations.finish(
             operation_id,
@@ -329,6 +339,14 @@ def sync_bundle(request: Request, since: str | None = Query(default=None), exclu
             message="Pull bundle is ready",
             metrics=result.get("metrics"),
         )
+    except ValueError as exc:
+        server_operations.finish(
+            operation_id,
+            status="failed",
+            phase="server_failed",
+            message=str(exc),
+        )
+        raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         server_operations.finish(
             operation_id,

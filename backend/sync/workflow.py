@@ -803,6 +803,8 @@ def pull(
     package_path: str | None = None,
     conflict_resolutions: dict[str, str] | None = None,
     exclude_source_node_id: str | None = None,
+    flight_ids: list[int] | None = None,
+    model_id: int | None = None,
 ) -> dict:
     conn = get_db()
     run_id = None
@@ -815,12 +817,14 @@ def pull(
             percent=percent(progress_start, progress_end, 5),
         )
         server_base_url = client.normalize_base_url(runtime_context.get_server_base_url(conn))
-        if since is None:
+        if since is None and flight_ids is None:
             since = repository.get_setting(conn, "last_pull_cursor", "")
+        elif flight_ids is not None:
+            since = ""
         run_id = repository.create_sync_run(conn, "pull")
         conn.commit()
 
-        if not package_path:
+        if not package_path and flight_ids is None:
             update(
                 operation_id,
                 phase="检查同步清单",
@@ -933,6 +937,8 @@ def pull(
                 server_progress_callback=_server_progress_callback(
                     operation_id, progress_start, progress_end, "pull"
                 ),
+                flight_ids=flight_ids,
+                model_id=model_id,
             )
         manifest_counts = {
             "models": len(manifest.get("models") or []),

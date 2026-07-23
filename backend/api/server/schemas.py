@@ -1,6 +1,6 @@
 """Collaboration-server request schemas."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -66,3 +66,40 @@ class MergeEntitiesRequest(BaseModel):
 class CreateUploadSessionRequest(BaseModel):
     manifest: dict[str, Any]
     operation_id: str | None = None
+
+
+class FlightRecordFilterCondition(BaseModel):
+    field: str
+    op: Literal["contains", "gt", "gte", "lt", "lte", "eq", "between"]
+    value: str | None = None
+    min_val: float | None = None
+    max_val: float | None = None
+
+
+class FlightRecordFilterSpec(BaseModel):
+    logic: Literal["and", "or"] = "and"
+    conditions: list[FlightRecordFilterCondition] = Field(default_factory=list, max_length=20)
+
+
+class FlightDataFilterCondition(BaseModel):
+    column: str
+    op: Literal["gt", "gte", "lt", "lte", "eq", "between"]
+    value: float | None = None
+    min_val: float | None = None
+    max_val: float | None = None
+
+
+class FlightDataFilterSpec(BaseModel):
+    logic: Literal["and", "or"] = "and"
+    conditions: list[FlightDataFilterCondition] = Field(min_length=1, max_length=20)
+
+
+class ServerFlightSearchRequest(BaseModel):
+    model_id: int
+    aircraft_search: str = ""
+    time_from: str | None = None
+    time_to: str | None = None
+    record_filter: FlightRecordFilterSpec | None = None
+    data_filter: FlightDataFilterSpec | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)

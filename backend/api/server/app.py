@@ -15,6 +15,7 @@ load_app_config()
 
 from backend import server_database as db
 from backend.api.server.routers.auth import capabilities_router, router as auth_router
+from backend.api.server.routers.data import router as data_router
 from backend.api.server.routers.models import create_router as model_create_router
 from backend.api.server.routers.models import delete_router as model_delete_router
 from backend.api.server.routers.sync import router as sync_router
@@ -63,6 +64,7 @@ def create_app() -> FastAPI:
         users_router,
         capabilities_router,
         model_create_router,
+        data_router,
         sync_router,
         model_delete_router,
     )

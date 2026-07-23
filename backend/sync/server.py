@@ -776,7 +776,7 @@ def build_preflight_plan(conn, manifest: dict[str, Any]) -> dict[str, Any]:
                     or (
                         model.get("config")
                         and model_mutable_metadata_payload(model.get("config"))
-                        != model_mutable_metadata_payload(_server_model_config(conn, int(existing["id"])))
+                        != model_mutable_metadata_payload(server_model_config(conn, int(existing["id"])))
                     )
                 ):
                     action = "update_metadata"
@@ -2473,6 +2473,42 @@ def _changed_entity_ids(
     return ids
 
 
+def _selected_flight_entity_ids(
+    conn, flight_ids, model_id: int | None = None
+) -> dict[str, set[int]]:
+    requested = sorted({int(value) for value in flight_ids})
+    if not requested:
+        raise ValueError("At least one server flight must be selected")
+    ids = {"models": set(), "aircraft": set(), "flights": set()}
+    rows = []
+    for batch in _batched_ids(requested):
+        placeholders = ", ".join(f":id{i}" for i, _ in enumerate(batch))
+        rows.extend(conn.execute(
+            db.text(
+                f"""SELECT f.id, f.aircraft_id, a.model_id
+                    FROM flights f
+                    JOIN aircraft a ON a.id=f.aircraft_id
+                    JOIN aircraft_models am ON am.id=a.model_id
+                    WHERE f.id IN ({placeholders})
+                      AND f.deleted_at IS NULL
+                      AND a.deleted_at IS NULL
+                      AND am.deleted_at IS NULL"""
+            ),
+            {f"id{i}": value for i, value in enumerate(batch)},
+        ).fetchall())
+    found = {int(row._mapping["id"]) for row in rows}
+    missing = [value for value in requested if value not in found]
+    if missing:
+        raise ValueError(f"Server flights not found or deleted: {missing}")
+    found_model_ids = {int(row._mapping["model_id"]) for row in rows}
+    if model_id is not None and found_model_ids != {int(model_id)}:
+        raise ValueError("Selected server flights do not belong to the requested model")
+    ids["flights"].update(found)
+    ids["aircraft"].update(int(row._mapping["aircraft_id"]) for row in rows)
+    ids["models"].update(int(row._mapping["model_id"]) for row in rows)
+    return ids
+
+
 def _select_rows_by_ids(conn, table: str, ids: set[int]) -> list[dict[str, Any]]:
     if not ids:
         return []
@@ -2531,7 +2567,7 @@ def _write_source_table(
     )
 
 
-def _server_model_config(conn, server_model_id: int) -> dict[str, Any]:
+def server_model_config(conn, server_model_id: int) -> dict[str, Any]:
     model = _row_dict(
         conn.execute(
             db.text(
@@ -2593,7 +2629,7 @@ def _server_model_config(conn, server_model_id: int) -> dict[str, Any]:
 
 def _attach_server_model_configs(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
-        row["config"] = _server_model_config(conn, int(row["id"]))
+        row["config"] = server_model_config(conn, int(row["id"]))
     return rows
 
 
@@ -2728,6 +2764,8 @@ def build_pull_bundle(
     *,
     exclude_source_node_id: str | None = None,
     operation_id: str | None = None,
+    flight_ids: list[int] | None = None,
+    model_id: int | None = None,
 ) -> dict[str, Any]:
     """Create a pull_bundle zip from server state and return its path."""
     metrics = SyncMetrics("server_pull_bundle", operation_id)
@@ -2737,8 +2775,14 @@ def build_pull_bundle(
         message="Selecting changed server entities",
     )
     with metrics.phase("server_pull_query") as phase_metric:
-        ids = _changed_entity_ids(conn, since, exclude_source_node_id=exclude_source_node_id)
-        current_cursor = _max_cursor(conn)
+        if flight_ids is None:
+            ids = _changed_entity_ids(conn, since, exclude_source_node_id=exclude_source_node_id)
+            current_cursor = _max_cursor(conn)
+        else:
+            ids = _selected_flight_entity_ids(conn, flight_ids, model_id)
+            # On-demand cache downloads must not advance the client's global
+            # incremental pull cursor.
+            current_cursor = None
         phase_metric.update(**{key: len(value) for key, value in ids.items()})
     package_id = f"pkg-{uuid.uuid4().hex}"
     source_node_id = "server"
@@ -2771,7 +2815,7 @@ def build_pull_bundle(
             aircraft_rows = _select_rows_by_ids(conn, "aircraft", ids["aircraft"])
             flight_rows = _select_rows_by_ids(conn, "flights", ids["flights"])
             raw_rows = _server_raw_manifest_rows(conn, ids["flights"])
-            redirects = _entity_redirects_since(conn, since)
+            redirects = [] if flight_ids is not None else _entity_redirects_since(conn, since)
             phase_metric.update(
                 models=len(model_rows),
                 aircraft=len(aircraft_rows),
@@ -2791,6 +2835,7 @@ def build_pull_bundle(
             "exported_at": db.utcnow().isoformat(timespec="seconds"),
             "base_server_cursor": str(since or ""),
             "server_cursor": current_cursor,
+            "cache_only": flight_ids is not None,
             "models": model_rows,
             "aircraft": aircraft_rows,
             "flights": flight_rows,
@@ -2807,7 +2852,8 @@ def build_pull_bundle(
 
         bundles_dir = os.path.join(db.SERVER_DATA_DIR, "bundles")
         os.makedirs(bundles_dir, exist_ok=True)
-        bundle_path = os.path.join(bundles_dir, f"server_pull_{current_cursor}_{package_id}.fapkg")
+        cursor_label = current_cursor if current_cursor is not None else "selected"
+        bundle_path = os.path.join(bundles_dir, f"server_pull_{cursor_label}_{package_id}.fapkg")
         manifest_path = os.path.join(tmp_dir, "manifest.json")
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2, default=_json_default)
@@ -2826,7 +2872,7 @@ def build_pull_bundle(
                 for model_id in sorted(ids["models"]):
                     zf.writestr(
                         f"models/model_{model_id}.json",
-                        json.dumps(_server_model_config(conn, model_id), ensure_ascii=False, indent=2, default=_json_default),
+                        json.dumps(server_model_config(conn, model_id), ensure_ascii=False, indent=2, default=_json_default),
                     )
                 written_raw_objects: set[str] = set()
                 for raw_index, raw in enumerate(raw_rows, start=1):

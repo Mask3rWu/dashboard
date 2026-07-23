@@ -643,13 +643,19 @@ def download_bundle(
     progress_callback: ProgressCallback | None = None,
     operation_id: str | None = None,
     server_progress_callback: OperationProgressCallback | None = None,
+    flight_ids: list[int] | None = None,
+    model_id: int | None = None,
 ) -> dict[str, Any]:
     params = {}
     if since not in (None, ""):
         params["since"] = str(since)
     if exclude_source_node_id:
         params["exclude_source_node_id"] = exclude_source_node_id
-    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    if flight_ids is not None:
+        params["flight_ids"] = [str(value) for value in flight_ids]
+    if model_id is not None:
+        params["model_id"] = str(int(model_id))
+    query = f"?{urllib.parse.urlencode(params, doseq=True)}" if params else ""
     url = f"{normalize_base_url(base_url)}/sync/bundle{query}"
     headers = {
         "Accept": "application/octet-stream",
@@ -696,3 +702,54 @@ def download_bundle(
         "download_bytes_per_second": round(received / download_duration, 2),
     }
     return manifest
+
+
+def data_models(base_url: str, *, token: str | None = None, timeout: float = 30.0):
+    return _request_get_json(
+        f"{normalize_base_url(base_url)}/data/models", token=token, timeout=timeout
+    )
+
+
+def data_aircraft(
+    base_url: str, model_id: int, *, token: str | None = None, timeout: float = 30.0
+):
+    return _request_get_json(
+        f"{normalize_base_url(base_url)}/data/models/{int(model_id)}/aircraft",
+        token=token,
+        timeout=timeout,
+    )
+
+
+def data_model_columns(
+    base_url: str, model_id: int, *, token: str | None = None, timeout: float = 30.0
+):
+    return _request_get_json(
+        f"{normalize_base_url(base_url)}/data/models/{int(model_id)}/columns",
+        token=token,
+        timeout=timeout,
+    )
+
+
+def data_model_definition(
+    base_url: str, model_id: int, *, token: str | None = None, timeout: float = 30.0
+):
+    return _request_get_json(
+        f"{normalize_base_url(base_url)}/data/models/{int(model_id)}/definition",
+        token=token,
+        timeout=timeout,
+    )
+
+
+def search_data_flights(
+    base_url: str,
+    payload: dict[str, Any],
+    *,
+    token: str | None = None,
+    timeout: float = 120.0,
+):
+    return _request_json(
+        f"{normalize_base_url(base_url)}/data/flights/search",
+        payload,
+        token=token,
+        timeout=timeout,
+    )

@@ -198,6 +198,23 @@ class CompareRequest(BaseModel):
     column_key: str
 
 
+class RemoteFlightSearchRequest(BaseModel):
+    model_id: int
+    aircraft_search: str = ""
+    time_from: str | None = None
+    time_to: str | None = None
+    record_filter: dict | None = None
+    data_filter: dict | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+
+
+class RemoteFlightDownloadRequest(BaseModel):
+    model_id: int
+    flight_ids: list[int] = Field(min_length=1, max_length=100)
+    operation_id: str | None = None
+
+
 class PresetCreate(BaseModel):
     model_id: int
     name: str

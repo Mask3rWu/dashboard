@@ -27,6 +27,10 @@ interface Props {
   canDeleteAircraft: boolean;
   canDeleteFlights: boolean;
   serverOnline: boolean;
+  readOnly?: boolean;
+  selectable?: boolean;
+  selectedFlightIds?: Set<number>;
+  onSelectFlight?: (flightId: number) => void;
   getFlightsForAircraft: (aircraftId: number) => Flight[];
   getAircraftStats: (aircraftId: number) => { count: number; hours: number };
   onToggleAircraft: (aircraftId: number) => void;
@@ -63,6 +67,7 @@ function syncStateLabel(state?: string | null) {
     upload_failed: '上传失败',
     conflict: '冲突',
     server_cache: '服务器缓存',
+    server_remote: '服务器',
     server_deleted: '服务器已删',
   };
   return labels[state || ''] || state || '未标记';
@@ -112,9 +117,12 @@ export default function AircraftList(props: Props) {
     onCancelEditRecord, onToggleRawFiles, onOpenRawFolder, onNavigateToFlight,
     onRequestDeleteFlight, onDeleteFlight, onCancelDeleteFlight,
   } = props;
+  const readOnly = props.readOnly ?? false;
+  const selectable = props.selectable ?? false;
+  const selectedFlightIds = props.selectedFlightIds ?? new Set<number>();
 
   if (aircraft.length === 0) {
-    return <p className="text-sm text-gray-400">暂无飞机，请添加飞机代号</p>;
+    return <p className="text-sm text-gray-400">{readOnly ? '未找到符合条件的架次' : '暂无飞机，请添加飞机代号'}</p>;
   }
 
   return (
@@ -128,7 +136,7 @@ export default function AircraftList(props: Props) {
             <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors" onClick={() => onToggleAircraft(item.id)}>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-gray-400 transition-transform" style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
-                {editingAircraftId === item.id ? (
+                {!readOnly && editingAircraftId === item.id ? (
                   <div onClick={(event) => event.stopPropagation()}>
                     <input
                       type="text"
@@ -148,7 +156,7 @@ export default function AircraftList(props: Props) {
                 <span className="text-xs text-gray-400">总架次: <span className="font-medium text-gray-600">{stats.count}</span></span>
                 <span className="text-xs text-gray-400">总航时: <span className="font-medium text-gray-600">{stats.hours.toFixed(1)}</span> 小时</span>
               </div>
-              <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+              {!readOnly && <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
                 {editingAircraftId === item.id ? (
                   <>
                     <button type="button" onClick={() => onRenameAircraft(item.id)} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-500">保存</button>
@@ -170,7 +178,7 @@ export default function AircraftList(props: Props) {
                     )}
                   </>
                 )}
-              </div>
+              </div>}
             </div>
 
             {isExpanded && (
@@ -181,8 +189,21 @@ export default function AircraftList(props: Props) {
                   <div key={flight.id} className="px-6 py-2 border-b border-gray-100 last:border-b-0 hover:bg-white transition-colors">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
+                        {selectable && (
+                          <input
+                            type="checkbox"
+                            checked={!flight.downloaded && selectedFlightIds.has(flight.id)}
+                            disabled={!!flight.downloaded}
+                            onChange={() => {
+                              if (!flight.downloaded) props.onSelectFlight?.(flight.id);
+                            }}
+                            aria-label={`选择架次 ${flight.name}`}
+                            title={flight.downloaded ? '本地已有，无需重复下载' : '选择下载到本地'}
+                            className="w-4 h-4 accent-blue-600 shrink-0"
+                          />
+                        )}
                         <span className="text-sm font-medium text-gray-700 truncate max-w-[200px]">
-                          {editingFlightId === flight.id ? (
+                          {!readOnly && editingFlightId === flight.id ? (
                             <div className="flex items-center gap-1">
                               <input
                                 type="text"
@@ -201,7 +222,7 @@ export default function AircraftList(props: Props) {
                           ) : (
                             <span className="flex items-center gap-1 group">
                               {flight.name}
-                              <button onClick={() => onStartRenameFlight(flight)} className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 text-[10px]"><Pencil className="w-3 h-3" /></button>
+                              {!readOnly && <button onClick={() => onStartRenameFlight(flight)} className="text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 text-[10px]"><Pencil className="w-3 h-3" /></button>}
                             </span>
                           )}
                         </span>
@@ -210,9 +231,10 @@ export default function AircraftList(props: Props) {
                         {flight.record_total_duration_min != null && <span className="text-xs text-gray-500">总时长 {formatDurationMinutes(flight.record_total_duration_min)}</span>}
                         <span className="text-xs text-gray-400">原始文件 {flight.raw_file_count ?? 0}</span>
                         <span className={`text-[10px] px-2 py-0.5 rounded border ${syncStateClass(flight.sync_state)}`}>{syncStateLabel(flight.sync_state)}</span>
+                        {readOnly && flight.downloaded && <span className="text-[10px] px-2 py-0.5 rounded border bg-emerald-50 text-emerald-700 border-emerald-200">本地已有</span>}
                         <span className="text-xs text-gray-400">{flight.start_time && `${flight.start_time}${flight.end_time ? ` ~ ${flight.end_time.split(' ').pop()}` : ''}`}</span>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0">
+                      {!readOnly && <div className="flex items-center gap-2 shrink-0">
                         <button type="button" onClick={() => onEditRecord(flight)} className="text-xs text-gray-500 hover:text-blue-600">编辑记录</button>
                         <button type="button" onClick={() => onToggleRawFiles(flight.id)} className="text-xs text-gray-500 hover:text-blue-600">原始文件</button>
                         <button onClick={() => onNavigateToFlight(flight.id)} className="text-xs text-blue-600 hover:text-blue-500 font-medium">分析 →</button>
@@ -227,7 +249,7 @@ export default function AircraftList(props: Props) {
                         ) : (
                           <span className="text-xs text-gray-300" title="当前环境或登录状态无删除架次权限">删除</span>
                         )}
-                      </div>
+                      </div>}
                     </div>
                     <div className="mt-1 text-xs text-gray-500 truncate">
                       {recordSummary(flight)}

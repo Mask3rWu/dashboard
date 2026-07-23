@@ -1471,10 +1471,18 @@ def _upsert_pull_models(
         server_id = int(row["id"])
         if server_id in redirected_ids:
             continue
-        existing, _ = _find_local_by_sync_identity(
-            conn, "aircraft_models", server_id, row.get("client_uid"),
-            name=row.get("name"),
-        )
+        if manifest.get("cache_only"):
+            existing = _find_local_by_server_id(conn, "aircraft_models", server_id)
+            if not existing:
+                raise ValueError(
+                    f"服务器机型“{row.get('name') or server_id}”尚未同步，"
+                    "请先在数据管理的服务器机型列表中点击“同步机型”"
+                )
+        else:
+            existing, _ = _find_local_by_sync_identity(
+                conn, "aircraft_models", server_id, row.get("client_uid"),
+                name=row.get("name"),
+            )
         config = _build_config_from_pull_rows(manifest, server_id, parsed)
         target_name = row.get("name") or f"server_model_{server_id}"
         if existing:
@@ -1529,6 +1537,8 @@ def _upsert_pull_models(
             report["updated"]["models"] += 1
             continue
 
+        if manifest.get("cache_only"):
+            raise ValueError("选中架次下载不能隐式创建本地机型")
         create_name = _unique_name(conn, "aircraft_models", target_name)
         conn.execute(
             """INSERT INTO aircraft_models

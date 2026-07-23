@@ -560,38 +560,50 @@ def _validate_data_filter(conn, model_id, filter_spec):
     return list(dict.fromkeys(column_keys))
 
 
-def match_flights_by_data(model_id, flight_ids, filter_spec):
-    """Return flights having at least one aligned second matching the filter."""
+def match_flights_by_data_with_connection(conn, model_id, flight_ids, filter_spec):
+    """Return matching flights using a SQLite-compatible connection.
+
+    Keeping the connection injectable lets the collaboration server reuse the
+    exact same alignment and filter semantics through a small SQLAlchemy
+    adapter, instead of maintaining a second implementation.
+    """
     unique_flight_ids = list(dict.fromkeys(flight_ids))
     if not unique_flight_ids:
         return []
 
+    valid_ids = set()
+    for offset in range(0, len(unique_flight_ids), 900):
+        batch = unique_flight_ids[offset:offset + 900]
+        placeholders = ','.join('?' for _ in batch)
+        rows = conn.execute(
+            f"""SELECT f.id
+                FROM flights f
+                JOIN aircraft a ON a.id=f.aircraft_id
+                WHERE a.model_id=? AND f.id IN ({placeholders})""",
+            [model_id, *batch],
+        ).fetchall()
+        valid_ids.update(row['id'] for row in rows)
+    invalid_ids = [flight_id for flight_id in unique_flight_ids if flight_id not in valid_ids]
+    if invalid_ids:
+        raise ValueError(f"Flights do not belong to model {model_id}: {invalid_ids}")
+
+    column_keys = _validate_data_filter(conn, model_id, filter_spec)
+    matching = []
+    for flight_id in unique_flight_ids:
+        aligned, _ = _build_aligned_series(conn, model_id, flight_id, column_keys)
+        apply_filter(aligned, filter_spec, missing_is_false=True)
+        if any(aligned.get('mask', [])):
+            matching.append(flight_id)
+    return matching
+
+
+def match_flights_by_data(model_id, flight_ids, filter_spec):
+    """Return flights having at least one aligned second matching the filter."""
     conn = get_db()
     try:
-        valid_ids = set()
-        for offset in range(0, len(unique_flight_ids), 900):
-            batch = unique_flight_ids[offset:offset + 900]
-            placeholders = ','.join('?' for _ in batch)
-            rows = conn.execute(
-                f"""SELECT f.id
-                    FROM flights f
-                    JOIN aircraft a ON a.id=f.aircraft_id
-                    WHERE a.model_id=? AND f.id IN ({placeholders})""",
-                [model_id, *batch],
-            ).fetchall()
-            valid_ids.update(row['id'] for row in rows)
-        invalid_ids = [flight_id for flight_id in unique_flight_ids if flight_id not in valid_ids]
-        if invalid_ids:
-            raise ValueError(f"Flights do not belong to model {model_id}: {invalid_ids}")
-
-        column_keys = _validate_data_filter(conn, model_id, filter_spec)
-        matching = []
-        for flight_id in unique_flight_ids:
-            aligned, _ = _build_aligned_series(conn, model_id, flight_id, column_keys)
-            apply_filter(aligned, filter_spec, missing_is_false=True)
-            if any(aligned.get('mask', [])):
-                matching.append(flight_id)
-        return matching
+        return match_flights_by_data_with_connection(
+            conn, model_id, flight_ids, filter_spec
+        )
     finally:
         conn.close()
 

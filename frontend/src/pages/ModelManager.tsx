@@ -4,6 +4,7 @@ import { deleteFlight, updateFlight, updateFlightRecord, getRawFiles, openRawFol
 import { matchFlightsByData, type FilterSpec } from '../api/analysis';
 import { browseFile } from '../api/imports';
 import { getSyncExportTree, exportSyncPackage, previewSyncImport, importSyncPackage, type SyncExportModelNode, type SyncExportResult, type SyncImportPreview, type SyncImportReport } from '../api/sync';
+import { downloadRemoteFlights, getRemoteModelColumns, listRemoteAircraft, listRemoteModels, searchRemoteFlights, syncRemoteModel, type AircraftSearchSummary, type RemoteDownloadResult } from '../api/remoteData';
 import { deleteScopeFor } from '../syncStatus';
 import FlightFilterBar, { FilterRulesHelp } from '../components/FlightFilterBar';
 import { emptyRecord, recordFromFlight } from '../features/flights/recordFields';
@@ -12,6 +13,8 @@ import ModelExportDialog from '../features/models/ModelExportDialog';
 import ModelImportDialog, { type SyncAircraftMapping, type SyncModelAction } from '../features/models/ModelImportDialog';
 import ColumnEditor from '../features/models/ColumnEditor';
 import ModelList from '../features/models/ModelList';
+import SyncProgress from '../features/sync/SyncProgress';
+import { useSyncOperation } from '../features/sync/useSyncOperation';
 
 interface Props {
   onModelsChanged: () => void;
@@ -28,9 +31,24 @@ function errorMessage(error: unknown): string {
 }
 
 export default function ModelManager({ onModelsChanged, onNavigateToFlight, flights, modelsVersion, capabilities, serverOnline = true, isLoggedIn }: Props) {
+  const [dataSource, setDataSource] = useState<'local' | 'server'>('local');
   const [models, setModels] = useState<AircraftModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
+  const [serverFlights, setServerFlights] = useState<Flight[]>([]);
+  const [serverPage, setServerPage] = useState(1);
+  const [serverTotal, setServerTotal] = useState(0);
+  const [serverDurationSec, setServerDurationSec] = useState(0);
+  const [serverAircraftSummaries, setServerAircraftSummaries] = useState<AircraftSearchSummary[]>([]);
+  const [selectedServerFlightIds, setSelectedServerFlightIds] = useState<Set<number>>(new Set());
+  const [serverQueryLoading, setServerQueryLoading] = useState(false);
+  const [serverQueryError, setServerQueryError] = useState<string | null>(null);
+  const [syncingModelId, setSyncingModelId] = useState<number | null>(null);
+  const {
+    busy: syncBusy,
+    progress: syncProgress,
+    execute: executeSyncOperation,
+  } = useSyncOperation();
 
   // Edit model
   const [editingModelId, setEditingModelId] = useState<number | null>(null);
@@ -288,19 +306,75 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   const loadModels = async () => {
     try {
-      const data = await listModels();
+      const data = dataSource === 'server' ? await listRemoteModels() : await listModels();
       setModels(data.models);
+      setSelectedModelId((current) => (
+        current != null && data.models.some((model) => model.id === current)
+          ? current
+          : data.models[0]?.id ?? null
+      ));
     } catch (e) { console.error(e); }
   };
 
   const loadAircraft = async (modelId: number) => {
     try {
-      const data = await listAircraft(modelId);
+      const data = dataSource === 'server'
+        ? await listRemoteAircraft(modelId)
+        : await listAircraft(modelId);
       setAircraft(data.aircraft);
     } catch (e) { console.error(e); }
   };
 
-  useEffect(() => { loadModels(); }, []);
+  const runServerSearch = async (modelId: number, page = 1, resetFilters = false) => {
+    setServerQueryLoading(true);
+    setServerQueryError(null);
+    try {
+      const result = await searchRemoteFlights({
+        model_id: modelId,
+        aircraft_search: resetFilters ? '' : aircraftSearch,
+        time_from: resetFilters ? undefined : (timeFilterStart || undefined),
+        time_to: resetFilters ? undefined : (timeFilterEnd || undefined),
+        record_filter: resetFilters ? undefined : flightFilter,
+        data_filter: resetFilters ? undefined : dataFilter,
+        page,
+        page_size: 50,
+      });
+      setServerFlights(result.flights);
+      setServerPage(result.page);
+      setServerTotal(result.total);
+      setServerDurationSec(result.summary.duration_sec);
+      setServerAircraftSummaries(result.aircraft_summaries);
+      setSelectedServerFlightIds(new Set());
+      setExpandedAc(new Set(result.flights.map((flight) => flight.aircraft_id)));
+    } catch (error: unknown) {
+      setServerFlights([]);
+      setServerTotal(0);
+      setServerDurationSec(0);
+      setServerAircraftSummaries([]);
+      setServerQueryError(errorMessage(error));
+    } finally {
+      setServerQueryLoading(false);
+    }
+  };
+
+  const loadSourceModels = useEffectEvent(() => loadModels());
+  const loadSelectedModelData = useEffectEvent((modelId: number) => {
+    loadAircraft(modelId);
+    const columnsRequest = dataSource === 'server'
+      ? getRemoteModelColumns(modelId)
+      : getModelColumns(modelId);
+    columnsRequest.then(d => setColumnGroups(d.data_types)).catch(() => setColumnGroups([]));
+    if (dataSource === 'server') runServerSearch(modelId, 1, true);
+  });
+
+  useEffect(() => {
+    setSelectedModelId(null);
+    setAircraft([]);
+    setColumnGroups([]);
+    setServerFlights([]);
+    setSelectedServerFlightIds(new Set());
+    loadSourceModels();
+  }, [dataSource]);
 
   const refreshSelectedModel = useEffectEvent(() => {
     if (selectedModelId) loadAircraft(selectedModelId);
@@ -308,16 +382,15 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   // Refresh models/aircraft when external data changes (e.g. import on another tab)
   useEffect(() => {
-    if (modelsVersion > 0) {
-      loadModels();
+    if (modelsVersion > 0 && dataSource === 'local') {
+      loadSourceModels();
       refreshSelectedModel();
     }
-  }, [modelsVersion]);
+  }, [modelsVersion, dataSource]);
 
   useEffect(() => {
     if (selectedModelId) {
-      loadAircraft(selectedModelId);
-      getModelColumns(selectedModelId).then(d => setColumnGroups(d.data_types)).catch(() => setColumnGroups([]));
+      loadSelectedModelData(selectedModelId);
     } else {
       setAircraft([]);
       setColumnGroups([]);
@@ -334,7 +407,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     setIsEditingColumns(false);
     setColumnEditData({});
     setShowOriginalName(true);
-  }, [selectedModelId]);
+  }, [selectedModelId, dataSource]);
 
   const refresh = () => {
     loadModels();
@@ -524,9 +597,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     return flightFilter.logic === 'and' ? results.every(Boolean) : results.some(Boolean);
   };
 
-  const dataFilterCandidateIds = flights
+  const dataFilterCandidateIds = dataSource === 'local' ? flights
     .filter((flight) => flight.model_id === selectedModelId && flightOverlapsTimeFilter(flight) && flightMatchesFilter(flight))
-    .map((flight) => flight.id);
+    .map((flight) => flight.id) : [];
   const dataFilterCandidateKey = dataFilterCandidateIds.join(',');
 
   useEffect(() => {
@@ -534,7 +607,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     const candidateIds = dataFilterCandidateKey
       ? dataFilterCandidateKey.split(',').map((value) => Number(value))
       : [];
-    if (!selectedModelId || !dataFilter) {
+    if (dataSource === 'server' || !selectedModelId || !dataFilter) {
       const resetTimer = window.setTimeout(() => {
         setDataMatchedFlightIds(null);
         setDataFilterLoading(false);
@@ -571,21 +644,31 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [selectedModelId, dataFilter, dataFilterCandidateKey, modelsVersion]);
+  }, [selectedModelId, dataFilter, dataFilterCandidateKey, modelsVersion, dataSource]);
 
   const flightMatchesDataFilter = (flight: Flight): boolean =>
     !dataFilter || dataMatchedFlightIds == null || dataMatchedFlightIds.has(flight.id);
 
   const getFlightsForAircraft = (acId: number): Flight[] =>
-    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesFilter(f) && flightMatchesDataFilter(f));
+    dataSource === 'server'
+      ? serverFlights.filter((flight) => flight.aircraft_id === acId)
+      : flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesFilter(f) && flightMatchesDataFilter(f));
 
   const filteredAircraft = aircraft.filter((ac) => {
+    if (dataSource === 'server' && !serverFlights.some((flight) => flight.aircraft_id === ac.id)) return false;
     if (!aircraftSearch.trim()) return true;
     const t = aircraftSearch.trim().toLowerCase();
     return ac.name.toLowerCase().includes(t);
   });
 
   const getAircraftStats = (acId: number) => {
+    if (dataSource === 'server') {
+      const summary = serverAircraftSummaries.find((item) => item.aircraft_id === acId);
+      return {
+        count: summary?.matched_count ?? 0,
+        hours: (summary?.matched_duration_sec ?? 0) / 3600,
+      };
+    }
     const acFlights = getFlightsForAircraft(acId);
     const hours = acFlights.reduce((s, f) => s + (f.duration_sec ?? 0), 0) / 3600;
     return { count: acFlights.length, hours };
@@ -593,8 +676,12 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
   const globalStats = {
     totalAircraft: models.reduce((s, m) => s + (m.aircraft_count ?? 0), 0),
-    totalFlights: flights.length,
-    totalHours: flights.reduce((s, f) => s + (f.duration_sec ?? 0), 0) / 3600,
+    totalFlights: dataSource === 'server'
+      ? models.reduce((sum, model) => sum + (model.total_flights ?? 0), 0)
+      : flights.length,
+    totalHours: dataSource === 'server'
+      ? models.reduce((sum, model) => sum + (model.total_flight_hours ?? 0), 0) / 3600
+      : flights.reduce((s, f) => s + (f.duration_sec ?? 0), 0) / 3600,
   };
 
   const startEditRecord = (f: Flight) => {
@@ -651,6 +738,91 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     }
   };
 
+  const toggleServerFlight = (flightId: number) => {
+    const flight = serverFlights.find((item) => item.id === flightId);
+    if (!flight || flight.downloaded) return;
+    setSelectedServerFlightIds((current) => {
+      const next = new Set(current);
+      if (next.has(flightId)) next.delete(flightId);
+      else next.add(flightId);
+      return next;
+    });
+  };
+
+  const selectServerPage = () => {
+    setSelectedServerFlightIds(new Set(
+      serverFlights.filter((flight) => !flight.downloaded).map((flight) => flight.id),
+    ));
+  };
+
+  const downloadSelectedServerFlights = async () => {
+    if (selectedServerFlightIds.size === 0 || !selectedModelId || syncBusy) return;
+    const remoteModel = models.find((model) => model.id === selectedModelId);
+    if (!remoteModel?.model_synced) {
+      alert('请先在左侧机型列表中点击“同步机型”，成功后再下载架次。');
+      return;
+    }
+    const flightIds = Array.from(selectedServerFlightIds).filter((flightId) =>
+      serverFlights.some((flight) => flight.id === flightId && !flight.downloaded),
+    );
+    if (flightIds.length === 0) {
+      setSelectedServerFlightIds(new Set());
+      return;
+    }
+
+    let result: RemoteDownloadResult | null = null;
+    await executeSyncOperation(
+      'pull',
+      async (operationId) => {
+        const downloadResult = await downloadRemoteFlights(selectedModelId, flightIds, operationId);
+        result = downloadResult;
+        return downloadResult;
+      },
+      {
+        onSuccess: async () => {
+          await onModelsChanged();
+          await runServerSearch(selectedModelId, serverPage);
+          const created = result?.report?.created?.flights ?? 0;
+          const updated = result?.report?.updated?.flights ?? 0;
+          const skipped = result?.report?.already_downloaded?.flights ?? 0;
+          const warnings = result?.report?.warnings?.length ?? 0;
+          const statusText = result?.status === 'partial' && warnings > 0
+            ? `，有 ${warnings} 个文件警告`
+            : '';
+          const skippedText = skipped > 0 ? `，跳过本地已有 ${skipped} 个架次` : '';
+          alert(`下载完成：新增 ${created} 个架次，更新 ${updated} 个架次${skippedText}${statusText}。可切换到本地数据进行分析。`);
+        },
+        onFailure: async () => undefined,
+      },
+    );
+  };
+
+  const handleSyncRemoteModel = async (model: AircraftModel) => {
+    if (syncingModelId !== null) return;
+    setSyncingModelId(model.id);
+    try {
+      const result = await syncRemoteModel(model.id);
+      await loadModels();
+      await onModelsChanged();
+      const actionText = result.action === 'created'
+        ? '已在本地创建机型'
+        : result.action === 'linked'
+          ? '已关联本地同结构机型'
+          : '已更新本地机型定义';
+      alert(`${actionText}：${model.name}`);
+    } catch (error: unknown) {
+      alert('同步机型失败：' + errorMessage(error));
+    } finally {
+      setSyncingModelId(null);
+    }
+  };
+
+  const serverPageCount = Math.max(1, Math.ceil(serverTotal / 50));
+  const serverDownloadablePageCount = serverFlights.filter((flight) => !flight.downloaded).length;
+  const showServerDownloadProgress = dataSource === 'server'
+    && !!syncProgress
+    && (syncBusy === 'pull' || syncProgress.status === 'failed');
+
   return (
     <div className="h-full flex">
       <ModelList
@@ -665,6 +837,9 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
         canDeleteModels={canDeleteModels}
         canImportSyncPackage={canImportSyncPackage}
         serverOnline={serverOnline}
+        readOnly={dataSource === 'server'}
+        syncable={dataSource === 'server'}
+        syncingModelId={syncingModelId}
         onExport={openExportDialog}
         onImport={openSyncImportDialog}
         onSearchChange={setModelSearch}
@@ -676,10 +851,34 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
         onRequestDelete={setDeletingModelId}
         onDelete={handleDeleteModel}
         onCancelDelete={() => setDeletingModelId(null)}
+        onSyncModel={handleSyncRemoteModel}
       />
 
       {/* Right: Aircraft & Flights */}
       <main className="flex-1 overflow-y-auto p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="inline-flex rounded border border-gray-300 bg-gray-100 p-0.5" aria-label="数据源">
+            <button
+              type="button"
+              onClick={() => setDataSource('local')}
+              className={`px-3 py-1 text-xs rounded ${dataSource === 'local' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            >
+              本地数据
+            </button>
+            <button
+              type="button"
+              onClick={() => setDataSource('server')}
+              disabled={!serverOnline}
+              title={serverOnline ? '查看服务器数据' : '服务器离线或未登录'}
+              className={`px-3 py-1 text-xs rounded disabled:cursor-not-allowed disabled:opacity-40 ${dataSource === 'server' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            >
+              服务器数据
+            </button>
+          </div>
+          {dataSource === 'server' && (
+            <span className="text-xs text-gray-500">服务器数据为只读，下载后可在本地分析</span>
+          )}
+        </div>
         {!selectedModel ? (
           <div className="flex items-center justify-center h-full text-gray-400 text-sm">
             选择一个机型查看其飞机列表
@@ -687,21 +886,64 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
         ) : (
           <>
             {/* Model name header */}
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">{selectedModel.name}</h2>
+            <div className="mb-4 flex min-h-8 flex-wrap items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold text-gray-900">{selectedModel.name}</h2>
+              {dataSource === 'server' && (
+                <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
+                  <div className="text-gray-500">
+                    共 <span className="font-medium text-gray-800">{serverTotal}</span> 个架次，
+                    总航时 <span className="font-medium text-gray-800">{(serverDurationSec / 3600).toFixed(1)}</span> 小时
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={selectServerPage}
+                      disabled={serverDownloadablePageCount === 0 || !!syncBusy || !selectedModel.model_synced}
+                      title={selectedModel.model_synced ? '选择当前页未下载的架次' : '请先在左侧同步机型'}
+                      className="text-blue-600 hover:text-blue-500 disabled:text-gray-300"
+                    >
+                      选择当前页
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedServerFlightIds(new Set())}
+                      disabled={selectedServerFlightIds.size === 0 || !!syncBusy || !selectedModel.model_synced}
+                      title={selectedModel.model_synced ? '下载选中的架次到本地' : '请先在左侧同步机型'}
+                      className="text-gray-500 hover:text-gray-700 disabled:text-gray-300"
+                    >
+                      清空选择
+                    </button>
+                    <button
+                      type="button"
+                      onClick={downloadSelectedServerFlights}
+                      disabled={selectedServerFlightIds.size === 0 || !!syncBusy}
+                      className="px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      {syncBusy === 'pull' ? '正在下载...' : `下载选中架次 (${selectedServerFlightIds.size})`}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            {showServerDownloadProgress && syncProgress && (
+              <div className="mb-4">
+                <SyncProgress progress={syncProgress} busy={syncBusy} />
+              </div>
+            )}
 
             {/* Left-right split: aircraft | columns (60:40) */}
             <div className="flex gap-6" style={{ height: 'calc(100% - 2.5rem)' }}>
               {/* Left: Aircraft & Flights (60%) */}
               <div className="min-w-0 overflow-y-auto" style={{ flex: '6' }}>
                 {/* Add aircraft button */}
-                <div className="flex items-center justify-end mb-3">
+                {dataSource === 'local' && <div className="flex items-center justify-end mb-3">
                   <button
                     onClick={() => setShowAddAircraft(true)}
                     className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500"
                   >
                     + 添加飞机
                   </button>
-                </div>
+                </div>}
 
                 {/* Search & Filter Toolbar */}
                 <div className="flex items-center gap-3 mb-4 flex-wrap">
@@ -740,6 +982,16 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       清除时间筛选
                     </button>
                   )}
+                  {dataSource === 'server' && (
+                    <button
+                      type="button"
+                      onClick={() => selectedModelId && runServerSearch(selectedModelId, 1)}
+                      disabled={serverQueryLoading}
+                      className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      {serverQueryLoading ? '查询中...' : '查询'}
+                    </button>
+                  )}
                 </div>
 
                 {/* Collapsible record-field filter (text: contains; numeric: > ≥ < ≤ = ~) */}
@@ -749,10 +1001,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                   dataColumnGroups={columnGroups}
                   dataFilter={dataFilter}
                   onDataFilterChange={setDataFilter}
-                  dataFilterLoading={dataFilterLoading}
-                  dataFilterError={dataFilterError}
+                  dataFilterLoading={dataSource === 'server' ? serverQueryLoading : dataFilterLoading}
+                  dataFilterError={dataSource === 'server' ? serverQueryError : dataFilterError}
                 />
-                {showAddAircraft && (
+                {showAddAircraft && dataSource === 'local' && (
                   <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg space-y-2">
                     <input
                       type="text" value={newSerial}
@@ -769,7 +1021,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                 )}
 
                 <AircraftList
-                  aircraft={aircraft}
+                  aircraft={dataSource === 'server' ? filteredAircraft : aircraft}
                   filteredAircraft={filteredAircraft}
                   expandedAircraftIds={expandedAc}
                   editingAircraftId={editingAcId}
@@ -788,6 +1040,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                   canDeleteAircraft={canDeleteAircraft}
                   canDeleteFlights={canDeleteFlights}
                   serverOnline={serverOnline}
+                  readOnly={dataSource === 'server'}
+                  selectable={dataSource === 'server' && !!selectedModel.model_synced}
+                  selectedFlightIds={selectedServerFlightIds}
+                  onSelectFlight={toggleServerFlight}
                   getFlightsForAircraft={getFlightsForAircraft}
                   getAircraftStats={getAircraftStats}
                   onToggleAircraft={toggleExpand}
@@ -813,11 +1069,32 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                   onDeleteFlight={handleDeleteFlight}
                   onCancelDeleteFlight={() => setDeletingFlightId(null)}
                 />
+                {dataSource === 'server' && serverTotal > 0 && (
+                  <div className="mt-4 flex items-center justify-center gap-3 text-xs text-gray-500">
+                    <button
+                      type="button"
+                      disabled={serverPage <= 1 || serverQueryLoading}
+                      onClick={() => selectedModelId && runServerSearch(selectedModelId, serverPage - 1)}
+                      className="px-2 py-1 border border-gray-300 rounded disabled:opacity-40"
+                    >
+                      上一页
+                    </button>
+                    <span>第 {serverPage} / {serverPageCount} 页</span>
+                    <button
+                      type="button"
+                      disabled={serverPage >= serverPageCount || serverQueryLoading}
+                      onClick={() => selectedModelId && runServerSearch(selectedModelId, serverPage + 1)}
+                      className="px-2 py-1 border border-gray-300 rounded disabled:opacity-40"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                )}
               </div>
 
               <ColumnEditor
                 groups={columnGroups}
-                canEdit={canEditColumns}
+                canEdit={dataSource === 'local' && canEditColumns}
                 editing={isEditingColumns}
                 editData={columnEditData}
                 showOriginalName={showOriginalName}
