@@ -66,7 +66,7 @@ def get_model_columns(conn, model_id: int) -> list[dict] | None:
     rows = conn.execute(
         """SELECT dtr.data_type_key, dtr.display_label, dtr.table_name,
                   cr.column_name, cr.display_label as col_label, cr.unit,
-                  cr.data_type, cr.ordinal, cr.scale_factor
+                  cr.data_type, cr.ordinal, cr.is_numeric, cr.scale_factor
            FROM data_table_registry dtr
            JOIN column_registry cr ON cr.model_id=dtr.model_id AND cr.data_type_key=dtr.data_type_key
            WHERE dtr.model_id=? ORDER BY dtr.data_type_key, cr.ordinal""",
@@ -79,6 +79,7 @@ def get_model_columns(conn, model_id: int) -> list[dict] | None:
         groups[key]["columns"].append({
             "column_name": row["column_name"], "display_label": row["col_label"],
             "unit": row["unit"] or "", "data_type": row["data_type"], "ordinal": row["ordinal"],
+            "is_numeric": bool(row["is_numeric"]),
             "scale_factor": row["scale_factor"] if row["scale_factor"] is not None else 1.0,
         })
     return list(groups.values())

@@ -268,28 +268,12 @@ def _generate_flight_grid(conn, flight_id, data_tables):
 
 # ── Aligned data ──
 
-def get_aligned_data(flight_id, column_keys, filter_spec=None):
-    """Align selected columns to the flight's unified 1-second time series.
-
-    Args:
-        flight_id: Flight ID
-        column_keys: List of "data_type_key.column_name" strings
-        filter_spec: Optional filter with {logic, conditions}
-
-    Returns:
-        {times, ref_secs, series: {key: {label, unit, table, values}}, alerts}
-    """
-    conn = get_db()
-    model_id = _get_model_id(conn, flight_id)
-    if model_id is None:
-        conn.close()
-        return {'times': [], 'series': {}, 'alerts': [], 'error': 'Flight not found'}
-
+def _build_aligned_series(conn, model_id, flight_id, column_keys):
+    """Build the shared 1-second grid and only the requested data series."""
     data_tables = _get_available_data_tables(conn, model_id, flight_id)
     ref_secs, times, axis_start_sec = _generate_flight_grid(conn, flight_id, data_tables)
     if not ref_secs or axis_start_sec is None:
-        conn.close()
-        return {'times': [], 'series': {}, 'alerts': []}
+        return {'times': [], 'ref_secs': [], 'series': {}}, None
 
     # Group column_keys by data_type_key
     by_dt = defaultdict(list)
@@ -372,6 +356,35 @@ def get_aligned_data(flight_id, column_keys, filter_spec=None):
                 entry['text_values'] = values
             series[full_key] = entry
 
+    return {
+        'times': times,
+        'ref_secs': ref_secs,
+        'series': series,
+    }, axis_start_sec
+
+
+def get_aligned_data(flight_id, column_keys, filter_spec=None):
+    """Align selected columns to the flight's unified 1-second time series.
+
+    Args:
+        flight_id: Flight ID
+        column_keys: List of "data_type_key.column_name" strings
+        filter_spec: Optional filter with {logic, conditions}
+
+    Returns:
+        {times, ref_secs, series: {key: {label, unit, table, values}}, alerts}
+    """
+    conn = get_db()
+    model_id = _get_model_id(conn, flight_id)
+    if model_id is None:
+        conn.close()
+        return {'times': [], 'series': {}, 'alerts': [], 'error': 'Flight not found'}
+
+    result, axis_start_sec = _build_aligned_series(conn, model_id, flight_id, column_keys)
+    if axis_start_sec is None:
+        conn.close()
+        return {'times': [], 'series': {}, 'alerts': []}
+
     # Get alerts — locate the alert data type by its is_alert flag
     # (type-agnostic; works for any alert-named file pattern).
     alert_dt_key, alert_table = _get_alert_data_type(conn, model_id)
@@ -414,12 +427,7 @@ def get_aligned_data(flight_id, column_keys, filter_spec=None):
 
     conn.close()
 
-    result = {
-        'times': times,
-        'ref_secs': ref_secs,
-        'series': series,
-        'alerts': alerts,
-    }
+    result['alerts'] = alerts
 
     if filter_spec:
         result = apply_filter(result, filter_spec)
@@ -427,7 +435,7 @@ def get_aligned_data(flight_id, column_keys, filter_spec=None):
     return result
 
 
-def apply_filter(aligned, filter_spec):
+def apply_filter(aligned, filter_spec, *, missing_is_false=False):
     """Compute filter mask and segments from aligned data."""
     n = len(aligned['times'])
     if n == 0:
@@ -447,6 +455,8 @@ def apply_filter(aligned, filter_spec):
 
         series_entry = aligned['series'].get(col)
         if not series_entry:
+            if missing_is_false:
+                masks.append([False] * n)
             continue
 
         values = series_entry['values']
@@ -495,6 +505,95 @@ def apply_filter(aligned, filter_spec):
     aligned['mask'] = combined
     aligned['segments'] = segments
     return aligned
+
+
+def _filter_conditions(filter_spec):
+    if isinstance(filter_spec, dict):
+        return filter_spec.get('conditions', [])
+    return getattr(filter_spec, 'conditions', [])
+
+
+def _validate_data_filter(conn, model_id, filter_spec):
+    conditions = _filter_conditions(filter_spec)
+    if not conditions:
+        raise ValueError("At least one data filter condition is required")
+
+    column_keys = []
+    for condition in conditions:
+        if isinstance(condition, dict):
+            column = condition.get('column')
+            op = condition.get('op')
+            value = condition.get('value')
+            min_val = condition.get('min_val')
+            max_val = condition.get('max_val')
+        else:
+            column = condition.column
+            op = condition.op
+            value = condition.value
+            min_val = condition.min_val
+            max_val = condition.max_val
+
+        if not column or '.' not in column:
+            raise ValueError(f"Invalid data column: {column or ''}")
+        data_type_key, column_name = column.split('.', 1)
+        registered = conn.execute(
+            """SELECT cr.is_numeric
+               FROM column_registry cr
+               JOIN data_table_registry dtr
+                 ON dtr.model_id=cr.model_id AND dtr.data_type_key=cr.data_type_key
+               WHERE cr.model_id=? AND cr.data_type_key=? AND cr.column_name=?""",
+            (model_id, data_type_key, column_name),
+        ).fetchone()
+        if not registered:
+            raise ValueError(f"Data column does not belong to model {model_id}: {column}")
+        if not registered['is_numeric']:
+            raise ValueError(f"Data column is not numeric: {column}")
+        if op == 'between':
+            if min_val is None or max_val is None:
+                raise ValueError(f"Range filter requires both bounds: {column}")
+            if min_val > max_val:
+                raise ValueError(f"Range filter minimum exceeds maximum: {column}")
+        elif value is None:
+            raise ValueError(f"Filter value is required: {column}")
+        column_keys.append(column)
+
+    return list(dict.fromkeys(column_keys))
+
+
+def match_flights_by_data(model_id, flight_ids, filter_spec):
+    """Return flights having at least one aligned second matching the filter."""
+    unique_flight_ids = list(dict.fromkeys(flight_ids))
+    if not unique_flight_ids:
+        return []
+
+    conn = get_db()
+    try:
+        valid_ids = set()
+        for offset in range(0, len(unique_flight_ids), 900):
+            batch = unique_flight_ids[offset:offset + 900]
+            placeholders = ','.join('?' for _ in batch)
+            rows = conn.execute(
+                f"""SELECT f.id
+                    FROM flights f
+                    JOIN aircraft a ON a.id=f.aircraft_id
+                    WHERE a.model_id=? AND f.id IN ({placeholders})""",
+                [model_id, *batch],
+            ).fetchall()
+            valid_ids.update(row['id'] for row in rows)
+        invalid_ids = [flight_id for flight_id in unique_flight_ids if flight_id not in valid_ids]
+        if invalid_ids:
+            raise ValueError(f"Flights do not belong to model {model_id}: {invalid_ids}")
+
+        column_keys = _validate_data_filter(conn, model_id, filter_spec)
+        matching = []
+        for flight_id in unique_flight_ids:
+            aligned, _ = _build_aligned_series(conn, model_id, flight_id, column_keys)
+            apply_filter(aligned, filter_spec, missing_is_false=True)
+            if any(aligned.get('mask', [])):
+                matching.append(flight_id)
+        return matching
+    finally:
+        conn.close()
 
 
 # ── Flight stats ──

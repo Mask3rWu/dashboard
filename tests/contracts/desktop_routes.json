@@ -58,6 +58,7 @@
   {"methods": ["PATCH"], "path": "/api/flights/{flight_id}/record"},
   {"methods": ["POST"], "path": "/api/flights/scan"},
   {"methods": ["POST"], "path": "/api/flights/import"},
+  {"methods": ["POST"], "path": "/api/flights/data-matches"},
   {"methods": ["GET"], "path": "/api/flights/{flight_id}/columns"},
   {"methods": ["POST"], "path": "/api/flights/{flight_id}/aligned"},
   {"methods": ["GET"], "path": "/api/flights/{flight_id}/alerts"},

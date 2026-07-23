@@ -5,6 +5,7 @@ export interface ColumnItem { key: string; label: string; unit: string; scale_fa
 export interface AlignedData { times: string[]; ref_secs: number[]; series: Record<string, { label: string; unit: string; scale_factor: number; is_numeric: boolean; table: string; values: (number | null)[]; text_values?: (string | null)[] }>; mask?: boolean[]; segments?: { start: number; end: number }[]; }
 export interface FilterCondition { column: string; op: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'between'; value: number | null; min_val: number | null; max_val: number | null; }
 export interface FilterSpec { logic: 'and' | 'or'; conditions: FilterCondition[]; }
+export interface FlightDataMatchResult { flight_ids: number[]; evaluated_count: number; matched_count: number; }
 export interface FilterPreset { id: number; model_id: number; name: string; config: FilterSpec; }
 export interface FlightStats { duration_sec: number; start_time: string; end_time: string; drone_id: string; name: string; }
 export interface Preset { id: number; model_id: number; name: string; columns: string[]; }
@@ -14,6 +15,7 @@ export interface CompareSeries { flight_id: number; name: string; times_sec: num
 export const getRegistryColumns = (modelId: number) => request<{ columns: ColumnGroup[] }>(`/registry/columns?model_id=${modelId}`);
 export const getColumns = (flightId: number) => request<{ columns: ColumnGroup[] }>(`/flights/${flightId}/columns`);
 export const getAlignedData = (flightId: number, columnKeys: string[], filter?: FilterSpec) => request<AlignedData>(`/flights/${flightId}/aligned`, { method: 'POST', body: JSON.stringify({ column_keys: columnKeys, filter: filter || undefined }) });
+export const matchFlightsByData = (modelId: number, flightIds: number[], filter: FilterSpec) => request<FlightDataMatchResult>('/flights/data-matches', { method: 'POST', body: JSON.stringify({ model_id: modelId, flight_ids: flightIds, filter }) });
 export const getStats = (flightId: number) => request<FlightStats>(`/flights/${flightId}/stats`);
 export const getCorrelation = (flightId: number, columnKeys: string[]) => request<CorrelationData>(`/flights/${flightId}/correlation`, { method: 'POST', body: JSON.stringify({ column_keys: columnKeys }) });
 export const getAnomaly = (flightId: number, columnKey: string, windowSize = 30, sigma = 3.0) => request<AnomalyData>(`/flights/${flightId}/anomaly`, { method: 'POST', body: JSON.stringify({ column_key: columnKey, window_size: windowSize, sigma }) });

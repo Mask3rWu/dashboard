@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useEffectEvent } from 'react';
+import { useState, useEffect, useCallback, useEffectEvent, useRef } from 'react';
 import { listModels, updateModel, deleteModel, listAircraft, createAircraft, updateAircraft, deleteAircraft, getModelColumns, updateModelColumn, updateModelDataTypeLabel, type AircraftModel, type Aircraft, type DataTypeGroup, type DeleteScope } from '../api/models';
 import { deleteFlight, updateFlight, updateFlightRecord, getRawFiles, openRawFolder, FLIGHT_FILTER_FIELDS, type Flight, type FlightRecordFields, type RawFileItem, type FlightFilterSpec } from '../api/flights';
+import { matchFlightsByData, type FilterSpec } from '../api/analysis';
 import { browseFile } from '../api/imports';
 import { getSyncExportTree, exportSyncPackage, previewSyncImport, importSyncPackage, type SyncExportModelNode, type SyncExportResult, type SyncImportPreview, type SyncImportReport } from '../api/sync';
 import { deleteScopeFor } from '../syncStatus';
-import FlightFilterBar from '../components/FlightFilterBar';
+import FlightFilterBar, { FilterRulesHelp } from '../components/FlightFilterBar';
 import { emptyRecord, recordFromFlight } from '../features/flights/recordFields';
 import AircraftList from '../features/models/AircraftList';
 import ModelExportDialog from '../features/models/ModelExportDialog';
@@ -279,6 +280,11 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
   const [timeFilterStart, setTimeFilterStart] = useState('');
   const [timeFilterEnd, setTimeFilterEnd] = useState('');
   const [flightFilter, setFlightFilter] = useState<FlightFilterSpec | null>(null);
+  const [dataFilter, setDataFilter] = useState<FilterSpec | null>(null);
+  const [dataMatchedFlightIds, setDataMatchedFlightIds] = useState<Set<number> | null>(null);
+  const [dataFilterLoading, setDataFilterLoading] = useState(false);
+  const [dataFilterError, setDataFilterError] = useState<string | null>(null);
+  const dataFilterRequestRef = useRef(0);
 
   const loadModels = async () => {
     try {
@@ -321,6 +327,10 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     setTimeFilterStart('');
     setTimeFilterEnd('');
     setFlightFilter(null);
+    setDataFilter(null);
+    setDataMatchedFlightIds(null);
+    setDataFilterLoading(false);
+    setDataFilterError(null);
     setIsEditingColumns(false);
     setColumnEditData({});
     setShowOriginalName(true);
@@ -514,8 +524,60 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
     return flightFilter.logic === 'and' ? results.every(Boolean) : results.some(Boolean);
   };
 
+  const dataFilterCandidateIds = flights
+    .filter((flight) => flight.model_id === selectedModelId && flightOverlapsTimeFilter(flight) && flightMatchesFilter(flight))
+    .map((flight) => flight.id);
+  const dataFilterCandidateKey = dataFilterCandidateIds.join(',');
+
+  useEffect(() => {
+    const requestId = ++dataFilterRequestRef.current;
+    const candidateIds = dataFilterCandidateKey
+      ? dataFilterCandidateKey.split(',').map((value) => Number(value))
+      : [];
+    if (!selectedModelId || !dataFilter) {
+      const resetTimer = window.setTimeout(() => {
+        setDataMatchedFlightIds(null);
+        setDataFilterLoading(false);
+        setDataFilterError(null);
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
+    }
+
+    if (candidateIds.length === 0) {
+      const emptyTimer = window.setTimeout(() => {
+        setDataMatchedFlightIds(new Set());
+        setDataFilterLoading(false);
+        setDataFilterError(null);
+      }, 0);
+      return () => window.clearTimeout(emptyTimer);
+    }
+
+    const modelId = selectedModelId;
+    const timer = window.setTimeout(() => {
+      setDataFilterLoading(true);
+      setDataFilterError(null);
+      matchFlightsByData(modelId, candidateIds, dataFilter)
+        .then((result) => {
+          if (dataFilterRequestRef.current !== requestId) return;
+          setDataMatchedFlightIds(new Set(result.flight_ids));
+        })
+        .catch((error: unknown) => {
+          if (dataFilterRequestRef.current !== requestId) return;
+          setDataFilterError(errorMessage(error));
+        })
+        .finally(() => {
+          if (dataFilterRequestRef.current === requestId) setDataFilterLoading(false);
+        });
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [selectedModelId, dataFilter, dataFilterCandidateKey, modelsVersion]);
+
+  const flightMatchesDataFilter = (flight: Flight): boolean =>
+    !dataFilter || dataMatchedFlightIds == null || dataMatchedFlightIds.has(flight.id);
+
   const getFlightsForAircraft = (acId: number): Flight[] =>
-    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesFilter(f));
+    flights.filter((f) => f.aircraft_id === acId && flightOverlapsTimeFilter(f) && flightMatchesFilter(f) && flightMatchesDataFilter(f));
 
   const filteredAircraft = aircraft.filter((ac) => {
     if (!aircraftSearch.trim()) return true;
@@ -669,6 +731,7 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                       className="w-44 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-blue-500"
                     />
                   </div>
+                  <FilterRulesHelp />
                   {isTimeFilterActive && (
                     <button
                       onClick={() => { setTimeFilterStart(''); setTimeFilterEnd(''); }}
@@ -680,7 +743,15 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
                 </div>
 
                 {/* Collapsible record-field filter (text: contains; numeric: > ≥ < ≤ = ~) */}
-                <FlightFilterBar value={flightFilter} onChange={setFlightFilter} />
+                <FlightFilterBar
+                  value={flightFilter}
+                  onChange={setFlightFilter}
+                  dataColumnGroups={columnGroups}
+                  dataFilter={dataFilter}
+                  onDataFilterChange={setDataFilter}
+                  dataFilterLoading={dataFilterLoading}
+                  dataFilterError={dataFilterError}
+                />
                 {showAddAircraft && (
                   <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg space-y-2">
                     <input

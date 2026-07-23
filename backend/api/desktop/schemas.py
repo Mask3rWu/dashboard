@@ -3,7 +3,9 @@
 Schemas are migrated here incrementally while router modules are extracted.
 """
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class RuntimeConfigUpdate(BaseModel):
@@ -160,6 +162,25 @@ class FlightRecordRequest(BaseModel):
 class AlignedRequest(BaseModel):
     column_keys: list[str]
     filter: dict | None = None
+
+
+class DataFilterCondition(BaseModel):
+    column: str
+    op: Literal["gt", "gte", "lt", "lte", "eq", "between"]
+    value: float | None = None
+    min_val: float | None = None
+    max_val: float | None = None
+
+
+class DataFilterSpec(BaseModel):
+    logic: Literal["and", "or"] = "and"
+    conditions: list[DataFilterCondition] = Field(min_length=1, max_length=20)
+
+
+class FlightDataMatchesRequest(BaseModel):
+    model_id: int
+    flight_ids: list[int] = Field(max_length=5000)
+    filter: DataFilterSpec
 
 
 class CorrelationRequest(BaseModel):

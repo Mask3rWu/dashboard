@@ -1,16 +1,25 @@
 import { useState, useEffect, useRef } from 'react';
+import { CircleHelp } from 'lucide-react';
 import {
   FLIGHT_FILTER_FIELDS,
   type FlightFilterCondition,
   type FlightFilterField,
   type FlightFilterSpec,
 } from '../api/flights';
+import type { FilterCondition, FilterSpec } from '../api/analysis';
+import type { DataTypeGroup } from '../api/models';
+import DataItemFilter from './DataItemFilter';
 
 type FlightCondition = FlightFilterCondition;
 
 interface Props {
   value: FlightFilterSpec | null;
   onChange: (spec: FlightFilterSpec | null) => void;
+  dataColumnGroups: DataTypeGroup[];
+  dataFilter: FilterSpec | null;
+  onDataFilterChange: (spec: FilterSpec | null) => void;
+  dataFilterLoading?: boolean;
+  dataFilterError?: string | null;
 }
 
 const NUMERIC_OPS: { value: FlightFilterCondition['op']; label: string; title: string }[] = [
@@ -57,7 +66,54 @@ function condSummary(c: FlightFilterCondition): string {
   return `${label} ${opLabel} ${val}`;
 }
 
-export default function FlightFilterBar({ value, onChange }: Props) {
+function dataCondSummary(condition: FilterCondition, groups: DataTypeGroup[]): string {
+  const separator = condition.column.indexOf('.');
+  const dataTypeKey = separator >= 0 ? condition.column.slice(0, separator) : '';
+  const columnName = separator >= 0 ? condition.column.slice(separator + 1) : condition.column;
+  const group = groups.find((item) => item.data_type_key === dataTypeKey);
+  const column = group?.columns.find((item) => item.column_name === columnName);
+  const label = column?.display_label || columnName;
+  const qualifiedLabel = group ? `${group.label}/${label}` : label;
+  const opLabel = NUMERIC_OPS.find((item) => item.value === condition.op)?.label ?? condition.op;
+  const value = condition.op === 'between'
+    ? `${condition.min_val}~${condition.max_val}`
+    : condition.value;
+  return `${qualifiedLabel} ${opLabel} ${value}`;
+}
+
+export function FilterRulesHelp() {
+  return (
+    <div className="relative group shrink-0">
+      <button
+        type="button"
+        aria-label="查看筛选规则"
+        className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-blue-600 rounded hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-200"
+      >
+        <CircleHelp className="w-4 h-4" />
+      </button>
+      <div
+        role="tooltip"
+        className="hidden group-hover:block group-focus-within:block absolute right-0 top-full z-50 mt-1 w-80 rounded border border-gray-200 bg-white p-3 text-xs leading-5 text-gray-600 shadow-lg"
+      >
+        <div className="font-medium text-gray-800 mb-1">架次筛选规则</div>
+        <div>时间范围、飞行记录单和数据项筛选之间取交集。</div>
+        <div>数据项 AND：必须在同一时间点同时满足全部条件。</div>
+        <div>数据项 OR：任一时间点满足任一条件即可。</div>
+        <div>至少一个约 1 秒的对齐采样点满足即命中；缺失数据不满足条件。</div>
+      </div>
+    </div>
+  );
+}
+
+export default function FlightFilterBar({
+  value,
+  onChange,
+  dataColumnGroups,
+  dataFilter,
+  onDataFilterChange,
+  dataFilterLoading = false,
+  dataFilterError,
+}: Props) {
   const [expanded, setExpanded] = useState(false);
   const [logic, setLogic] = useState<'and' | 'or'>(value?.logic || 'and');
   const [conditions, setConditions] = useState<FlightCondition[]>(
@@ -65,9 +121,14 @@ export default function FlightFilterBar({ value, onChange }: Props) {
   );
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const suppressEmitRef = useRef(false);
+  const lastEmittedValueRef = useRef<FlightFilterSpec | null | undefined>(undefined);
 
   // Sync from parent when value changes externally (e.g. reset on model switch).
   useEffect(() => {
+    if (value === lastEmittedValueRef.current) {
+      lastEmittedValueRef.current = undefined;
+      return;
+    }
     suppressEmitRef.current = true;
     const timer = window.setTimeout(() => {
       if (value) {
@@ -92,7 +153,9 @@ export default function FlightFilterBar({ value, onChange }: Props) {
     }
     debounceRef.current = setTimeout(() => {
       const valid = conditions.filter(isCondValid);
-      onChange(valid.length > 0 ? { logic, conditions: valid } : null);
+      const nextValue = valid.length > 0 ? { logic, conditions: valid } : null;
+      lastEmittedValueRef.current = nextValue;
+      onChange(nextValue);
     }, 400);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [conditions, logic, onChange]);
@@ -113,6 +176,7 @@ export default function FlightFilterBar({ value, onChange }: Props) {
   const clearAll = () => {
     setConditions([]);
     setLogic('and');
+    lastEmittedValueRef.current = null;
     onChange(null);
   };
 
@@ -128,54 +192,76 @@ export default function FlightFilterBar({ value, onChange }: Props) {
 
   const activeConditions = conditions.filter(isCondValid);
   const activeCount = activeConditions.length;
+  const dataActiveCount = dataFilter?.conditions.length ?? 0;
+  const totalActiveCount = activeCount + dataActiveCount;
+  const recordExpression = activeConditions.map(condSummary).join(logic === 'and' ? ' AND ' : ' OR ');
+  const dataExpression = dataFilter?.conditions
+    .map((condition) => dataCondSummary(condition, dataColumnGroups))
+    .join(dataFilter.logic === 'and' ? ' AND ' : ' OR ') ?? '';
 
   return (
-    <div className="mb-4 border border-gray-200 rounded-lg bg-white overflow-hidden">
+    <div className="mb-4 border border-gray-200 rounded-lg bg-white overflow-visible">
       {/* Collapsed bar */}
       {!expanded && (
-        <button
-          onClick={() => setExpanded(true)}
-          className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50 transition-colors"
-        >
-          <span className="font-mono text-gray-400">▸</span>
-          {activeCount > 0 ? (
-            <span>
-              筛选: <strong className="text-gray-700">{activeCount}</strong> 条件
-              (<span className="text-blue-600 font-medium">{logic.toUpperCase()}</span>)
+        <div className="flex items-center rounded-lg overflow-visible">
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="min-w-0 flex-1 flex items-center gap-2 px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50 transition-colors rounded-lg"
+          >
+            <span className="font-mono text-gray-400">▸</span>
+            <span className="shrink-0">
+              架次筛选: <strong className="text-gray-700">{totalActiveCount}</strong> 条件
             </span>
-          ) : (
-            <span>记录筛选</span>
-          )}
-          {activeCount > 0 && (
-            <span className="text-gray-400 ml-1 truncate">
-              - {activeConditions.map(condSummary).join(logic === 'and' ? ' AND ' : ' OR ')}
+            <span className="shrink-0 text-gray-400">
+              记录单 {activeCount} 条 · 数据项 {dataActiveCount} 条
             </span>
-          )}
-        </button>
+            {totalActiveCount > 0 && (
+              <span className="text-gray-400 ml-1 truncate">
+                {recordExpression && `记录单: ${recordExpression}`}
+                {recordExpression && dataExpression && ' · '}
+                {dataExpression && `数据项: ${dataExpression}`}
+              </span>
+            )}
+          </button>
+        </div>
       )}
 
       {/* Expanded panel */}
       {expanded && (
         <div className="px-3 py-2 space-y-2">
-          {/* Header */}
+          {/* Filter overview */}
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => setExpanded(false)}
               className="text-gray-400 hover:text-gray-600 text-xs font-mono"
             >
               ▾ 收起
             </button>
             <div className="h-4 w-px bg-gray-200" />
+            <span className="text-xs text-gray-500">
+              <strong className="text-gray-700">{totalActiveCount}</strong> 条件
+            </span>
+            <span className="text-xs text-gray-400">
+              记录单 {activeCount} 条 · 数据项 {dataActiveCount} 条
+            </span>
+          </div>
 
+          {/* Flight record controls */}
+          <div className="flex items-center gap-2 min-h-6">
+            <span className="text-xs font-medium text-gray-600">飞行记录单条件</span>
             {/* Logic toggle */}
             <div className="flex text-xs">
               <button
+                type="button"
                 onClick={() => setLogic('and')}
                 className={`px-2 py-0.5 rounded-l border ${logic === 'and' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
               >
                 AND（且）
               </button>
               <button
+                type="button"
                 onClick={() => setLogic('or')}
                 className={`px-2 py-0.5 rounded-r border-t border-b border-r ${logic === 'or' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
               >
@@ -185,7 +271,14 @@ export default function FlightFilterBar({ value, onChange }: Props) {
 
             <div className="flex-1" />
 
-            <button onClick={clearAll} className="text-xs text-gray-400 hover:text-red-500">清除全部</button>
+            <button
+              type="button"
+              onClick={clearAll}
+              disabled={conditions.length === 0}
+              className="text-xs text-gray-400 hover:text-red-500 disabled:text-gray-300 disabled:hover:text-gray-300"
+            >
+              清除记录单
+            </button>
           </div>
 
           {/* Conditions */}
@@ -223,6 +316,7 @@ export default function FlightFilterBar({ value, onChange }: Props) {
                   <div className="flex">
                     {NUMERIC_OPS.map((op) => (
                       <button
+                        type="button"
                         key={op.value}
                         title={op.title}
                         onClick={() => updateCond(i, { op: op.value, value: null, min_val: null, max_val: null })}
@@ -278,6 +372,7 @@ export default function FlightFilterBar({ value, onChange }: Props) {
                 ) : null}
 
                 <button
+                  type="button"
                   onClick={() => removeCond(i)}
                   className="text-gray-400 hover:text-red-500 font-bold text-sm"
                 >
@@ -289,11 +384,20 @@ export default function FlightFilterBar({ value, onChange }: Props) {
 
           {/* Add condition */}
           <button
+            type="button"
             onClick={addCond}
             className="text-xs text-blue-600 hover:text-blue-500 flex items-center gap-1"
           >
             + 添加条件
           </button>
+
+          <DataItemFilter
+            groups={dataColumnGroups}
+            value={dataFilter}
+            onChange={onDataFilterChange}
+            loading={dataFilterLoading}
+            error={dataFilterError}
+          />
         </div>
       )}
     </div>

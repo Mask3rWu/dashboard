@@ -8,6 +8,7 @@ from backend.api.desktop.schemas import (
     AnomalyRequest,
     CompareRequest,
     CorrelationRequest,
+    FlightDataMatchesRequest,
     FilterPresetCreate,
     PresetCreate,
 )
@@ -17,6 +18,23 @@ from backend.repositories import presets as preset_repository
 
 
 router = APIRouter()
+
+
+@router.post("/api/flights/data-matches")
+def get_data_matching_flights(req: FlightDataMatchesRequest):
+    try:
+        flight_ids = analysis.match_flights_by_data(
+            req.model_id,
+            req.flight_ids,
+            req.filter,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "flight_ids": flight_ids,
+        "evaluated_count": len(set(req.flight_ids)),
+        "matched_count": len(flight_ids),
+    }
 
 
 @router.get("/api/flights/{flight_id}/columns")

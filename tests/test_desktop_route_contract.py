@@ -40,6 +40,7 @@ def test_desktop_key_request_schemas_are_stable():
         {"session_key": "", "flight_date": None},
     )
     assert_schema(schemas.AlignedRequest, ["column_keys", "filter"], {"filter": None})
+    assert_schema(schemas.FlightDataMatchesRequest, ["model_id", "flight_ids", "filter"])
     assert_schema(
         schemas.SyncPushBatchRequest,
         [
