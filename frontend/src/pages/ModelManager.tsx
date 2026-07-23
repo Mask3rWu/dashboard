@@ -856,8 +856,8 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
 
       {/* Right: Aircraft & Flights */}
       <main className="flex-1 overflow-y-auto p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div className="inline-flex rounded border border-gray-300 bg-gray-100 p-0.5" aria-label="数据源">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="inline-flex shrink-0 rounded border border-gray-300 bg-gray-100 p-0.5" aria-label="数据源">
             <button
               type="button"
               onClick={() => setDataSource('local')}
@@ -885,56 +885,57 @@ export default function ModelManager({ onModelsChanged, onNavigateToFlight, flig
           </div>
         ) : (
           <>
-            {/* Model name header */}
-            <div className="mb-4 flex min-h-8 flex-wrap items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold text-gray-900">{selectedModel.name}</h2>
-              {dataSource === 'server' && (
-                <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
-                  <div className="text-gray-500">
-                    共 <span className="font-medium text-gray-800">{serverTotal}</span> 个架次，
-                    总航时 <span className="font-medium text-gray-800">{(serverDurationSec / 3600).toFixed(1)}</span> 小时
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={selectServerPage}
-                      disabled={serverDownloadablePageCount === 0 || !!syncBusy || !selectedModel.model_synced}
-                      title={selectedModel.model_synced ? '选择当前页未下载的架次' : '请先在左侧同步机型'}
-                      className="text-blue-600 hover:text-blue-500 disabled:text-gray-300"
-                    >
-                      选择当前页
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedServerFlightIds(new Set())}
-                      disabled={selectedServerFlightIds.size === 0 || !!syncBusy || !selectedModel.model_synced}
-                      title={selectedModel.model_synced ? '下载选中的架次到本地' : '请先在左侧同步机型'}
-                      className="text-gray-500 hover:text-gray-700 disabled:text-gray-300"
-                    >
-                      清空选择
-                    </button>
-                    <button
-                      type="button"
-                      onClick={downloadSelectedServerFlights}
-                      disabled={selectedServerFlightIds.size === 0 || !!syncBusy}
-                      className="px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
-                    >
-                      {syncBusy === 'pull' ? '正在下载...' : `下载选中架次 (${selectedServerFlightIds.size})`}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-            {showServerDownloadProgress && syncProgress && (
-              <div className="mb-4">
-                <SyncProgress progress={syncProgress} busy={syncBusy} />
-              </div>
-            )}
-
             {/* Left-right split: aircraft | columns (60:40) */}
             <div className="flex gap-6" style={{ height: 'calc(100% - 2.5rem)' }}>
               {/* Left: Aircraft & Flights (60%) */}
               <div className="min-w-0 overflow-y-auto" style={{ flex: '6' }}>
+                {/* Keep model actions with the flight list, outside the column-definition panel. */}
+                <div className="mb-4 flex min-h-8 flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-lg font-semibold text-gray-900">{selectedModel.name}</h2>
+                  {dataSource === 'server' && (
+                    <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
+                      <div className="text-gray-500">
+                        共 <span className="font-medium text-gray-800">{serverTotal}</span> 个架次，
+                        总航时 <span className="font-medium text-gray-800">{(serverDurationSec / 3600).toFixed(1)}</span> 小时
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={selectServerPage}
+                          disabled={serverDownloadablePageCount === 0 || !!syncBusy || !selectedModel.model_synced}
+                          title={selectedModel.model_synced ? '选择当前页未下载的架次' : '请先在左侧同步机型'}
+                          className="text-blue-600 hover:text-blue-500 disabled:text-gray-300"
+                        >
+                          选择当前页
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedServerFlightIds(new Set())}
+                          disabled={selectedServerFlightIds.size === 0 || !!syncBusy || !selectedModel.model_synced}
+                          title={selectedModel.model_synced ? '清空已选择的架次' : '请先在左侧同步机型'}
+                          className="text-gray-500 hover:text-gray-700 disabled:text-gray-300"
+                        >
+                          清空选择
+                        </button>
+                        <button
+                          type="button"
+                          onClick={downloadSelectedServerFlights}
+                          disabled={selectedServerFlightIds.size === 0 || !!syncBusy || !selectedModel.model_synced}
+                          title={selectedModel.model_synced ? '下载选中的架次到本地' : '请先在左侧同步机型'}
+                          className="px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
+                        >
+                          {syncBusy === 'pull' ? '正在下载...' : `下载选中架次 (${selectedServerFlightIds.size})`}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {showServerDownloadProgress && syncProgress && (
+                  <div className="mb-4">
+                    <SyncProgress progress={syncProgress} busy={syncBusy} />
+                  </div>
+                )}
+
                 {/* Add aircraft button */}
                 {dataSource === 'local' && <div className="flex items-center justify-end mb-3">
                   <button
