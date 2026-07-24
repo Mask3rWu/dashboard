@@ -12,14 +12,13 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine
 
 from .auth import hash_password, session_token_hash
+from .config import server_data_dir
 from .sync.protocol import model_structure_signature
 
 
 DEFAULT_SERVER_DB_URL = "mysql+pymysql://flight:flight@127.0.0.1:3306/flight_analyzer"
 SERVER_DB_URL = os.environ.get("SERVER_DB_URL", DEFAULT_SERVER_DB_URL)
-SERVER_DATA_DIR = os.path.abspath(
-    os.path.expanduser(os.environ.get("SERVER_DATA_DIR") or os.path.join(os.getcwd(), ".devdata", "server"))
-)
+SERVER_DATA_DIR = server_data_dir()
 SESSION_DAYS = 7
 
 _ENGINE: Engine | None = None

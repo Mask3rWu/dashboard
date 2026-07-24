@@ -23,7 +23,7 @@ host = 0.0.0.0
 port = 9000
 
 ; 用于存储上传的原始文件对象和生成的同步包。
-data_dir = D:\FlightAnalyzerServer\data
+data_dir = %APPDATA%\FlightAnalyzerServer
 
 [mysql]
 host = 127.0.0.1

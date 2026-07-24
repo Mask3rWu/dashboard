@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import os
-from pathlib import Path
 from typing import Sequence
 
 import uvicorn
 
-from backend.config import load_app_config, server_host, server_port
+from backend.config import load_app_config, server_data_dir, server_host, server_port
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -37,10 +35,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     config_path = load_app_config(args.config)
 
     if args.check_config or args.check_runtime:
-        data_dir = os.environ.get("SERVER_DATA_DIR") or str(Path.cwd() / ".devdata" / "server")
         print(f"config={config_path or '(not found)'}")
         print(f"listen={server_host()}:{server_port()}")
-        print(f"data_dir={Path(data_dir).expanduser().resolve()}")
+        print(f"data_dir={server_data_dir()}")
         if not args.check_runtime:
             return
 

@@ -121,3 +121,14 @@ def server_port(default: int = 9000) -> int:
         return int(value)
     except ValueError as exc:
         raise RuntimeError(f"SERVER_PORT must be an integer, got {value!r}") from exc
+
+
+def default_server_data_dir() -> str:
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "FlightAnalyzerServer")
+    return os.path.join(os.getcwd(), ".devdata", "server")
+
+
+def server_data_dir() -> str:
+    value = os.environ.get("SERVER_DATA_DIR") or default_server_data_dir()
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(value)))

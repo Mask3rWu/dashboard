@@ -34,6 +34,30 @@ def test_check_config_does_not_connect_to_mysql(tmp_path, monkeypatch, capsys):
     assert f"data_dir={data_dir.resolve()}" in output
 
 
+def test_check_config_expands_appdata_in_server_data_dir(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "flight_analyzer.ini"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[server]",
+                r"data_dir = %APPDATA%\FlightAnalyzerServer",
+                "",
+                "[mysql]",
+                "password = unused_by_check",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for name in ("SERVER_HOST", "SERVER_PORT", "SERVER_DATA_DIR", "SERVER_DB_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+    server_main.main(["--config", str(config_path), "--check-config"])
+
+    expected = tmp_path / "AppData" / "Roaming" / "FlightAnalyzerServer"
+    assert f"data_dir={expected.resolve()}" in capsys.readouterr().out
+
+
 def test_check_runtime_loads_mysql_driver_without_connecting(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "flight_analyzer.ini"
     config_path.write_text(
